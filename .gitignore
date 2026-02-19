@@ -1,0 +1,25 @@
+# Data
+data/
+
+# Virtual environment
+venv/
+
+# Trained models (root level only - not src/models/)
+/models/
+
+# Cache
+__pycache__/
+catboost_info/
+*.pyc
+*.pyo
+
+# Logs
+debug.log
+nul
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Colab generated
+colab_upload.zip

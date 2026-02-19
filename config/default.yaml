@@ -1,0 +1,124 @@
+# NBA Prediction System - Default Configuration
+
+# Data paths and storage settings
+data:
+  data_dir: "data"
+  models_dir: "models"
+  cache_dir: "cache"
+  raw_data_file: "nba_games.csv"
+  use_parquet: false
+  parquet_compression: "zstd"
+
+# Training configuration
+training:
+  targets:
+    - "PTS"
+    - "REB"
+    - "AST"
+    - "STL"
+    - "BLK"
+    - "TOV"
+  test_split_date: "2024-03-01"
+  temporal_decay_lambda: 0.023
+  outlier_percentile: 0.99
+  use_sample_weights: true
+  use_adversarial_validation: true
+  adversarial_threshold: 0.7
+  use_feature_selection: true
+  min_samples_per_player: 10
+
+# Feature engineering configuration
+features:
+  rolling_windows:
+    - 3
+    - 5
+    - 10
+  use_matchup_features: true
+  use_fatigue_features: true
+  use_momentum_features: true
+  use_contextual_features: true
+  max_lag_days: 7
+
+# Simulation configuration
+simulation:
+  default_num_sims: 1000
+  max_workers: 4
+  use_gpu: true
+  cache_rosters: true
+  injury_probability_threshold: 0.1
+  minutes_distribution: "dirichlet"
+  correlation_injection: true
+  clutch_adjustment: true
+
+# Logging configuration
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_dir: "logs"
+  max_bytes: 10000000
+  backup_count: 5
+
+# Model configurations
+catboost:
+  enabled: true
+  iterations: 2000
+  learning_rate: 0.03
+  depth: 6
+  l2_leaf_reg: 3.0
+  random_strength: 1.0
+  bagging_temperature: 0.5
+  border_count: 128
+  thread_count: -1
+  random_seed: 42
+  early_stopping_rounds: 100
+
+lstm:
+  enabled: true
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  learning_rate: 0.001
+  batch_size: 512
+  epochs: 100
+  patience: 10
+  random_seed: 42
+  sequence_length: 5
+  bidirectional: true
+
+transformer:
+  enabled: true
+  d_model: 128
+  nhead: 8
+  num_encoder_layers: 4
+  dim_feedforward: 512
+  max_seq_length: 10
+  hidden_size: 128
+  num_layers: 4
+  dropout: 0.2
+  learning_rate: 0.001
+  batch_size: 512
+  epochs: 100
+  patience: 10
+  random_seed: 42
+
+gnn:
+  enabled: true
+  num_node_features: 64
+  num_edge_features: 16
+  num_graph_layers: 3
+  hidden_size: 128
+  num_layers: 3
+  dropout: 0.2
+  learning_rate: 0.001
+  batch_size: 512
+  epochs: 100
+  patience: 10
+  random_seed: 42
+
+# Ensemble configuration
+ensemble:
+  enabled: true
+  method: "ridge"
+  cv_folds: 5
+  use_temporal_refinement: true
+  use_advanced_temporal: true
