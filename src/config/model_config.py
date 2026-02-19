@@ -138,6 +138,17 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
     # Scale factor normalized to T4 baseline (score=16)
     scale = max(1.0, score / 16.0)
     
+    # Pre-calculate values that need divisibility checks
+    _tx_nhead = _clamp(4 + int(scale / 4), 4, 16)
+    _tx_d_model = _clamp(int(128 * (scale ** 0.5)), 64, 768)
+    _tx_d_model = (_tx_d_model // _tx_nhead) * _tx_nhead
+    _tx_d_model = max(64, _tx_d_model)
+    
+    _temp_num_heads = _clamp(4 + int(scale / 5), 4, 12)
+    _temp_hidden = _clamp(int(128 * (scale ** 0.5)), 64, 512)
+    _temp_hidden = (_temp_hidden // _temp_num_heads) * _temp_num_heads
+    _temp_hidden = max(64, _temp_hidden)
+    
     config = {
         # ===== LSTM CONFIG =====
         'lstm': {
@@ -152,11 +163,6 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         },
         
         # ===== TRANSFORMER CONFIG =====
-        # Calculate nhead first, then ensure d_model is divisible by nhead
-        _tx_nhead = _clamp(4 + int(scale / 4), 4, 16)
-        _tx_d_model = _clamp(int(128 * (scale ** 0.5)), 64, 768)
-        _tx_d_model = (_tx_d_model // _tx_nhead) * _tx_nhead  # Ensure divisibility
-        _tx_d_model = max(64, _tx_d_model)  # Ensure minimum of 64
         'transformer': {
             'd_model': _tx_d_model,
             'nhead': _tx_nhead,
@@ -193,11 +199,6 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         },
         
         # ===== TEMPORAL ATTENTION CONFIG =====
-        # Calculate num_heads first, then ensure hidden_dim is divisible by num_heads
-        _temp_num_heads = _clamp(4 + int(scale / 5), 4, 12)
-        _temp_hidden = _clamp(int(128 * (scale ** 0.5)), 64, 512)
-        _temp_hidden = (_temp_hidden // _temp_num_heads) * _temp_num_heads  # Ensure divisibility
-        _temp_hidden = max(64, _temp_hidden)  # Ensure minimum of 64
         'temporal': {
             'hidden_dim': _temp_hidden,
             'num_heads': _temp_num_heads,
