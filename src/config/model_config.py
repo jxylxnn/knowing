@@ -152,9 +152,14 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         },
         
         # ===== TRANSFORMER CONFIG =====
+        # Calculate nhead first, then ensure d_model is divisible by nhead
+        _tx_nhead = _clamp(4 + int(scale / 4), 4, 16)
+        _tx_d_model = _clamp(int(128 * (scale ** 0.5)), 64, 768)
+        _tx_d_model = (_tx_d_model // _tx_nhead) * _tx_nhead  # Ensure divisibility
+        _tx_d_model = max(64, _tx_d_model)  # Ensure minimum of 64
         'transformer': {
-            'd_model': _clamp(int(128 * (scale ** 0.5)), 64, 768),
-            'nhead': _clamp(4 + int(scale / 4), 4, 16),
+            'd_model': _tx_d_model,
+            'nhead': _tx_nhead,
             'num_layers': _clamp(4 + int(scale / 6), 2, 12),
             'dim_feedforward': _clamp(int(512 * (scale ** 0.4)), 256, 2048),
             'dropout': min(0.25, 0.1 + scale * 0.005),
@@ -188,9 +193,14 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         },
         
         # ===== TEMPORAL ATTENTION CONFIG =====
+        # Calculate num_heads first, then ensure hidden_dim is divisible by num_heads
+        _temp_num_heads = _clamp(4 + int(scale / 5), 4, 12)
+        _temp_hidden = _clamp(int(128 * (scale ** 0.5)), 64, 512)
+        _temp_hidden = (_temp_hidden // _temp_num_heads) * _temp_num_heads  # Ensure divisibility
+        _temp_hidden = max(64, _temp_hidden)  # Ensure minimum of 64
         'temporal': {
-            'hidden_dim': _clamp(int(128 * (scale ** 0.5)), 64, 512),
-            'num_heads': _clamp(4 + int(scale / 5), 4, 12),
+            'hidden_dim': _temp_hidden,
+            'num_heads': _temp_num_heads,
             'dropout': min(0.25, 0.1 + scale * 0.005),
             'batch_size': _clamp(int(32 * scale), 32, 256),
             'epochs': _clamp(50 + int(scale * 1.5), 50, 150),
@@ -288,11 +298,15 @@ def _validate_memory(config: Dict[str, Any], vram_gb: float) -> Dict[str, Any]:
         
         # Scale down hidden dimensions
         config['lstm']['hidden_dim'] = int(config['lstm']['hidden_dim'] * scale_down)
-        config['transformer']['d_model'] = int(config['transformer']['d_model'] * scale_down)
+        # Ensure d_model remains divisible by nhead
+        _scaled_d_model = int(config['transformer']['d_model'] * scale_down)
+        config['transformer']['d_model'] = (_scaled_d_model // config['transformer']['nhead']) * config['transformer']['nhead']
         config['transformer']['dim_feedforward'] = int(config['transformer']['dim_feedforward'] * scale_down)
         config['nn']['hidden_dim'] = int(config['nn']['hidden_dim'] * scale_down)
         config['gnn']['hidden_dim'] = int(config['gnn']['hidden_dim'] * scale_down)
-        config['temporal']['hidden_dim'] = int(config['temporal']['hidden_dim'] * scale_down)
+        # Ensure temporal hidden_dim remains divisible by num_heads
+        _scaled_temp_hidden = int(config['temporal']['hidden_dim'] * scale_down)
+        config['temporal']['hidden_dim'] = (_scaled_temp_hidden // config['temporal']['num_heads']) * config['temporal']['num_heads']
         
         # Scale batch sizes
         config['lstm']['batch_size'] = int(config['lstm']['batch_size'] * scale_down)
