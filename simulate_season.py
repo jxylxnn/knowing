@@ -51,6 +51,9 @@ def main() -> None:
     parser.add_argument('--stat', type=str, default='mode', choices=['mode', 'mean', 'both'],
                        help='Statistic type to display: mode (most likely), mean (average), or both')
     parser.add_argument('--no-csv', action='store_true', help='Disable CSV export')
+    parser.add_argument('--data-dir', type=str, default='data', help='Data directory (default: data)')
+    parser.add_argument('--models-dir', type=str, default='models', help='Models directory (default: models)')
+    parser.add_argument('--output-dir', type=str, default=None, help='Output directory for projections (default: <data-dir>/sim_results)')
     
     args = parser.parse_args()
 
@@ -68,17 +71,17 @@ def main() -> None:
 
     # 1. Initialize Components
     try:
-        manager = ModelManager()
-        # Explicitly load models so they are available for the advanced simulator
+        output_dir = args.output_dir if args.output_dir else os.path.join(args.data_dir, 'sim_results')
+        
+        manager = ModelManager(data_dir=args.data_dir, models_dir=args.models_dir)
         manager._load_models()
         
-        # Check if core models exist
-        if not all(os.path.exists(f'models/{target.lower()}_catboost.cbm') for target in manager.core_targets):
-            print("\nError: CatBoost models not found in 'models/' directory.")
-            print("Please run 'python train.py' first to train your models.")
+        model_path = os.path.join(args.models_dir, 'pts_catboost.cbm')
+        if not os.path.exists(model_path):
+            print(f"\nError: Models not found in '{args.models_dir}' directory.")
+            print("Please run training first: python train.py --models-dir <path>")
             sys.exit(1)
             
-        # Pass advanced models if available (top-tier logic)
         game_sim = GameSimulator(
             manager, 
             gnn_model=manager.gnn_model, 
@@ -86,7 +89,7 @@ def main() -> None:
         )
         schedule_scraper = ScheduleScraper()
         season_sim = SeasonSimulator(game_sim, schedule_scraper)
-        report_gen = ReportGenerator()
+        report_gen = ReportGenerator(output_dir=output_dir)
         
     except Exception as e:
         logger.error(f"Failed to initialize components: {e}")
