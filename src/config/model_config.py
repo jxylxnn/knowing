@@ -224,7 +224,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'warmup_steps': _clamp(int(scale * 20), 0, 1000),
             'early_stop_patience': _clamp(15 + int(scale / 2), 15, 40),
             'label_smoothing': 0.05 if score > 20 else 0,
-            'use_compile': score > 30,  # torch.compile() for H100/A100
+            'use_compile': score > 10,
             'amp': True,  # Always use mixed precision
             'gradient_accumulation_steps': 1 if score > 10 else 2,
         },

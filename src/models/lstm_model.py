@@ -154,13 +154,17 @@ class LSTMWrapper:
         X = (X - self.feat_mean) / self.feat_std
         
         dataset = PlayerSequenceDataset(X, y)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=0)
+        num_workers = 4 if self.device.type == 'cuda' else 0
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=num_workers)
         
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         total_steps = epochs * len(loader)
         warmup_steps = int(total_steps * warmup_ratio)
         scheduler = WarmupScheduler(optimizer, warmup_steps, total_steps)
         criterion = nn.MSELoss()
+        
+        device_str = self.device.type
+        grad_scaler = torch.amp.GradScaler(device_str, enabled=(device_str == 'cuda'))
         
         self.model.train()
         for epoch in range(epochs):
@@ -170,11 +174,14 @@ class LSTMWrapper:
                 batch_y = batch_y.to(self.device, non_blocking=True)
                 
                 optimizer.zero_grad(set_to_none=True)
-                preds = self.model(batch_X)
-                loss = criterion(preds, batch_y)
-                loss.backward()
+                with torch.amp.autocast(device_str, enabled=(device_str == 'cuda')):
+                    preds = self.model(batch_X)
+                    loss = criterion(preds, batch_y)
+                grad_scaler.scale(loss).backward()
+                grad_scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                optimizer.step()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
                 scheduler.step()
                 total_loss += loss.item()
             

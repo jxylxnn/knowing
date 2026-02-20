@@ -64,8 +64,9 @@ class TransformerStatPredictor(nn.Module):
 def train_gpu_model(model, train_loader, val_loader, epochs=50, device='cpu'):
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    criterion = nn.HuberLoss() # More robust to outliers in NBA stats
-    scaler = torch.amp.GradScaler('cpu', enabled=False) # Mixed precision disabled for CPU
+    criterion = nn.HuberLoss()
+    device_str = device if isinstance(device, str) else device.type
+    scaler = torch.amp.GradScaler(device_str, enabled=(device_str == 'cuda'))
     
     best_loss = float('inf')
     
@@ -76,7 +77,7 @@ def train_gpu_model(model, train_loader, val_loader, epochs=50, device='cpu'):
             X, y = X.to(device), y.to(device)
             
             optimizer.zero_grad()
-            with torch.amp.autocast('cpu', enabled=False): # Autocast disabled for CPU
+            with torch.amp.autocast(device_str, enabled=(device_str == 'cuda')):
                 preds = model(X).squeeze()
                 loss = criterion(preds, y)
             

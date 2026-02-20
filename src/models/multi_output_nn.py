@@ -190,7 +190,7 @@ class MultiOutputWrapper:
         y_train_scaled = self.scaler_y.fit_transform(y_train)
         y_val_scaled = self.scaler_y.transform(y_val)
         
-        num_workers = 0 if self.device.type == 'cuda' else 4
+        num_workers = 4 if self.device.type == 'cuda' else 0
         train_loader = DataLoader(
             TensorDataset(
                 torch.tensor(X_train_scaled, dtype=torch.float32),
