@@ -3,6 +3,7 @@ NBA Data Updater - Fetches latest player and team game data from NBA.com.
 
 Usage:
     python update_data.py                           # Update current season
+    python update_data.py --update                  # Fetch only new games since last update (fast)
     python update_data.py --season 2024-25          # Specific season
     python update_data.py --all-seasons             # Last 10 seasons
     python update_data.py --interactive             # Interactive selection (RECOMMENDED)
@@ -14,7 +15,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Set
 
 import pandas as pd
@@ -64,6 +65,60 @@ def get_current_season() -> str:
         return f"{year}-{str(year + 1)[2:]}"
     else:
         return f"{year - 1}-{str(year)[2:]}"
+
+
+def get_latest_game_date(file_path: str) -> Optional[str]:
+    """Get the most recent game date from existing data."""
+    if not os.path.exists(file_path):
+        return None
+    
+    try:
+        df = pd.read_csv(file_path)
+        if 'GAME_DATE' not in df.columns or df.empty:
+            return None
+        
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+        latest = df['GAME_DATE'].max()
+        return latest.strftime('%Y-%m-%d')
+    except Exception as e:
+        logger.warning(f"Could not read latest game date: {e}")
+        return None
+
+
+def get_season_for_date(date_str: str) -> str:
+    """Determine which NBA season a date belongs to."""
+    date = datetime.strptime(date_str, '%Y-%m-%d')
+    year = date.year
+    month = date.month
+    
+    if month >= 10:
+        return f"{year}-{str(year + 1)[2:]}"
+    else:
+        return f"{year - 1}-{str(year)[2:]}"
+
+
+def get_seasons_between_dates(start_date: str, end_date: Optional[str] = None) -> List[str]:
+    """Get all NBA seasons that overlap with a date range."""
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    
+    if end_date:
+        end = datetime.strptime(end_date, '%Y-%m-%d')
+    else:
+        end = datetime.now()
+    
+    seasons = set()
+    current = start
+    
+    while current <= end:
+        season = get_season_for_date(current.strftime('%Y-%m-%d'))
+        if season in SEASONS:
+            seasons.add(season)
+        current = current.replace(year=current.year + 1) if current.month < 10 else current.replace(year=current.year + 1, month=1)
+    
+    if not seasons:
+        return [get_current_season()]
+    
+    return sorted(list(seasons), key=lambda s: SEASONS.index(s) if s in SEASONS else 999)
 
 
 def fetch_player_logs(season: str) -> Optional[pd.DataFrame]:
@@ -123,6 +178,70 @@ def fetch_team_logs(season: str) -> Optional[pd.DataFrame]:
         
     except Exception as e:
         logger.error(f"Error fetching team logs for {season}: {e}")
+        return None
+
+
+def fetch_player_logs_since(season: str, date_from: str) -> Optional[pd.DataFrame]:
+    """Fetch player game logs from a specific date onwards."""
+    logger.info(f"Fetching player game logs for {season} from {date_from}...")
+    
+    try:
+        result = playergamelogs.PlayerGameLogs(
+            season_nullable=season,
+            season_type_nullable='Regular Season',
+            date_from_nullable=date_from
+        )
+        df = result.get_data_frames()[0]
+        
+        if df.empty:
+            logger.info(f"No new player games for {season} since {date_from}")
+            return None
+        
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE']).dt.strftime('%Y-%m-%d')
+        
+        if 'FANTASY_PTS' not in df.columns:
+            df['FANTASY_PTS'] = (
+                df['PTS'] + 
+                1.2 * df['REB'] + 
+                1.5 * df['AST'] + 
+                2.0 * df['STL'] + 
+                2.0 * df['BLK'] - 
+                df['TOV']
+            )
+        
+        logger.info(f"Fetched {len(df)} new player game records for {season} since {date_from}")
+        time.sleep(RATE_LIMIT_DELAY)
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error fetching player logs for {season} since {date_from}: {e}")
+        return None
+
+
+def fetch_team_logs_since(season: str, date_from: str) -> Optional[pd.DataFrame]:
+    """Fetch team game logs from a specific date onwards."""
+    logger.info(f"Fetching team game logs for {season} from {date_from}...")
+    
+    try:
+        result = teamgamelogs.TeamGameLogs(
+            season_nullable=season,
+            season_type_nullable='Regular Season',
+            date_from_nullable=date_from
+        )
+        df = result.get_data_frames()[0]
+        
+        if df.empty:
+            logger.info(f"No new team games for {season} since {date_from}")
+            return None
+        
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE']).dt.strftime('%Y-%m-%d')
+        
+        logger.info(f"Fetched {len(df)} new team game records for {season} since {date_from}")
+        time.sleep(RATE_LIMIT_DELAY)
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error fetching team logs for {season} since {date_from}: {e}")
         return None
 
 
@@ -299,6 +418,55 @@ def update_season(season: str, existing_players: Optional[pd.DataFrame],
     return existing_players, existing_teams
 
 
+def update_since_date(date_from: str, existing_players: Optional[pd.DataFrame], 
+                      existing_teams: Optional[pd.DataFrame]) -> tuple:
+    """Fetch only new games since the specified date."""
+    seasons = get_seasons_between_dates(date_from)
+    
+    total_new_players = 0
+    total_new_teams = 0
+    
+    for season in seasons:
+        logger.info(f"\n{'='*50}")
+        logger.info(f"Fetching new games for {season} since {date_from}")
+        logger.info(f"{'='*50}")
+        
+        player_df = fetch_player_logs_since(season, date_from)
+        team_df = fetch_team_logs_since(season, date_from)
+        
+        if player_df is not None:
+            if existing_players is not None:
+                before_count = len(existing_players)
+                existing_players = merge_data(
+                    existing_players, player_df, 
+                    ['PLAYER_ID', 'GAME_ID']
+                )
+                after_count = len(existing_players)
+                new_count = after_count - before_count
+            else:
+                existing_players = player_df
+                new_count = len(player_df)
+            total_new_players += new_count
+            logger.info(f"Added {new_count} new player game records")
+        
+        if team_df is not None:
+            if existing_teams is not None:
+                before_count = len(existing_teams)
+                existing_teams = merge_data(
+                    existing_teams, team_df,
+                    ['TEAM_ID', 'GAME_ID']
+                )
+                after_count = len(existing_teams)
+                new_count = after_count - before_count
+            else:
+                existing_teams = team_df
+                new_count = len(team_df)
+            total_new_teams += new_count
+            logger.info(f"Added {new_count} new team game records")
+    
+    return existing_players, existing_teams, total_new_players, total_new_teams
+
+
 def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame):
     os.makedirs(DATA_DIR, exist_ok=True)
     
@@ -319,6 +487,7 @@ def main():
         epilog="""
 Examples:
   python update_data.py                    # Update current season
+  python update_data.py --update           # Fetch only new games since last update (fast)
   python update_data.py --season 2024-25   # Fetch specific season
   python update_data.py --all-seasons      # Last 10 seasons
   python update_data.py --interactive      # Interactive selection (RECOMMENDED)
@@ -336,6 +505,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
                         help='Interactive season selection menu')
     parser.add_argument('--full-scrape', action='store_true',
                         help='Fetch ALL NBA seasons since 1946-47')
+    parser.add_argument('--update', action='store_true',
+                        help='Fetch only new games since the last game in dataset (incremental update)')
     parser.add_argument('--force', action='store_true', 
                         help='Force re-fetch all data (ignore existing)')
     parser.add_argument('--data-dir', type=str, default='data',
@@ -352,9 +523,37 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
     os.makedirs(DATA_DIR, exist_ok=True)
     
     seasons = None
+    incremental_update = False
+    date_from = None
     
     if args.interactive:
         seasons = select_seasons_interactive()
+    elif args.update:
+        incremental_update = True
+        latest_date = get_latest_game_date(PLAYERS_FILE)
+        
+        if latest_date:
+            date_obj = datetime.strptime(latest_date, '%Y-%m-%d')
+            date_from = (date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            if date_from > today:
+                logger.info("\n" + "=" * 50)
+                logger.info("Dataset is already up to date!")
+                logger.info(f"Latest game: {latest_date}")
+                logger.info("=" * 50)
+                return
+            
+            print(f"\n{'='*50}")
+            print("INCREMENTAL UPDATE MODE")
+            print(f"{'='*50}")
+            print(f"Latest game in dataset: {latest_date}")
+            print(f"Fetching games from: {date_from}")
+            print(f"{'='*50}\n")
+        else:
+            logger.info("No existing data found. Switching to current season fetch.")
+            incremental_update = False
+            seasons = [get_current_season()]
     elif args.full_scrape:
         seasons = SEASONS
         print(f"\nFull scrape: All {len(seasons)} NBA seasons will be fetched.")
@@ -376,8 +575,9 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         else:
             seasons = [get_current_season()]
     
-    logger.info(f"Seasons to update: {seasons}")
-    logger.info(f"Total: {len(seasons)} season(s)")
+    if seasons:
+        logger.info(f"Seasons to update: {seasons}")
+        logger.info(f"Total: {len(seasons)} season(s)")
     
     if args.force:
         existing_players = None
@@ -387,25 +587,42 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         existing_players = load_existing_data(PLAYERS_FILE)
         existing_teams = load_existing_data(GAMES_FILE)
     
-    for i, season in enumerate(seasons, 1):
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Processing season: {season} ({i}/{len(seasons)})")
-        logger.info(f"{'='*50}")
-        
-        existing_players, existing_teams = update_season(
-            season, existing_players, existing_teams
+    if incremental_update and date_from:
+        existing_players, existing_teams, new_players, new_teams = update_since_date(
+            date_from, existing_players, existing_teams
         )
-    
-    if existing_players is not None and existing_teams is not None:
-        save_data(existing_players, existing_teams)
-        logger.info("\n" + "=" * 50)
-        logger.info("Data update complete!")
-        logger.info(f"Total player records: {len(existing_players)}")
-        logger.info(f"Total team records: {len(existing_teams)}")
-        logger.info("=" * 50)
+        
+        if existing_players is not None and existing_teams is not None:
+            save_data(existing_players, existing_teams)
+            logger.info("\n" + "=" * 50)
+            logger.info("Incremental update complete!")
+            logger.info(f"New player records added: {new_players}")
+            logger.info(f"New team records added: {new_teams}")
+            logger.info(f"Total player records: {len(existing_players)}")
+            logger.info(f"Total team records: {len(existing_teams)}")
+            logger.info("=" * 50)
+        else:
+            logger.info("No new games found. Dataset is up to date.")
     else:
-        logger.error("No data was fetched. Please check your connection.")
-        sys.exit(1)
+        for i, season in enumerate(seasons, 1):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Processing season: {season} ({i}/{len(seasons)})")
+            logger.info(f"{'='*50}")
+            
+            existing_players, existing_teams = update_season(
+                season, existing_players, existing_teams
+            )
+        
+        if existing_players is not None and existing_teams is not None:
+            save_data(existing_players, existing_teams)
+            logger.info("\n" + "=" * 50)
+            logger.info("Data update complete!")
+            logger.info(f"Total player records: {len(existing_players)}")
+            logger.info(f"Total team records: {len(existing_teams)}")
+            logger.info("=" * 50)
+        else:
+            logger.error("No data was fetched. Please check your connection.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
