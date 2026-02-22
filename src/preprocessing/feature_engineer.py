@@ -6,13 +6,201 @@ from scipy import stats
 
 logger = logging.getLogger(__name__)
 
-class FeatureEngineer:
-    """High-Performance Feature Engineering with Contextual Normalization."""
+
+class GPURollingFeatures:
+    """GPU-accelerated rolling feature calculations using PyTorch."""
     
-    def __init__(self, rolling_windows: List[int] = [3, 5, 10, 20, 50]):
+    def __init__(self, windows: List[int] = None):
+        self.windows = windows or [3, 5, 10, 20, 50]
+        self.device = None
+        self._initialized = False
+    
+    def _init_device(self):
+        """Lazy initialization of GPU device."""
+        if self._initialized:
+            return self.device is not None
+        
+        self._initialized = True
+        try:
+            from src.models.gpu_utils import check_gpu_compatibility, get_device
+            if check_gpu_compatibility():
+                self.device = get_device()
+                import torch
+                logger.info(f"GPURollingFeatures initialized on {self.device}")
+                return True
+        except ImportError:
+            pass
+        
+        self.device = None
+        return False
+    
+    def compute_rolling_stats_per_player(
+        self, 
+        tensor_data: 'torch.Tensor', 
+        player_indices: np.ndarray,
+        window: int,
+        stats: List[str] = None
+    ) -> 'torch.Tensor':
+        """
+        Compute rolling statistics per player on GPU.
+        
+        Args:
+            tensor_data: 1D tensor of values for all players
+            player_indices: Array mapping each row to a player
+            window: Rolling window size
+            stats: Statistics to compute
+        
+        Returns:
+            2D tensor of shape (n_samples, n_stats)
+        """
+        import torch
+        
+        if stats is None:
+            stats = ['mean', 'std', 'min', 'max']
+        
+        n_samples = len(tensor_data)
+        n_stats = len(stats)
+        result = torch.zeros((n_samples, n_stats), dtype=torch.float32, device=self.device)
+        
+        # Get unique players and their boundaries
+        unique_players, player_starts = np.unique(player_indices, return_index=True)
+        player_order = np.argsort(player_starts)
+        sorted_players = unique_players[player_order]
+        sorted_starts = player_starts[player_order]
+        
+        # Add end boundary
+        player_ends = np.concatenate([sorted_starts[1:], [n_samples]])
+        
+        for i, player_id in enumerate(sorted_players):
+            start = sorted_starts[i]
+            end = player_ends[i]
+            player_data = tensor_data[start:end]
+            
+            if len(player_data) < 1:
+                continue
+            
+            # Create rolling windows using unfold
+            # Pad with NaN at start
+            padded = torch.nn.functional.pad(player_data, (window - 1, 0), value=float('nan'))
+            windows = padded.unfold(0, window, 1)
+            
+            col_idx = 0
+            for stat in stats:
+                if stat == 'mean':
+                    result[start:end, col_idx] = windows.nanmean(dim=1)
+                elif stat == 'std':
+                    result[start:end, col_idx] = windows.nanstd(dim=1)
+                elif stat == 'min':
+                    mins, _ = windows.nanmin(dim=1)
+                    result[start:end, col_idx] = mins
+                elif stat == 'max':
+                    maxs, _ = windows.nanmax(dim=1)
+                    result[start:end, col_idx] = maxs
+                col_idx += 1
+        
+        return result
+    
+    def process_dataframe(
+        self, 
+        df: pd.DataFrame, 
+        group_col: str,
+        value_cols: List[str],
+        windows: List[int] = None,
+        stats: List[str] = None,
+        shift: int = 1
+    ) -> pd.DataFrame:
+        """
+        Process DataFrame to add GPU-accelerated rolling features.
+        
+        Args:
+            df: Input DataFrame (must be sorted by group_col and date)
+            group_col: Column to group by (e.g., 'PLAYER_ID')
+            value_cols: Columns to compute rolling stats on
+            windows: Window sizes (uses self.windows if None)
+            stats: Statistics to compute ['mean', 'std', 'min', 'max']
+            shift: Number of rows to shift before computing (for leakage prevention)
+        
+        Returns:
+            DataFrame with added rolling feature columns
+        """
+        if not self._init_device():
+            return None  # Signal that CPU should be used
+        
+        import torch
+        
+        windows = windows or self.windows
+        stats = stats or ['mean', 'std']
+        
+        result_cols = {}
+        player_indices = df[group_col].values
+        
+        logger.info(f"GPU Rolling: Computing stats for {len(value_cols)} columns, {len(windows)} windows")
+        
+        for col in value_cols:
+            if col not in df.columns:
+                continue
+            
+            # Shift to prevent leakage
+            shifted_values = df[col].shift(shift).values
+            
+            # Convert to tensor
+            col_tensor = torch.tensor(shifted_values, dtype=torch.float32, device=self.device)
+            
+            for window in windows:
+                # Determine which stats to compute based on window size
+                window_stats = ['mean']
+                if window >= 5:
+                    window_stats.append('std')
+                if window >= 10:
+                    window_stats.extend(['min', 'max'])
+                
+                # Compute on GPU
+                stats_tensor = self.compute_rolling_stats_per_player(
+                    col_tensor, player_indices, window, window_stats
+                )
+                
+                # Move back to CPU and create columns
+                stats_np = stats_tensor.cpu().numpy()
+                
+                for i, stat in enumerate(window_stats):
+                    feat_name = f'ROLL_{col}_{stat.upper()}_{window}'
+                    result_cols[feat_name] = stats_np[:, i]
+        
+        # Clear GPU memory
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # Create result DataFrame
+        result_df = pd.DataFrame(result_cols, index=df.index)
+        
+        logger.info(f"GPU Rolling: Added {len(result_cols)} columns")
+        return result_df
+
+
+class FeatureEngineer:
+    """High-Performance Feature Engineering with GPU Acceleration Support."""
+    
+    def __init__(self, rolling_windows: List[int] = [3, 5, 10, 20, 50], use_gpu: bool = True):
         self.rolling_windows = rolling_windows
         self.target_cols = ['PTS', 'REB', 'AST']
         self.efficiency_cols = ['FGA', 'FGM', 'FTA', 'FTM', 'FG3M', 'FG3A', 'TOV', 'MIN']
+        self.use_gpu = use_gpu
+        self._gpu_roller = None
+        
+        if use_gpu:
+            self._init_gpu()
+    
+    def _init_gpu(self):
+        """Initialize GPU rolling feature calculator."""
+        try:
+            self._gpu_roller = GPURollingFeatures(windows=self.rolling_windows)
+            if self._gpu_roller._init_device():
+                logger.info("FeatureEngineer initialized with GPU acceleration")
+            else:
+                logger.info("GPU not available, using CPU for feature engineering")
+                self._gpu_roller = None
+        except Exception as e:
+            logger.warning(f"GPU initialization failed: {e}. Using CPU.")
+            self._gpu_roller = None
 
     def create_features(self, df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
         """
@@ -44,9 +232,22 @@ class FeatureEngineer:
         # Remove rows with invalid dates before proceeding
         df = df.dropna(subset=['GAME_DATE'])
         
-        # Phase 1: Base Rolling Features
+        # Phase 1: Base Rolling Features (GPU-accelerated if available)
         logger.info("Phase 1/15: Creating Rolling Features...")
-        df = self._create_rolling_features_vectorized(df)
+        if self._gpu_roller is not None and len(df) > 10000:
+            # Use GPU for large datasets
+            try:
+                rolling_df = self._create_rolling_features_gpu(df)
+                if rolling_df is not None:
+                    df = pd.concat([df, rolling_df], axis=1)
+                    logger.info("Used GPU-accelerated rolling features")
+                else:
+                    df = self._create_rolling_features_vectorized(df)
+            except Exception as e:
+                logger.warning(f"GPU rolling failed: {e}. Falling back to CPU.")
+                df = self._create_rolling_features_vectorized(df)
+        else:
+            df = self._create_rolling_features_vectorized(df)
         
         # Phase 2: Efficiency
         logger.info("Phase 2/15: Creating Efficiency Features...")
@@ -140,6 +341,26 @@ class FeatureEngineer:
             logger.info(f"Processed chunk {i//chunk_size + 1}/{(len(df)//chunk_size)+1}")
         
         return pd.concat(chunks, ignore_index=True)
+    
+    def _create_rolling_features_gpu(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """GPU-accelerated rolling feature computation."""
+        if self._gpu_roller is None:
+            return None
+        
+        stat_cols = self.target_cols + self.efficiency_cols
+        valid_cols = [c for c in stat_cols if c in df.columns]
+        
+        try:
+            return self._gpu_roller.process_dataframe(
+                df=df,
+                group_col='PLAYER_ID',
+                value_cols=valid_cols,
+                windows=self.rolling_windows,
+                shift=1  # Prevent leakage
+            )
+        except Exception as e:
+            logger.warning(f"GPU rolling computation failed: {e}")
+            return None
 
     def _create_rolling_features_vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -305,22 +526,15 @@ class FeatureEngineer:
             # Shift first to avoid leakage
             shifted = groups[stat].shift(1)
             
-            # --- FIX START ---
             # Expanding mean using direct method.
-            # The 'shifted' Series has the same index as 'df' (single level), not a MultiIndex.
-            # Therefore, we must group by the actual columns, not levels.
             expanded_mean = shifted.groupby([df['PLAYER_ID'], df['OPPONENT_ID']]).expanding().mean()
             expanded_mean = expanded_mean.reset_index(level=[0, 1], drop=True)
-            # --- FIX END ---
             
             new_cols[f'VS_OPP_{stat}_AVG'] = expanded_mean
             
             # Recent average vs opponent (last 5) - Rolling
-            # --- FIX START ---
-            # Apply the same fix to the rolling window calculation
             recent_mean = shifted.groupby([df['PLAYER_ID'], df['OPPONENT_ID']]).rolling(5, min_periods=1).mean()
             recent_mean = recent_mean.reset_index(level=[0, 1], drop=True)
-            # --- FIX END ---
             
             new_cols[f'VS_OPP_{stat}_RECENT'] = recent_mean
 

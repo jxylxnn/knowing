@@ -13,7 +13,7 @@ from src.models.transformer_model import TransformerWrapper
 from src.models.gnn_model import GNNWrapper
 from src.models.temporal_attention import TemporalAttentionWrapper
 from src.models.advanced_trainer import AdvancedTrainer
-from src.models.gpu_utils import check_gpu_compatibility, get_device
+from src.models.gpu_utils import check_gpu_compatibility, get_device, clear_gpu_memory, log_gpu_memory
 from src.config.model_config import get_model_config, save_model_config, print_config_summary
 
 logger = logging.getLogger(__name__)
@@ -48,12 +48,16 @@ class ModelManager:
         self.gnn_model: Optional[GNNWrapper] = None
         
         self.blenders: Dict[str, Any] = {}
+        self._gpu_blenders: Dict[str, Any] = {}  # GPU-accelerated blenders for inference
         self.feature_cols: Optional[List[str]] = None
-        self.feature_engineer = FeatureEngineer()
         self.advanced_trainer: Optional[AdvancedTrainer] = None
         
+        # Check GPU compatibility before initializing feature engineer
         self.use_gpu = check_gpu_compatibility()
         self.device = get_device()
+        
+        # Initialize feature engineer with GPU flag
+        self.feature_engineer = FeatureEngineer(use_gpu=self.use_gpu)
         
         if model_config is not None:
             self.model_config = model_config
@@ -349,9 +353,14 @@ class ModelManager:
                     use_best_model=True
                 )
             
-            self.models[target] = model 
+        self.models[target] = model 
             model.save_model(os.path.join(self.models_dir, f'{target.lower()}_catboost.cbm'))
-            
+        
+        # Clear GPU memory after CatBoost training
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After CatBoost")
+        
         # 6. Joint NN (using numerical subset of optimized features)
         nn_features = [c for c in self.feature_cols if c not in cat_cols]
         X_fit_nn = fit_df[nn_features]
@@ -366,6 +375,11 @@ class ModelManager:
         )
         self.joint_model.fit(X_fit_nn, fit_df[self.core_targets])
         self.joint_model.save(os.path.join(self.models_dir, 'joint_stats_nn.pkl'))
+        
+        # Clear GPU memory after NN training
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After Joint NN")
 
         # 7. Temporal Models
         lstm_config = self.model_config.get('lstm', {})
@@ -375,12 +389,22 @@ class ModelManager:
         self.temporal_model.fit(fit_df, nn_features, self.core_targets)
         self.temporal_model.save(os.path.join(self.models_dir, 'temporal_lstm.pkl'))
         
+        # Clear GPU memory after LSTM training
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After LSTM")
+        
         tx_config = self.model_config.get('transformer', {})
         logger.info("Training Transformer...")
         logger.info(f"  Config: d_model={tx_config.get('d_model', 128)}, heads={tx_config.get('nhead', 8)}, layers={tx_config.get('num_layers', 4)}")
         self.attention_model = TransformerWrapper(input_dim=len(nn_features), seq_len=50, config=tx_config)
         self.attention_model.fit(fit_df, nn_features, self.core_targets)
         self.attention_model.save(os.path.join(self.models_dir, 'attention_transformer.pkl'))
+        
+        # Clear GPU memory after Transformer training
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After Transformer")
 
         # 8. GNN
         gnn_config = self.model_config.get('gnn', {})
@@ -390,6 +414,11 @@ class ModelManager:
         self.gnn_model.fit(fit_df, nn_features, self.core_targets)
         self.gnn_model.save(os.path.join(self.models_dir, 'team_chemistry_gnn.pkl'))
         
+        # Clear GPU memory after GNN training
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After GNN")
+        
         # 9. Train Blender
         self._train_blender(val_df)
         self._save_blenders()
@@ -397,9 +426,8 @@ class ModelManager:
 
     def _train_blender(self, val_df: pd.DataFrame):
         """
-        Trains the meta-learner (Linear Blender) using robust regression (Ridge).
+        Trains the meta-learner (Linear Blender) using GPU-accelerated training when available.
         """
-        from sklearn.linear_model import Ridge
         import numpy as np
         
         logger.info("Training Super Learner (Blender)...")
@@ -415,14 +443,12 @@ class ModelManager:
             model = self.models[target]
             X_val = val_df[self.feature_cols]
             
-            # --- FIX START ---
             # Check if the model is CatBoost. CatBoost does not accept 'df_meta' as a second arg.
             if 'CatBoost' in str(type(model)):
                 p = model.predict(X_val)
             else:
                 # Fallback for custom StackedEnsemble models
                 p = model.predict(X_val, val_df)
-            # --- FIX END ---
             
             ens_preds_list.append(p.reshape(-1, 1))
         
@@ -439,17 +465,43 @@ class ModelManager:
         else:
             meta_features = ens_meta
         
-        # Train blenders
+        # Train blenders - use GPU-accelerated blender if available
         self.blenders = {}
+        self._gpu_blenders = {}  # Store GPU blenders separately for prediction
+        
+        if self.use_gpu:
+            try:
+                from src.models.advanced_trainer import GPUBlender
+                logger.info("Using GPU-accelerated blender")
+                use_gpu_blender = True
+            except ImportError:
+                logger.info("GPUBlender not available, using sklearn Ridge")
+                use_gpu_blender = False
+        else:
+            use_gpu_blender = False
+        
         for i, target in enumerate(self.core_targets):
             y_target = blender_y[:, i]
             
-            blender = Ridge(alpha=5.0)
-            blender.fit(meta_features, y_target)
-            self.blenders[target] = blender
-            
-            logger.info(f"{target} Blender Weights: {blender.coef_}")
-            logger.info(f"{target} Blend Intercept: {blender.intercept_:.4f}")
+            if use_gpu_blender:
+                # GPU blender
+                blender = GPUBlender(input_dim=meta_features.shape[1], device=self.device)
+                blender.fit(meta_features, y_target, epochs=100, lr=1e-2)
+                self._gpu_blenders[target] = blender
+                # Also create sklearn Ridge for compatibility/loading
+                from sklearn.linear_model import Ridge
+                sklearn_blender = Ridge(alpha=5.0)
+                sklearn_blender.fit(meta_features, y_target)
+                self.blenders[target] = sklearn_blender
+                logger.info(f"{target} Blender (GPU) - Coefficients available at inference time")
+            else:
+                # CPU fallback
+                from sklearn.linear_model import Ridge
+                blender = Ridge(alpha=5.0)
+                blender.fit(meta_features, y_target)
+                self.blenders[target] = blender
+                logger.info(f"{target} Blender Weights: {blender.coef_}")
+                logger.info(f"{target} Blend Intercept: {blender.intercept_:.4f}")
 
 
     def _save_blenders(self):
