@@ -89,7 +89,9 @@ class GPURollingFeatures:
                 if stat == 'mean':
                     result[start:end, col_idx] = windows.nanmean(dim=1)
                 elif stat == 'std':
-                    result[start:end, col_idx] = windows.nanstd(dim=1)
+                    mean = windows.nanmean(dim=1, keepdim=True)
+                    variance = ((windows - mean) ** 2).nanmean(dim=1)
+                    result[start:end, col_idx] = torch.sqrt(variance)
                 elif stat == 'min':
                     mins, _ = windows.nanmin(dim=1)
                     result[start:end, col_idx] = mins

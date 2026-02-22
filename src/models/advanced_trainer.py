@@ -64,14 +64,14 @@ class GPUAdversarialValidator:
         except ImportError:
             raise ImportError("PyTorch required for GPUAdversarialValidator")
     
-    def fit(self, X_train: np.ndarray, X_val: np.ndarray, epochs: int = 50, 
+    def fit(self, X: np.ndarray, y: np.ndarray, epochs: int = 50, 
             batch_size: int = 4096) -> 'GPUAdversarialValidator':
         """
         Train classifier to distinguish train from validation.
         
         Args:
-            X_train: Training features
-            X_val: Validation features
+            X: Feature matrix
+            y: Labels (0=train, 1=val)
             epochs: Number of training epochs
             batch_size: Batch size for training
         
@@ -84,10 +84,6 @@ class GPUAdversarialValidator:
         from torch.utils.data import DataLoader, TensorDataset
         
         self._init_model()
-        
-        # Create labels: 0=train, 1=val
-        X = np.vstack([X_train, X_val])
-        y = np.concatenate([np.zeros(len(X_train)), np.ones(len(X_val))])
         
         X_tensor = torch.tensor(X, dtype=torch.float32)
         y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
