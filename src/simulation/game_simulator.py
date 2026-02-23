@@ -184,7 +184,7 @@ class GameSimulator:
         Builds full roster context for batch prediction with caching.
         """
         # Check cache first
-        cache_key = self._get_cache_key(team, opponent, is_home)
+        cache_key = self._get_cache_key(team, opponent, is_home, tuple(sorted(injury_probs.items())))
         cached_result = self._load_from_cache(cache_key)
         if cached_result is not None:
             return cached_result
@@ -307,9 +307,7 @@ class GameSimulator:
         lineup_a = self.lineup_scraper.get_starting_lineup(team_a)
         lineup_b = self.lineup_scraper.get_starting_lineup(team_b)
         
-        # --- NEW: Get opponent defensive matchup factors ---
-        matchup_factors_a = {}
-        matchup_factors_b = {}
+        # TODO: Defensive matchup integration is not yet implemented
         
         injury_probs_a = self.injury_scraper.get_player_availability(team_a)
         injury_probs_b = self.injury_scraper.get_player_availability(team_b)
@@ -331,7 +329,6 @@ class GameSimulator:
         # --- VECTORIZED GPU SIMULATION ---
         results = {team_a: {}, team_b: {}, 'player_stats': {}}
         rng = torch.Generator(device=self.device)
-        rng.manual_seed(42)
         
         # Global Game Factors
         pace_factor = torch.clamp(torch.normal(1.0, 0.05, size=(num_sims, 1), generator=rng, device=self.device), 0.88, 1.15)

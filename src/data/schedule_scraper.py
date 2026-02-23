@@ -39,13 +39,13 @@ class ScheduleScraper:
                 1610612737: 'ATL', 1610612738: 'BOS', 1610612739: 'CLE',
                 1610612740: 'NOP', 1610612741: 'CHI', 1610612742: 'DAL',
                 1610612743: 'DEN', 1610612744: 'GSW', 1610612745: 'HOU',
-                1610612746: 'IND', 1610612747: 'LAC', 1610612748: 'LAL',
-                1610612749: 'MEM', 1610612750: 'MIA', 1610612751: 'MIL',
-                1610612752: 'MIN', 1610612753: 'BKN', 1610612754: 'NYK',
-                1610612755: 'ORL', 1610612756: 'PHI', 1610612757: 'PHX',
-                1610612758: 'POR', 1610612759: 'SAC', 1610612760: 'SAS',
-                1610612761: 'OKC', 1610612762: 'TOR', 1610612763: 'UTA',
-                1610612764: 'WAS', 1610612765: 'DET', 1610612766: 'CHA',
+                1610612746: 'LAC', 1610612747: 'LAL', 1610612748: 'MIA',
+                1610612749: 'MIL', 1610612750: 'MIN', 1610612751: 'BKN',
+                1610612752: 'NYK', 1610612753: 'ORL', 1610612754: 'IND',
+                1610612755: 'PHI', 1610612756: 'PHX', 1610612757: 'POR',
+                1610612758: 'SAC', 1610612759: 'SAS', 1610612760: 'OKC',
+                1610612761: 'TOR', 1610612762: 'UTA', 1610612763: 'WAS',
+                1610612764: 'DET', 1610612765: 'CHA', 1610612766: 'MEM',
             }
 
     def get_todays_games(self) -> pd.DataFrame:
@@ -147,11 +147,22 @@ class ScheduleScraper:
         
         return pd.DataFrame()
 
-    def get_remaining_season(self, season: str = '2024-25') -> pd.DataFrame:
+    def _get_current_season(self) -> str:
+        """Dynamically compute the current NBA season string."""
+        now = datetime.now()
+        year = now.year
+        if now.month >= 10:
+            return f"{year}-{str(year + 1)[2:]}"
+        else:
+            return f"{year - 1}-{str(year)[2:]}"
+
+    def get_remaining_season(self, season: Optional[str] = None) -> pd.DataFrame:
         """
         Fetches all remaining unplayed games for the season.
         This is heavier and uses leaguegamefinder.
         """
+        if season is None:
+            season = self._get_current_season()
         cache_file = os.path.join(self.cache_dir, f"remaining_season_{season.replace('-', '_')}.csv")
         
         # Check cache (24 hour expiry)
