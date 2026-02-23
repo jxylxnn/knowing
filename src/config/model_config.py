@@ -221,6 +221,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         
         # ===== TRAINING CONFIG =====
         'training': {
+            'test_split_date': '2024-03-01',
             'warmup_steps': _clamp(int(scale * 20), 0, 1000),
             'early_stop_patience': _clamp(15 + int(scale / 2), 15, 40),
             'label_smoothing': 0.05 if score > 20 else 0,

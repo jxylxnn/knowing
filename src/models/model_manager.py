@@ -122,7 +122,9 @@ class ModelManager:
         if missing_cols:
             raise ValueError(f"Missing required columns after feature engineering: {missing_cols}")
         
-        split_date = pd.to_datetime('2016-03-01')
+        split_date_str = self.training_config.get('test_split_date', '2024-03-01')
+        split_date = pd.to_datetime(split_date_str)
+        logger.info(f"Using train/test split date: {split_date_str}")
         train_df = full_df[full_df['GAME_DATE'] < split_date].copy()
         test_df = full_df[full_df['GAME_DATE'] >= split_date].copy()
         
@@ -183,40 +185,79 @@ class ModelManager:
         return df
 
     def _select_features(self, df: pd.DataFrame) -> List[str]:
-        """Select features, avoiding leakage."""
-        # Dynamically select all numerical features, excluding IDs, dates, and targets
-        exclude_cols = [
+        """Select features, avoiding leakage.
+        
+        Uses a two-pass approach:
+        1. Exclude known non-feature columns (IDs, dates, raw targets)
+        2. Block any column that exactly matches a target or looks like an
+           unshifted derivative (e.g. raw team/opponent stats without ROLL/EWMA prefix)
+        """
+        # Columns that are never features
+        exclude_cols = {
             'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
-            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR', 
-            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE'
-        ] + self.targets + self.secondary_targets
+            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
+            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
+        }
+        exclude_cols.update(self.targets)
+        exclude_cols.update(self.secondary_targets)
         
-        # Initial selection of candidate features
+        # Prefixes/substrings that indicate a safe, time-shifted feature
+        SAFE_PREFIXES = (
+            'ROLL_', 'EWMA_', 'VS_OPP_', 'PROJ_', 'LEAGUE_PCT_',
+        )
+        SAFE_SUBSTRINGS = {
+            'TREND', 'BAYESIAN', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX',
+            'SEASON_AVG', 'SEASON_SIN', 'SEASON_COS', 'HOT_STREAK', 'COLD_STREAK',
+            'POTENTIAL', 'B2B_IMPACT', 'FATIGUE', 'EFF_Z_SCORE', 'FANTASY',
+            'SOS_', 'PACE_ADJ',
+        }
+        # Exact column names that are safe contextual features (not derived from targets)
+        SAFE_EXACT = {
+            'IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
+            'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK',
+            'CLOSE_GAME', 'EXP_MARGIN', 'DAYS_SINCE_LAST', 'MINS_LAST_3',
+            'MINS_LAST_7', 'EST_POSS', 'TEAM_PACE_10', 'PACE_FACTOR',
+            'STAR_TEAMMATE_OUT',
+        }
+        
+        # Raw target names (lowercase) for fuzzy matching
+        target_names_lower = {t.lower() for t in self.targets + self.secondary_targets}
+        
+        # Initial numeric-only filter
         feature_cols = [
-            c for c in df.columns 
-            if c not in exclude_cols and 
-            (df[c].dtype in ['int64', 'float64', 'int32', 'float32', 'float', 'int'])
+            c for c in df.columns
+            if c not in exclude_cols
+            and df[c].dtype in ('int64', 'float64', 'int32', 'float32', 'float', 'int')
         ]
         
-        # DIAGNOSTIC: Check for leakage
-        leaky_suspects = [c for c in feature_cols if any(t.lower() in c.lower() for t in self.targets)]
-        if leaky_suspects:
-            logger.warning(f"Potential leaky features detected: {leaky_suspects[:10]}...")
+        # Two-pass safety filter
+        safe_feature_cols = []
+        for c in feature_cols:
+            # Pass 1: Is it explicitly safe?
+            if c in SAFE_EXACT:
+                safe_feature_cols.append(c)
+                continue
+            if any(c.startswith(p) for p in SAFE_PREFIXES):
+                safe_feature_cols.append(c)
+                continue
+            if any(s in c for s in SAFE_SUBSTRINGS):
+                safe_feature_cols.append(c)
+                continue
+            
+            # Pass 2: Block anything that looks like a raw target or direct derivative
+            c_lower = c.lower()
+            if any(t in c_lower for t in target_names_lower):
+                # This column contains a target name but wasn't matched as safe — block it
+                logger.debug(f"Blocking potentially leaky feature: {c}")
+                continue
+            
+            # Anything else that's numeric and not target-related is allowed
+            # (e.g. OPPONENT defensive stats, team-level contextual stats)
+            safe_feature_cols.append(c)
         
-        # Explicitly exclude targets and their direct derivatives
-        # We only keep features that are explicitly time-shifted (Rolling/EWMA), 
-        # contextual, or forecast-based to ensure no leakage.
-        safe_feature_cols = [
-            c for c in feature_cols 
-            if c.startswith('ROLL') or c.startswith('EWMA_') or c.startswith('VS_OPP_')
-            or 'TREND' in c or 'BAYESIAN' in c or 'PROJ_' in c or 'PACE' in c
-            or c in ['IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK', 
-                     'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK', 'CLOSE_GAME', 'EXP_MARGIN']
-            or '_TE' in c or '_SHARE_' in c or 'ROLE_INDEX' in c
-        ]
         feature_cols = safe_feature_cols
 
-        # Filter out raw team stats if they exist (leaks)
+        # Final guard: remove raw team stats that mirror targets
         feature_cols = [c for c in feature_cols if not (c.endswith('_TEAM') and c.replace('_TEAM', '') in self.targets)]
         
         logger.info(f"Selected {len(feature_cols)} features for training.")

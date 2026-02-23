@@ -361,10 +361,10 @@ def select_seasons_interactive() -> List[str]:
             sys.exit(0)
 
 
-def check_empty_data() -> bool:
+def check_empty_data(players_file: str, games_file: str) -> bool:
     """Check if data files exist and prompt for full scrape if not."""
-    players_exist = os.path.exists(PLAYERS_FILE)
-    games_exist = os.path.exists(GAMES_FILE)
+    players_exist = os.path.exists(players_file)
+    games_exist = os.path.exists(games_file)
     
     if not players_exist and not games_exist:
         print("\n" + "!" * 70)
@@ -467,17 +467,18 @@ def update_since_date(date_from: str, existing_players: Optional[pd.DataFrame],
     return existing_players, existing_teams, total_new_players, total_new_teams
 
 
-def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame):
-    os.makedirs(DATA_DIR, exist_ok=True)
+def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame, 
+              data_dir: str, players_file: str, games_file: str):
+    os.makedirs(data_dir, exist_ok=True)
     
     players_df = players_df.sort_values(['GAME_DATE', 'PLAYER_NAME'])
     teams_df = teams_df.sort_values(['GAME_DATE', 'TEAM_ABBREVIATION'])
     
-    players_df.to_csv(PLAYERS_FILE, index=False)
-    teams_df.to_csv(GAMES_FILE, index=False)
+    players_df.to_csv(players_file, index=False)
+    teams_df.to_csv(games_file, index=False)
     
-    logger.info(f"Saved {len(players_df)} player records to {PLAYERS_FILE}")
-    logger.info(f"Saved {len(teams_df)} team records to {GAMES_FILE}")
+    logger.info(f"Saved {len(players_df)} player records to {players_file}")
+    logger.info(f"Saved {len(teams_df)} team records to {games_file}")
 
 
 def main():
@@ -516,11 +517,10 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
     
     args = parser.parse_args()
     
-    global DATA_DIR, PLAYERS_FILE, GAMES_FILE
-    DATA_DIR = args.data_dir
-    PLAYERS_FILE = os.path.join(DATA_DIR, 'nba_players.csv')
-    GAMES_FILE = os.path.join(DATA_DIR, 'nba_games.csv')
-    os.makedirs(DATA_DIR, exist_ok=True)
+    data_dir = args.data_dir
+    players_file = os.path.join(data_dir, 'nba_players.csv')
+    games_file = os.path.join(data_dir, 'nba_games.csv')
+    os.makedirs(data_dir, exist_ok=True)
     
     seasons = None
     incremental_update = False
@@ -530,7 +530,7 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         seasons = select_seasons_interactive()
     elif args.update:
         incremental_update = True
-        latest_date = get_latest_game_date(PLAYERS_FILE)
+        latest_date = get_latest_game_date(players_file)
         
         if latest_date:
             date_obj = datetime.strptime(latest_date, '%Y-%m-%d')
@@ -566,7 +566,7 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         seasons = [get_current_season()]
         print(f"\nFetching current season: {seasons[0]}")
     else:
-        is_empty, empty_seasons = check_empty_data()
+        is_empty, empty_seasons = check_empty_data(players_file, games_file)
         if is_empty:
             if empty_seasons is None:
                 seasons = select_seasons_interactive()
@@ -584,8 +584,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         existing_teams = None
         logger.info("Force mode: Ignoring existing data")
     else:
-        existing_players = load_existing_data(PLAYERS_FILE)
-        existing_teams = load_existing_data(GAMES_FILE)
+        existing_players = load_existing_data(players_file)
+        existing_teams = load_existing_data(games_file)
     
     if incremental_update and date_from:
         existing_players, existing_teams, new_players, new_teams = update_since_date(
@@ -593,7 +593,7 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         )
         
         if existing_players is not None and existing_teams is not None:
-            save_data(existing_players, existing_teams)
+            save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             logger.info("\n" + "=" * 50)
             logger.info("Incremental update complete!")
             logger.info(f"New player records added: {new_players}")
@@ -614,7 +614,7 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             )
         
         if existing_players is not None and existing_teams is not None:
-            save_data(existing_players, existing_teams)
+            save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             logger.info("\n" + "=" * 50)
             logger.info("Data update complete!")
             logger.info(f"Total player records: {len(existing_players)}")

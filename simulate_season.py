@@ -125,32 +125,18 @@ def main() -> None:
     # 3. Report Results
     if results:
         print(f"\n{'='*90}", flush=True)
-        print(f"[DEBUG] Simulation phase complete. {len(results)} games simulated.", flush=True)
+        print(f"Simulation phase complete. {len(results)} games simulated.", flush=True)
         print(f"{'='*90}", flush=True)
-        
-        # Debug: show structure of first result
-        print(f"\n[DEBUG] First result keys: {list(results[0].keys())}", flush=True)
-        if 'simulations' in results[0]:
-            print(f"[DEBUG] Simulations count: {len(results[0]['simulations'])}", flush=True)
-        if 'player_averages' in results[0]:
-            print(f"[DEBUG] Player averages count: {len(results[0]['player_averages'])}", flush=True)
         
         print(f"\nGenerating detailed reports...\n", flush=True)
         
         try:
-            # Print quick summary first
-            print("[DEBUG] Calling print_quick_summary...", flush=True)
             report_gen.print_quick_summary(results, stat_type=args.stat)
-            print("[DEBUG] Quick summary complete.", flush=True)
             
-            # Then print detailed breakdown
-            print("[DEBUG] Calling format_console_report...", flush=True)
             report_gen.format_console_report(results, detailed=True, stat_type=args.stat)
-            print("[DEBUG] Console report complete.", flush=True)
             
             if not args.no_csv:
                 # Export both game results and player projections
-                print("[DEBUG] Exporting to CSV...", flush=True)
                 game_csv = report_gen.export_to_csv(results)
                 player_csv = report_gen.export_player_projections(results)
                 
@@ -164,8 +150,6 @@ def main() -> None:
             logger.error(f"Reporting error: {e}", exc_info=True)
     else:
         print("\nNo games found or all simulations failed for the selected period.", flush=True)
-    
-    print("\n[DEBUG] Script finished successfully.", flush=True)
 
 if __name__ == "__main__":
     try:

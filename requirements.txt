@@ -1,10 +1,13 @@
 # ============================================
 # Core ML Frameworks
 # ============================================
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
-torchaudio==2.5.1+cu121
+# NOTE: Install PyTorch separately based on your platform:
+#   CUDA 12.1:  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#   CPU only:   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   macOS:      pip install torch torchvision torchaudio
+torch
+torchvision
+torchaudio
 
 # ============================================
 # Gradient Boosting

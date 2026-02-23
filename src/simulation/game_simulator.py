@@ -329,7 +329,6 @@ class GameSimulator:
         }
 
         # --- VECTORIZED GPU SIMULATION ---
-        torch.manual_seed(42)
         results = {team_a: {}, team_b: {}, 'player_stats': {}}
         rng = torch.Generator(device=self.device)
         rng.manual_seed(42)

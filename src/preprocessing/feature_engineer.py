@@ -218,15 +218,15 @@ class FeatureEngineer:
         
         df = df.copy()
         
-        # Critical: Sort and reset index to prevent leakage
-        df = df.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
-        
         # Validate required columns
         required_cols = ['PLAYER_ID', 'GAME_DATE']
         missing_cols = [c for c in required_cols if c not in df.columns]
         if missing_cols:
             logger.error(f"Missing required columns: {missing_cols}")
             return pd.DataFrame()
+        
+        # Critical: Sort and reset index to prevent leakage
+        df = df.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
         
         # Ensure proper datetime type
         df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
@@ -331,16 +331,45 @@ class FeatureEngineer:
         return df
 
     def create_features_chunked(self, df: pd.DataFrame, chunk_size: int = 500_000):
-        """Process features in chunks to avoid OOM errors."""
+        """Process features in chunks by player to avoid OOM errors.
+        
+        Chunks are split by PLAYER_ID so that each player's full history
+        stays within a single chunk. This ensures rolling/expanding features
+        are computed correctly.
+        """
         if len(df) < chunk_size:
             return self.create_features(df)
         
+        # Sort by player first to keep player games together
+        df = df.sort_values(['PLAYER_ID', 'GAME_DATE']).reset_index(drop=True)
+        
+        # Split by player groups, not by row index
+        player_ids = df['PLAYER_ID'].unique()
         chunks = []
-        for i in range(0, len(df), chunk_size):
-            chunk = df.iloc[i:i+chunk_size].copy()
-            chunk = self.create_features(chunk, is_training=(i==0))
-            chunks.append(chunk)
-            logger.info(f"Processed chunk {i//chunk_size + 1}/{(len(df)//chunk_size)+1}")
+        current_chunk_ids = []
+        current_chunk_size = 0
+        
+        # Group player IDs into chunks that respect the size limit
+        player_sizes = df.groupby('PLAYER_ID').size()
+        for pid in player_ids:
+            pid_size = player_sizes[pid]
+            if current_chunk_size + pid_size > chunk_size and current_chunk_ids:
+                # Process current chunk
+                chunk_df = df[df['PLAYER_ID'].isin(current_chunk_ids)].copy()
+                chunk_df = self.create_features(chunk_df, is_training=True)
+                chunks.append(chunk_df)
+                logger.info(f"Processed chunk {len(chunks)} ({current_chunk_size} rows, {len(current_chunk_ids)} players)")
+                current_chunk_ids = []
+                current_chunk_size = 0
+            current_chunk_ids.append(pid)
+            current_chunk_size += pid_size
+        
+        # Process final chunk
+        if current_chunk_ids:
+            chunk_df = df[df['PLAYER_ID'].isin(current_chunk_ids)].copy()
+            chunk_df = self.create_features(chunk_df, is_training=True)
+            chunks.append(chunk_df)
+            logger.info(f"Processed chunk {len(chunks)} ({current_chunk_size} rows, {len(current_chunk_ids)} players)")
         
         return pd.concat(chunks, ignore_index=True)
     
@@ -567,9 +596,38 @@ class FeatureEngineer:
         return df
 
     def _add_teammate_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Teammate context."""
+        """Teammate context features.
+        
+        Computes features capturing team-level context for each player:
+        - How dominant is this player relative to their team (share of team production)
+        - Rolling team performance (shifted to prevent leakage)
+        """
         new_cols = {}
-        new_cols['STAR_TEAMMATE_OUT'] = 0 # Placeholder
+        
+        # Default: no star teammate out info available
+        new_cols['STAR_TEAMMATE_OUT'] = 0
+        
+        # Team-level rolling stats (shifted to prevent leakage)
+        if 'TEAM_ID' in df.columns:
+            for stat in self.target_cols:
+                team_col = f'{stat}_TEAM'
+                if team_col in df.columns:
+                    # Rolling team average for context (shifted by 1 to prevent leakage)
+                    team_avg = df.groupby('TEAM_ID')[team_col].transform(
+                        lambda x: x.shift(1).rolling(10, min_periods=3).mean()
+                    )
+                    # Player's share of team production (shifted)
+                    player_shifted = df.groupby('PLAYER_ID')[stat].shift(1)
+                    team_shifted = df.groupby('TEAM_ID')[team_col].transform(
+                        lambda x: x.shift(1)
+                    )
+                    player_share = (player_shifted / (team_shifted + 1e-6)).clip(0, 1)
+                    
+                    new_cols[f'TEAM_{stat}_AVG_10'] = team_avg
+                    new_cols[f'PLAYER_{stat}_SHARE'] = player_share.groupby(
+                        df['PLAYER_ID']
+                    ).rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+        
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_opponent_strength(self, df: pd.DataFrame) -> pd.DataFrame:
