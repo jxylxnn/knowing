@@ -119,14 +119,20 @@ class SeasonSimulator:
 
     def simulate_today(self, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_todays_games()
-        if df is not None and not df.empty:
+        if df is None:
+            return []
+        if not df.empty:
             logger.info(f"Retrieved {len(df)} games from schedule.")
         return self.simulate_games(df, num_sims, max_workers)
 
     def simulate_date(self, game_date: str, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_games_by_date(game_date)
+        if df is None:
+            return []
         return self.simulate_games(df, num_sims, max_workers)
 
     def simulate_remaining_season(self, num_sims: int = 50, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_remaining_season()
+        if df is None:
+            return []
         return self.simulate_games(df, num_sims, max_workers)

@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs, teamgamelogs
@@ -361,7 +361,7 @@ def select_seasons_interactive() -> List[str]:
             sys.exit(0)
 
 
-def check_empty_data(players_file: str, games_file: str) -> bool:
+def check_empty_data(players_file: str, games_file: str) -> Tuple[bool, Optional[List[str]]]:
     """Check if data files exist and prompt for full scrape if not."""
     players_exist = os.path.exists(players_file)
     games_exist = os.path.exists(games_file)

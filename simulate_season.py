@@ -74,13 +74,14 @@ def main() -> None:
         output_dir = args.output_dir if args.output_dir else os.path.join(args.data_dir, 'sim_results')
         
         manager = ModelManager(data_dir=args.data_dir, models_dir=args.models_dir)
-        manager._load_models()
         
         model_path = os.path.join(args.models_dir, 'pts_catboost.cbm')
         if not os.path.exists(model_path):
             print(f"\nError: Models not found in '{args.models_dir}' directory.")
             print("Please run training first: python train.py --models-dir <path>")
             sys.exit(1)
+        
+        manager._load_models()
             
         game_sim = GameSimulator(
             manager, 
@@ -113,10 +114,16 @@ def main() -> None:
         today = datetime.now().date()
         for i in range(7):
             target_date = (today + timedelta(days=i)).strftime('%Y-%m-%d')
-            all_games.append(schedule_scraper.get_games_by_date(target_date))
+            day_games = schedule_scraper.get_games_by_date(target_date)
+            if day_games is not None and not day_games.empty:
+                all_games.append(day_games)
         
-        combined_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
-        results = season_sim.simulate_games(combined_df, num_sims=args.sims, max_workers=args.workers)
+        if not all_games:
+            logger.warning("No games found for the upcoming week.")
+            results = []
+        else:
+            combined_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
+            results = season_sim.simulate_games(combined_df, num_sims=args.sims, max_workers=args.workers)
         
     elif args.season:
         print("\nFetching remaining season schedule (next 30 days)...")
