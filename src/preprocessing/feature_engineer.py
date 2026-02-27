@@ -768,12 +768,10 @@ class FeatureEngineer:
         window_size = 2000 
         
         for stat in self.target_cols:
-            # Calculate percentile rank based on the rolling window of games
-            # We use a fast approximation
-            rolling_series = df_sorted[stat].rolling(window=window_size, min_periods=500)
-            
-            # Rank (pct=True) gives 0.0 to 1.0
-            pct_rank = rolling_series.rank(pct=True)
+            # Calculate percentile rank within a rolling window of games
+            pct_rank = df_sorted[stat].rolling(window=window_size, min_periods=500).apply(
+                lambda x: (x.iloc[-1] >= x).mean(), raw=False
+            )
             
             # Align index back to df
             new_cols[f'LEAGUE_PCT_{stat}'] = pct_rank.reindex(df.index)
