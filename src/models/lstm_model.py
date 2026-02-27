@@ -86,7 +86,7 @@ class LSTMWrapper:
         'num_layers': 2,
         'bidirectional': False,
         'dropout': 0.2,
-        'batch_size': 32,
+        'batch_size': 256,
         'epochs': 50,
         'lr': 1e-3,
         'warmup_ratio': 0.1,
@@ -118,21 +118,39 @@ class LSTMWrapper:
                    f"device={self.device}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-        """Creates sliding window sequences for each player."""
-        X, y = [], []
-        for player_id, group in df.groupby('PLAYER_ID'):
-            if len(group) < self.seq_len:
-                continue
-            
-            group = group.sort_values('GAME_DATE')
-            features = group[feature_cols].values
-            targets = group[target_cols].values
-            
-            for i in range(len(features) - self.seq_len):
-                X.append(features[i:i + self.seq_len])
-                y.append(targets[i + self.seq_len])
-                
-        return np.array(X), np.array(y)
+        """Creates sliding window sequences for each player (vectorized)."""
+        df_sorted = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
+        features = df_sorted[feature_cols].values
+        targets = df_sorted[target_cols].values
+        player_ids = df_sorted['PLAYER_ID'].values
+
+        player_boundaries = np.flatnonzero(np.diff(player_ids) != 0) + 1
+        starts = np.concatenate([[0], player_boundaries])
+        ends = np.concatenate([player_boundaries, [len(player_ids)]])
+        group_lens = ends - starts
+
+        valid_mask = group_lens >= (self.seq_len + 1)
+        valid_starts = starts[valid_mask]
+        valid_lens = group_lens[valid_mask]
+
+        total_seqs = int(np.sum(valid_lens - self.seq_len))
+        if total_seqs == 0:
+            return np.array([]), np.array([])
+
+        n_feat = features.shape[1]
+        n_tgt = targets.shape[1]
+        X = np.empty((total_seqs, self.seq_len, n_feat), dtype=np.float32)
+        y = np.empty((total_seqs, n_tgt), dtype=np.float32)
+
+        idx = 0
+        for s, gl in zip(valid_starts, valid_lens):
+            n_seq = gl - self.seq_len
+            for i in range(n_seq):
+                X[idx] = features[s + i: s + i + self.seq_len]
+                y[idx] = targets[s + i + self.seq_len]
+                idx += 1
+
+        return X, y
 
     def fit(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str], 
             epochs: Optional[int] = None):
@@ -154,8 +172,9 @@ class LSTMWrapper:
         X = (X - self.feat_mean) / self.feat_std
         
         dataset = PlayerSequenceDataset(X, y)
-        num_workers = 4 if self.device.type == 'cuda' else 0
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=num_workers)
+        num_workers = 4 if self.device.type == 'cuda' else 2
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
+                            num_workers=num_workers, persistent_workers=(num_workers > 0))
         
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         total_steps = epochs * len(loader)
@@ -165,6 +184,10 @@ class LSTMWrapper:
         
         device_str = self.device.type
         grad_scaler = torch.amp.GradScaler(device_str, enabled=(device_str == 'cuda'))
+        
+        best_loss = float('inf')
+        patience_counter = 0
+        early_stop_patience = 10
         
         self.model.train()
         for epoch in range(epochs):
@@ -185,13 +208,23 @@ class LSTMWrapper:
                 scheduler.step()
                 total_loss += loss.item()
             
+            avg_loss = total_loss / len(loader)
+            if avg_loss < best_loss - 1e-4:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
             if (epoch + 1) % 10 == 0:
-                avg_loss = total_loss / len(loader)
                 current_lr = optimizer.param_groups[0]['lr']
                 logger.info(f"LSTM Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, LR: {current_lr:.2e}")
+            
+            if patience_counter >= early_stop_patience:
+                logger.info(f"LSTM early stopping at epoch {epoch+1} (best loss: {best_loss:.4f})")
+                break
         
         self.is_trained = True
-        logger.info(f"LSTM training complete. Final loss: {total_loss/len(loader):.4f}")
+        logger.info(f"LSTM training complete. Final loss: {best_loss:.4f}")
 
     def predict(self, sequence: np.ndarray) -> np.ndarray:
         """Predicts the next game based on a sequence of games."""
