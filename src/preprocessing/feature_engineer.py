@@ -459,21 +459,29 @@ class FeatureEngineer:
         return df
 
     def _create_efficiency_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Vectorized efficiency metrics."""
+        """Vectorized efficiency metrics using pre-shifted rolling sums."""
         new_cols = {}
         
-        # Calculate sums needed for efficiency once
-        # Using transform with window sums
+        eff_cols = ['FGA', 'FTA', 'TOV', 'PTS', 'FGM', 'FG3M', 'FG3A', 'AST', 'MIN'] + [
+            s for s in self.target_cols if s not in ['FGA', 'FTA', 'TOV', 'PTS', 'FGM', 'FG3M', 'FG3A', 'AST', 'MIN']
+        ]
+        valid_eff = [c for c in eff_cols if c in df.columns]
+        
+        shifted = df.groupby('PLAYER_ID')[valid_eff].shift(1)
+        
         for window in [5, 10, 20]:
-            fg_sum = df.groupby('PLAYER_ID')['FGA'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            ft_sum = df.groupby('PLAYER_ID')['FTA'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            tov_sum = df.groupby('PLAYER_ID')['TOV'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            pts_sum = df.groupby('PLAYER_ID')['PTS'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            fgm_sum = df.groupby('PLAYER_ID')['FGM'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            fg3m_sum = df.groupby('PLAYER_ID')['FG3M'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            fg3a_sum = df.groupby('PLAYER_ID')['FG3A'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            ast_sum = df.groupby('PLAYER_ID')['AST'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-            mins_sum = df.groupby('PLAYER_ID')['MIN'].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(1)
+            rolled = shifted.groupby(df['PLAYER_ID']).rolling(window, min_periods=1).sum()
+            rolled = rolled.reset_index(level=0, drop=True)
+            
+            fg_sum = rolled['FGA'].fillna(0) if 'FGA' in rolled.columns else 0
+            ft_sum = rolled['FTA'].fillna(0) if 'FTA' in rolled.columns else 0
+            tov_sum = rolled['TOV'].fillna(0) if 'TOV' in rolled.columns else 0
+            pts_sum = rolled['PTS'].fillna(0) if 'PTS' in rolled.columns else 0
+            fgm_sum = rolled['FGM'].fillna(0) if 'FGM' in rolled.columns else 0
+            fg3m_sum = rolled['FG3M'].fillna(0) if 'FG3M' in rolled.columns else 0
+            fg3a_sum = rolled['FG3A'].fillna(0) if 'FG3A' in rolled.columns else 0
+            ast_sum = rolled['AST'].fillna(0) if 'AST' in rolled.columns else 0
+            mins_sum = rolled['MIN'].fillna(1) if 'MIN' in rolled.columns else 1
 
             new_cols[f'ROLL_TS_PCT_{window}'] = pts_sum / (2 * (fg_sum + 0.44 * ft_sum + 1e-6))
             new_cols[f'ROLL_EFG_PCT_{window}'] = (fgm_sum + 0.5 * fg3m_sum) / (fg_sum + 1e-6)
@@ -481,8 +489,9 @@ class FeatureEngineer:
             new_cols[f'ROLL_AST_TOV_{window}'] = ast_sum / (tov_sum + 1e-6)
             
             for stat in self.target_cols:
-                stat_sum = df.groupby('PLAYER_ID')[stat].transform(lambda x: x.shift(1).rolling(window, min_periods=1).sum()).fillna(0)
-                new_cols[f'ROLL_{stat}_PER_MIN_{window}'] = stat_sum / (mins_sum + 1e-6)
+                if stat in rolled.columns:
+                    stat_sum = rolled[stat].fillna(0)
+                    new_cols[f'ROLL_{stat}_PER_MIN_{window}'] = stat_sum / (mins_sum + 1e-6)
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
