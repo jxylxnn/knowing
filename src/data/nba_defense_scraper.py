@@ -1240,8 +1240,10 @@ class DefensiveMatchupAnalyzer:
     Combines team defense data with player position for realistic adjustments.
     """
     
-    def __init__(self, defense_scraper: NBADefenseScraper = None):
+    def __init__(self, defense_scraper: NBADefenseScraper = None, cache_dir: str = 'cache'):
         self.defense_scraper = defense_scraper or NBADefenseScraper()
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
         
         self.position_defense_effects = {
             'elite_defense': 0.92,
@@ -1498,7 +1500,8 @@ class DefensiveMatchupAnalyzer:
                     try:
                         matchup = str(row[header_map.get('matchup', 5)]).upper()
                         
-                        if opponent_id in matchup or str(opponent_id) in matchup:
+                        opponent_abbr = ID_TO_TEAM.get(opponent_id, '')
+                        if opponent_abbr and opponent_abbr.upper() not in matchup:
                             continue
                         
                         def get_val(col_name, default=0):
