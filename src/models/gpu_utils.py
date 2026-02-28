@@ -222,7 +222,7 @@ def get_optimal_batch_size(model_memory_gb: float = 1.0,
         
         # Clamp to reasonable range
         return max(16, min(batch_size, 8192))
-    except:
+    except Exception:
         return 32
 
 

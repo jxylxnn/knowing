@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
@@ -143,9 +144,9 @@ class GameSimulator:
     def load_context(self):
         """Loads the raw data to extract rosters and recent stats."""
         if self.players_df is None:
-            self.players_df = pd.read_csv(self.manager.data_dir + '/nba_players.csv')
+            self.players_df = pd.read_csv(os.path.join(self.manager.data_dir, 'nba_players.csv'))
             self.players_df['GAME_DATE'] = pd.to_datetime(self.players_df['GAME_DATE'])
-            self.games_df = pd.read_csv(self.manager.data_dir + '/nba_games.csv')
+            self.games_df = pd.read_csv(os.path.join(self.manager.data_dir, 'nba_games.csv'))
             self.games_df['GAME_DATE'] = pd.to_datetime(self.games_df['GAME_DATE'])
 
     def get_available_teams(self) -> List[str]:
@@ -157,8 +158,8 @@ class GameSimulator:
         if self.all_merged_with_features is None:
             logger.info("Preparing shared simulation context...")
             loader = DataLoader(
-                self.manager.data_dir + '/nba_players.csv',
-                self.manager.data_dir + '/nba_games.csv'
+                os.path.join(self.manager.data_dir, 'nba_players.csv'),
+                os.path.join(self.manager.data_dir, 'nba_games.csv')
             )
             self.merged_data = loader.merge_datasets()
             self.all_merged_with_features = self.manager.feature_engineer.create_features(self.merged_data)

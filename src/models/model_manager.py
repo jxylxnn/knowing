@@ -635,7 +635,7 @@ class ModelManager:
             log_gpu_memory("After Joint NN")
 
         # 7. Temporal Models
-        lstm_config = self.model_config.get('lstm', {})
+        lstm_config = dict(self.model_config.get('lstm', {}))
         lstm_seq = lstm_config.pop('seq_len', 10)
         logger.info("Training LSTM...")
         logger.info(f"  Config: hidden={lstm_config.get('hidden_dim', 128)}, layers={lstm_config.get('num_layers', 2)}, "
@@ -648,7 +648,7 @@ class ModelManager:
         if self.use_gpu:
             log_gpu_memory("After LSTM")
         
-        tx_config = self.model_config.get('transformer', {})
+        tx_config = dict(self.model_config.get('transformer', {}))
         tx_seq = tx_config.pop('seq_len', 50)
         logger.info("Training Transformer...")
         logger.info(f"  Config: d_model={tx_config.get('d_model', 128)}, heads={tx_config.get('nhead', 8)}, "
@@ -662,7 +662,7 @@ class ModelManager:
             log_gpu_memory("After Transformer")
 
         # 7b. Advanced Temporal Attention (context-aware attention over game history)
-        temp_config = self.model_config.get('temporal', {})
+        temp_config = dict(self.model_config.get('temporal', {}))
         temp_seq = temp_config.pop('seq_len', 20)
         logger.info("Training Temporal Attention...")
         logger.info(f"  Config: hidden={temp_config.get('hidden_dim', 128)}, heads={temp_config.get('num_heads', 4)}, seq_len={temp_seq}")
@@ -863,20 +863,25 @@ class ModelManager:
         predictions = {}
         base_predictions = {}
         
-        if 'PTS' not in self.models or not self.models:
+        if not self.models:
             self._load_models()
         
         if not self.models:
             logger.warning("No models loaded, using fallback predictions")
             return self._fallback_prediction(player_context_df)
         
-        feature_cols = self.models['PTS'].feature_names if hasattr(self.models['PTS'], 'feature_names') else self.feature_cols
+        if self.feature_cols is None or not self.feature_cols:
+            # Try to get feature names from any loaded CatBoost model
+            for model in self.models.values():
+                if hasattr(model, 'feature_names_') and model.feature_names_:
+                    self.feature_cols = list(model.feature_names_)
+                    break
         
-        if feature_cols is None or not feature_cols:
+        if self.feature_cols is None or not self.feature_cols:
             logger.warning("No feature columns available, using fallback predictions")
             return self._fallback_prediction(player_context_df)
         
-        X = player_context_df[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+        X = player_context_df[self.feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
         
         if X.empty:
             logger.warning("Empty feature matrix, using fallback predictions")
@@ -938,11 +943,10 @@ class ModelManager:
         if self.temporal_model is not None and history_df is not None:
             try:
                 if len(history_df) >= self.temporal_model.seq_len:
-                    seq_features = history_df[feature_cols].tail(self.temporal_model.seq_len).apply(
+                    seq_features = history_df[self.feature_cols].tail(self.temporal_model.seq_len).apply(
                         pd.to_numeric, errors='coerce').fillna(0).values
                     temp_preds = self.temporal_model.predict(seq_features)[0]
                     for i, target in enumerate(self.core_targets):
-                        # Sanity check
                         if 0.1 < temp_preds[i] / (base_predictions[target] + 1e-6) < 10:
                             predictions[target] = (predictions[target] * 0.85) + (temp_preds[i] * 0.15)
             except Exception as e:
@@ -951,11 +955,10 @@ class ModelManager:
         if self.attention_model is not None and history_df is not None:
             try:
                 if len(history_df) >= self.attention_model.seq_len:
-                    seq_features = history_df[feature_cols].tail(self.attention_model.seq_len).apply(
+                    seq_features = history_df[self.feature_cols].tail(self.attention_model.seq_len).apply(
                         pd.to_numeric, errors='coerce').fillna(0).values
                     attn_preds = self.attention_model.predict(seq_features)[0]
                     for i, target in enumerate(self.core_targets):
-                        # Sanity check
                         if 0.1 < attn_preds[i] / (base_predictions[target] + 1e-6) < 10:
                             predictions[target] = (predictions[target] * 0.85) + (attn_preds[i] * 0.15)
             except Exception as e:
@@ -964,7 +967,7 @@ class ModelManager:
         if self.adv_temporal_model is not None and history_df is not None:
             try:
                 if len(history_df) >= self.adv_temporal_model.seq_len:
-                    seq_features = history_df[feature_cols].tail(self.adv_temporal_model.seq_len).apply(
+                    seq_features = history_df[self.feature_cols].tail(self.adv_temporal_model.seq_len).apply(
                         pd.to_numeric, errors='coerce').fillna(0).values
                     adv_preds = self.adv_temporal_model.predict(seq_features, X.values[0])[0]
                     for i, target in enumerate(self.core_targets):
