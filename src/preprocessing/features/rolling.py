@@ -114,7 +114,7 @@ class EfficiencyFeatureGroup(FeatureGroup):
             fg_sum = df.groupby('PLAYER_ID')['FGA'].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).sum()
             ).fillna(0)
-            ft_sum = df.groupby('Player_ID')['FTA'].transform(
+            ft_sum = df.groupby('PLAYER_ID')['FTA'].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).sum()
             ).fillna(0)
             tov_sum = df.groupby('PLAYER_ID')['TOV'].transform(

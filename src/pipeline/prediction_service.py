@@ -218,7 +218,7 @@ class PredictionService:
     def _get_fallback_value(self, context_df: pd.DataFrame, target: str) -> float:
         """Get fallback value for a target."""
         # Try rolling average
-        rolling_col = f'ROLL5_{target}'
+        rolling_col = f'ROLL_{target}_AVG_5'
         if rolling_col in context_df.columns:
             val = context_df[rolling_col].iloc[0]
             if pd.notna(val) and val > 0:

@@ -394,8 +394,8 @@ class ModelManager:
                     use_best_model=True
                 )
             
-        self.models[target] = model 
-        model.save_model(os.path.join(self.models_dir, f'{target.lower()}_catboost.cbm'))
+            self.models[target] = model 
+            model.save_model(os.path.join(self.models_dir, f'{target.lower()}_catboost.cbm'))
         
         # Clear GPU memory after CatBoost training
         clear_gpu_memory()

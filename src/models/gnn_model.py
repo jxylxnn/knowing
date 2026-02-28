@@ -142,27 +142,32 @@ class GNNWrapper:
                    f"device={self.device}")
 
     def build_graph(self, df: pd.DataFrame):
-        """Builds a global adjacency matrix from historical co-occurrence."""
+        """Builds a global adjacency matrix from historical co-occurrence (vectorized)."""
         top_n = self.config['top_players']
         logger.info(f"Constructing player co-occurrence graph (top {top_n} players)...")
         top_players = df['PLAYER_ID'].value_counts().head(top_n).index.tolist()
         self.player_map = {pid: i for i, pid in enumerate(top_players)}
         n = len(top_players)
         
-        adj = np.eye(n)
-        groups = df[df['PLAYER_ID'].isin(top_players)].groupby('GAME_ID')
-        for _, game_group in groups:
-            p_ids = [self.player_map[pid] for pid in game_group['PLAYER_ID'] if pid in self.player_map]
-            for i in range(len(p_ids)):
-                for j in range(i + 1, len(p_ids)):
-                    adj[p_ids[i], p_ids[j]] += 1
-                    adj[p_ids[j], p_ids[i]] += 1
+        adj = np.eye(n, dtype=np.float32)
         
-        rowsum = np.array(adj.sum(1))
-        d_inv = np.power(rowsum, -1).flatten()
-        d_inv[np.isinf(d_inv)] = 0.
-        d_mat = np.diag(d_inv)
-        self.adj = torch.tensor(d_mat @ adj, dtype=torch.float32).to(self.device)
+        top_set = set(top_players)
+        filtered = df[df['PLAYER_ID'].isin(top_set)][['GAME_ID', 'PLAYER_ID']].copy()
+        filtered['NODE_IDX'] = filtered['PLAYER_ID'].map(self.player_map)
+        
+        for _, game_group in filtered.groupby('GAME_ID'):
+            node_ids = game_group['NODE_IDX'].values
+            if len(node_ids) < 2:
+                continue
+            ii, jj = np.triu_indices(len(node_ids), k=1)
+            rows = node_ids[ii]
+            cols = node_ids[jj]
+            np.add.at(adj, (rows, cols), 1)
+            np.add.at(adj, (cols, rows), 1)
+        
+        rowsum = adj.sum(1)
+        d_inv = np.where(rowsum > 0, 1.0 / rowsum, 0.0)
+        self.adj = torch.tensor(d_inv[:, None] * adj, dtype=torch.float32).to(self.device)
         logger.info(f"Graph built with {n} nodes.")
 
     def fit(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str], 
@@ -175,15 +180,13 @@ class GNNWrapper:
         if self.adj is None:
             self.build_graph(df)
         
-        X_list, Y_list = [], []
         valid_pids = sorted(self.player_map.keys())
-        for pid in valid_pids:
-            group = df[df['PLAYER_ID'] == pid]
-            X_list.append(group[feature_cols].mean().values)
-            Y_list.append(group[target_cols].mean().values)
-            
-        X = np.array(X_list)
-        Y = np.array(Y_list)
+        player_data = df[df['PLAYER_ID'].isin(valid_pids)]
+        grouped = player_data.groupby('PLAYER_ID')
+        X_means = grouped[feature_cols].mean()
+        Y_means = grouped[target_cols].mean()
+        X = X_means.reindex(valid_pids).fillna(0).values
+        Y = Y_means.reindex(valid_pids).fillna(0).values
         
         self.feat_mean = X.mean(axis=0)
         self.feat_std = X.std(axis=0) + 1e-6

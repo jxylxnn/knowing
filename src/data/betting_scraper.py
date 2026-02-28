@@ -343,7 +343,8 @@ class BettingScraper:
         
         z_score = diff / historical_std
         
-        prob_over = 1 - (z_score * 0.5 - 0.5)
+        from scipy import stats as sp_stats
+        prob_over = sp_stats.norm.cdf(z_score)
         
         return float(np.clip(prob_over, 0.05, 0.95))
     
@@ -366,7 +367,8 @@ class BettingScraper:
         
         z_score = diff / historical_std
         
-        prob_cover = 1 - (z_score * 0.5 - 0.5)
+        from scipy import stats as sp_stats
+        prob_cover = sp_stats.norm.cdf(z_score)
         
         return float(np.clip(prob_cover, 0.05, 0.95))
 

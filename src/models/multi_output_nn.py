@@ -180,7 +180,7 @@ class MultiOutputWrapper:
             X, y[self.target_names], 
             test_size=val_split, 
             random_state=42,
-            shuffle=True
+            shuffle=False
         )
         
         self.scaler_X = StandardScaler()
