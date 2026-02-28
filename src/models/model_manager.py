@@ -636,33 +636,49 @@ class ModelManager:
 
         # 7. Temporal Models
         lstm_config = self.model_config.get('lstm', {})
+        lstm_seq = lstm_config.pop('seq_len', 10)
         logger.info("Training LSTM...")
-        logger.info(f"  Config: hidden={lstm_config.get('hidden_dim', 128)}, layers={lstm_config.get('num_layers', 2)}, bidirectional={lstm_config.get('bidirectional', False)}")
-        self.temporal_model = LSTMWrapper(input_dim=len(nn_features), seq_len=10, config=lstm_config)
+        logger.info(f"  Config: hidden={lstm_config.get('hidden_dim', 128)}, layers={lstm_config.get('num_layers', 2)}, "
+                    f"bidirectional={lstm_config.get('bidirectional', False)}, seq_len={lstm_seq}")
+        self.temporal_model = LSTMWrapper(input_dim=len(nn_features), seq_len=lstm_seq, config=lstm_config)
         self.temporal_model.fit(fit_df, nn_features, self.core_targets)
         self.temporal_model.save(os.path.join(self.models_dir, 'temporal_lstm.pkl'))
         
-        # Clear GPU memory after LSTM training
         clear_gpu_memory()
         if self.use_gpu:
             log_gpu_memory("After LSTM")
         
         tx_config = self.model_config.get('transformer', {})
+        tx_seq = tx_config.pop('seq_len', 50)
         logger.info("Training Transformer...")
-        logger.info(f"  Config: d_model={tx_config.get('d_model', 128)}, heads={tx_config.get('nhead', 8)}, layers={tx_config.get('num_layers', 4)}")
-        self.attention_model = TransformerWrapper(input_dim=len(nn_features), seq_len=50, config=tx_config)
+        logger.info(f"  Config: d_model={tx_config.get('d_model', 128)}, heads={tx_config.get('nhead', 8)}, "
+                    f"layers={tx_config.get('num_layers', 4)}, seq_len={tx_seq}")
+        self.attention_model = TransformerWrapper(input_dim=len(nn_features), seq_len=tx_seq, config=tx_config)
         self.attention_model.fit(fit_df, nn_features, self.core_targets)
         self.attention_model.save(os.path.join(self.models_dir, 'attention_transformer.pkl'))
         
-        # Clear GPU memory after Transformer training
         clear_gpu_memory()
         if self.use_gpu:
             log_gpu_memory("After Transformer")
 
-        # 8. GNN
+        # 7b. Advanced Temporal Attention (context-aware attention over game history)
+        temp_config = self.model_config.get('temporal', {})
+        temp_seq = temp_config.pop('seq_len', 20)
+        logger.info("Training Temporal Attention...")
+        logger.info(f"  Config: hidden={temp_config.get('hidden_dim', 128)}, heads={temp_config.get('num_heads', 4)}, seq_len={temp_seq}")
+        self.adv_temporal_model = TemporalAttentionWrapper(input_dim=len(nn_features), seq_len=temp_seq, config=temp_config)
+        self.adv_temporal_model.fit(fit_df, nn_features, self.core_targets)
+        self.adv_temporal_model.save(os.path.join(self.models_dir, 'adv_temporal_attention.pkl'))
+
+        clear_gpu_memory()
+        if self.use_gpu:
+            log_gpu_memory("After Temporal Attention")
+
+        # 8. GNN (with graph attention)
         gnn_config = self.model_config.get('gnn', {})
         logger.info("Training GNN...")
-        logger.info(f"  Config: hidden={gnn_config.get('hidden_dim', 64)}, layers={gnn_config.get('num_layers', 2)}")
+        logger.info(f"  Config: hidden={gnn_config.get('hidden_dim', 64)}, layers={gnn_config.get('num_layers', 2)}, "
+                    f"attention={gnn_config.get('use_attention', False)}")
         self.gnn_model = GNNWrapper(input_dim=len(nn_features), target_names=self.core_targets, config=gnn_config)
         self.gnn_model.fit(fit_df, nn_features, self.core_targets)
         self.gnn_model.save(os.path.join(self.models_dir, 'team_chemistry_gnn.pkl'))

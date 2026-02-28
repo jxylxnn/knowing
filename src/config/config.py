@@ -108,6 +108,7 @@ class GNNConfig(NeuralNetConfig):
     num_node_features: int = 64
     num_edge_features: int = 16
     num_graph_layers: int = 3
+    use_attention: bool = True
 
 
 @dataclass

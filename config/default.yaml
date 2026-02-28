@@ -110,7 +110,7 @@ lstm:
   epochs: 100
   patience: 10
   random_seed: 42
-  sequence_length: 5
+  sequence_length: 10
   bidirectional: true
 
 transformer:
@@ -119,7 +119,7 @@ transformer:
   nhead: 8
   num_encoder_layers: 4
   dim_feedforward: 512
-  max_seq_length: 10
+  max_seq_length: 50
   hidden_size: 128
   num_layers: 4
   dropout: 0.2
@@ -142,6 +142,7 @@ gnn:
   epochs: 100
   patience: 10
   random_seed: 42
+  use_attention: true
 
 # Ensemble configuration
 ensemble:

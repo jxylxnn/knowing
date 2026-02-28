@@ -168,6 +168,10 @@ class TrainingPipeline:
         if self.config.gnn.enabled:
             self._train_gnn_model(fit_df, nn_features)
         
+        # Train advanced temporal attention
+        if self.config.ensemble.use_advanced_temporal:
+            self._train_temporal_attention_model(fit_df, nn_features)
+        
         # Train blender
         if self.config.ensemble.enabled:
             self._train_blender(val_df)
@@ -451,6 +455,24 @@ class TrainingPipeline:
         self.gnn_model.save(str(model_path))
         
         logger.info(f"Saved GNN model to {model_path}")
+    
+    def _train_temporal_attention_model(self, fit_df: pd.DataFrame, nn_features: List[str]) -> None:
+        """Train advanced Temporal Attention model (context-aware)."""
+        logger.info("Training Temporal Attention model...")
+        
+        core_targets = self.training_config.targets[:3]
+        
+        self.adv_temporal_model = TemporalAttentionWrapper(
+            input_dim=len(nn_features),
+            seq_len=20
+        )
+        
+        self.adv_temporal_model.fit(fit_df, nn_features, core_targets)
+        
+        model_path = self.data_config.models_dir / 'adv_temporal_attention.pkl'
+        self.adv_temporal_model.save(str(model_path))
+        
+        logger.info(f"Saved Temporal Attention model to {model_path}")
     
     def _predict_catboost_blended(self, target: str, X) -> np.ndarray:
         """Blend RMSE + MAE CatBoost predictions for *target*."""

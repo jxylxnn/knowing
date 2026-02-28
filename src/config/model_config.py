@@ -160,6 +160,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'epochs': _clamp(50 + int(scale * 2), 50, 200),
             'lr': max(1e-5, 1e-3 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
+            'seq_len': 10,
         },
         
         # ===== TRANSFORMER CONFIG =====
@@ -174,6 +175,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
             'grad_checkpoint': score > 30,
+            'seq_len': 50,
         },
         
         # ===== MULTI-OUTPUT NN CONFIG =====
@@ -196,6 +198,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'batch_size': _clamp(int(64 * scale), 32, 512),
             'epochs': _clamp(50 + int(scale), 50, 100),
             'lr': max(5e-4, 1e-2 / (scale ** 0.1)),
+            'use_attention': True,
         },
         
         # ===== TEMPORAL ATTENTION CONFIG =====
@@ -207,6 +210,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'epochs': _clamp(50 + int(scale * 1.5), 50, 150),
             'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
+            'seq_len': 20,
         },
         
         # ===== CATBOOST CONFIG =====
