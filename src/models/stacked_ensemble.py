@@ -90,10 +90,18 @@ class StackedEnsembleModel:
         
         if HAS_CATBOOST:
             self.base_models['catboost'] = CatBoostRegressor(
-                iterations=300, 
-                learning_rate=0.05, 
-                depth=6, 
-                verbose=False, 
+                iterations=1000,
+                learning_rate=0.03,
+                depth=8,
+                l2_leaf_reg=5.0,
+                border_count=254,
+                grow_policy='Depthwise',
+                min_data_in_leaf=10,
+                rsm=0.8,
+                boosting_type='Plain',
+                score_function='Cosine',
+                verbose=False,
+                early_stopping_rounds=50,
                 **cb_gpu
             )
         
@@ -160,10 +168,15 @@ class StackedEnsembleModel:
                 elif 'catboost' in name and self.use_gpu:
                     model.set_params(task_type='GPU')
                 
-                model.fit(
-                    X.iloc[train_idx], residuals.iloc[train_idx],
-                    sample_weight=self._compute_sample_weights(df_full.iloc[train_idx])
-                )
+                fit_kw = {
+                    'sample_weight': self._compute_sample_weights(df_full.iloc[train_idx])
+                }
+                # CatBoost benefits from eval_set for early stopping
+                if 'catboost' in name and HAS_CATBOOST:
+                    fit_kw['eval_set'] = (X.iloc[val_idx], residuals.iloc[val_idx])
+                    fit_kw['use_best_model'] = True
+                
+                model.fit(X.iloc[train_idx], residuals.iloc[train_idx], **fit_kw)
                 meta_features[val_idx, i] = model.predict(X.iloc[val_idx])
         
         # Train meta-learner ONLY on non-zero predictions (where OOF predictions exist)

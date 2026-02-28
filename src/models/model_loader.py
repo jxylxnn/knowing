@@ -54,6 +54,8 @@ class ModelLoader:
         self.targets = targets or ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
         
         self.models: Dict[str, Any] = {}
+        self.catboost_mae_models: Dict[str, Any] = {}
+        self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
         self.blenders: Dict[str, Any] = {}
         self.joint_model: Optional[Any] = None
         self.temporal_model: Optional[Any] = None
@@ -94,13 +96,18 @@ class ModelLoader:
         return counts
     
     def _load_catboost_models(self) -> int:
-        """Load CatBoost regression models for all targets."""
+        """Load CatBoost regression models for all targets.
+
+        Also loads MAE companion and quantile (P10/P90) models when
+        present on disk so the full multi-model architecture is available
+        for blended prediction and calibrated uncertainty.
+        """
         from catboost import CatBoostRegressor
         
         loaded = 0
         for target in self.targets:
+            # Primary RMSE model
             model_path = self.models_dir / f'{target.lower()}_catboost.cbm'
-            
             if model_path.exists():
                 try:
                     model = CatBoostRegressor()
@@ -110,7 +117,36 @@ class ModelLoader:
                     logger.info(f"Loaded CatBoost model for {target}")
                 except Exception as e:
                     logger.warning(f"Failed to load CatBoost for {target}: {e}")
-        
+                    continue
+
+            # MAE companion model
+            mae_path = self.models_dir / f'{target.lower()}_catboost_mae.cbm'
+            if mae_path.exists():
+                try:
+                    mae_model = CatBoostRegressor()
+                    mae_model.load_model(str(mae_path))
+                    self.catboost_mae_models[target] = mae_model
+                    logger.info(f"Loaded CatBoost MAE model for {target}")
+                except Exception as e:
+                    logger.debug(f"Failed to load MAE model for {target}: {e}")
+
+            # Quantile models (P10/P90)
+            for label in ('low', 'high'):
+                q_path = self.models_dir / f'{target.lower()}_catboost_q{label}.cbm'
+                if q_path.exists():
+                    try:
+                        q_model = CatBoostRegressor()
+                        q_model.load_model(str(q_path))
+                        self.catboost_quantile_models.setdefault(target, {})[label] = q_model
+                        logger.info(f"Loaded CatBoost quantile-{label} for {target}")
+                    except Exception as e:
+                        logger.debug(f"Failed to load quantile-{label} for {target}: {e}")
+
+        n_mae = len(self.catboost_mae_models)
+        n_q = sum(len(v) for v in self.catboost_quantile_models.values())
+        if n_mae or n_q:
+            logger.info(f"Auxiliary CatBoost models: {n_mae} MAE, {n_q} quantile")
+
         return loaded
     
     def _load_blenders(self) -> int:
@@ -268,3 +304,32 @@ class ModelLoader:
             List of target names with loaded models.
         """
         return list(self.models.keys())
+
+    # ----- Multi-model prediction helpers -----
+
+    def predict_blended(self, target: str, X, rmse_weight: float = 0.6) -> Any:
+        """Blend RMSE + MAE CatBoost predictions for *target*.
+
+        Falls back to RMSE-only when no MAE companion exists.
+        """
+        import numpy as np
+
+        rmse_pred = self.models[target].predict(X)
+
+        if target in self.catboost_mae_models:
+            mae_pred = self.catboost_mae_models[target].predict(X)
+            return rmse_pred * rmse_weight + mae_pred * (1 - rmse_weight)
+
+        return rmse_pred
+
+    def predict_quantiles(self, target: str, X) -> Optional[Dict[str, Any]]:
+        """Return quantile predictions for *target* if available."""
+        if target not in self.catboost_quantile_models:
+            return None
+        q = self.catboost_quantile_models[target]
+        out: Dict[str, Any] = {}
+        if 'low' in q:
+            out['low'] = q['low'].predict(X)
+        if 'high' in q:
+            out['high'] = q['high'].predict(X)
+        return out if out else None

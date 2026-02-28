@@ -26,18 +26,49 @@ class DataConfig:
 
 @dataclass
 class CatBoostConfig:
-    """CatBoost model configuration."""
+    """CatBoost model configuration.
+
+    Supports multi-loss training (RMSE + MAE blend), per-target hyperparameter
+    profiles, quantile regression for uncertainty estimation, and temporal
+    K-fold cross-validation.
+    """
     enabled: bool = True
-    iterations: int = 2000
-    learning_rate: float = 0.03
-    depth: int = 6
-    l2_leaf_reg: float = 3.0
+    iterations: int = 3000
+    learning_rate: float = 0.02
+    depth: int = 8
+    l2_leaf_reg: float = 5.0
     random_strength: float = 1.0
     bagging_temperature: float = 0.5
-    border_count: int = 128
-    thread_count: int = -1  # Use all cores
+    border_count: int = 254
+    thread_count: int = -1
     random_seed: int = 42
-    early_stopping_rounds: int = 100
+    early_stopping_rounds: int = 150
+
+    # Advanced tree structure
+    grow_policy: str = "Depthwise"
+    min_data_in_leaf: int = 10
+    score_function: str = "Cosine"
+    rsm: float = 0.8
+
+    # Langevin stochastic gradient boosting
+    langevin: bool = True
+    diffusion_temperature: float = 10000.0
+
+    # Multi-loss training: blend RMSE + MAE models for robustness
+    use_multi_loss: bool = True
+    multi_loss_rmse_weight: float = 0.6
+    multi_loss_mae_weight: float = 0.4
+
+    # Quantile regression for uncertainty estimation
+    use_quantile_models: bool = True
+    quantile_alpha_low: float = 0.1
+    quantile_alpha_high: float = 0.9
+
+    # Temporal K-fold cross-validation
+    n_temporal_folds: int = 3
+
+    # Per-target hyperparameter overrides (populated at runtime)
+    use_per_target_tuning: bool = True
     
 
 @dataclass
