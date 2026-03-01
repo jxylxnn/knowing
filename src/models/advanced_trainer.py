@@ -395,7 +395,8 @@ class AdvancedTrainer:
         self.device = None
         self.adversarial_model = None
         self.selected_features: Optional[List[str]] = None
-        
+        self.importance_scores: Optional[Dict[str, float]] = None
+
         if use_gpu:
             try:
                 from src.models.gpu_utils import check_gpu_compatibility, get_device

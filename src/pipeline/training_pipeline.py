@@ -196,7 +196,11 @@ class TrainingPipeline:
         # Clean targets
         for target in targets:
             t_col = f'{target}_CLEAN' if f'{target}_CLEAN' in df.columns else target
-            df[target] = pd.to_numeric(df[t_col], errors='coerce').fillna(0)
+            if t_col not in df.columns:
+                logger.warning(f"Target column '{target}' not found in data, defaulting to 0")
+                df[target] = 0
+            else:
+                df[target] = pd.to_numeric(df[t_col], errors='coerce').fillna(0)
         
         return df
     
