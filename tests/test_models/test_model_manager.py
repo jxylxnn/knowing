@@ -60,7 +60,8 @@ class TestModelRegistry:
         from src.models.base import ModelRegistry
         
         registry = ModelRegistry(str(temp_data_dir['models_dir']))
-        assert registry.models_dir == str(temp_data_dir['models_dir'])
+        # ModelRegistry stores Path internally; compare resolved paths
+        assert registry.models_dir.resolve() == temp_data_dir['models_dir'].resolve()
     
     def test_registry_list_models_empty(self, mock_model_registry):
         """Test ModelRegistry list_models returns empty when no models."""

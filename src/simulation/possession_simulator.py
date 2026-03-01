@@ -198,10 +198,13 @@ class PossessionSimulator:
         avg_pace = (home_pace + away_pace) / 2
         expected_possessions = int(avg_pace)
         
+        # Guard against division by zero (defensive ratings should never be 0)
+        safe_away_def = max(away_def_rating, 1.0)
+        safe_home_def = max(home_def_rating, 1.0)
         home_eff_factor = home_off_rating / 114.0
         away_eff_factor = away_def_rating / 114.0
-        home_adj = home_eff_factor * (114.0 / away_def_rating)
-        away_adj = (away_off_rating / 114.0) * (114.0 / home_def_rating)
+        home_adj = home_eff_factor * (114.0 / safe_away_def)
+        away_adj = (away_off_rating / 114.0) * (114.0 / safe_home_def)
         
         possession_count = 0
         max_possessions = int(expected_possessions * 2 * 2 + 20)
@@ -330,7 +333,8 @@ class PossessionSimulator:
     def _check_turnover(self, ball_handler: PlayerSimState, defense: TeamSimState, eff_adj: float) -> bool:
         """Check if turnover occurs."""
         base_tov_rate = ball_handler.tov_rate * self.LEAGUE_AVERAGES['tov_pct']
-        adj_tov_rate = base_tov_rate / eff_adj
+        safe_eff_adj = max(eff_adj, 0.01)  # Guard against division by zero
+        adj_tov_rate = base_tov_rate / safe_eff_adj
         return self.rng.random() < adj_tov_rate
     
     def _simulate_shot(

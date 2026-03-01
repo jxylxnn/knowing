@@ -109,7 +109,7 @@ class ReportGenerator:
             else:
                 home_wins = sum(1 for s in res['simulations'] if s[home]['pts'] > s[away]['pts'])
                 total_sims = len(res['simulations'])
-                home_win_pct = (home_wins / total_sims) * 100
+                home_win_pct = (home_wins / total_sims) * 100 if total_sims > 0 else 50.0
                 away_win_pct = 100 - home_win_pct
             
             # Get pre-calculated team stats or compute them
@@ -299,7 +299,7 @@ class ReportGenerator:
         
         home_wins = sum(1 for s in res['simulations'] if s[home]['pts'] > s[away]['pts'])
         total_sims = len(res['simulations'])
-        home_win_pct = (home_wins / total_sims) * 100
+        home_win_pct = (home_wins / total_sims) * 100 if total_sims > 0 else 50.0
         
         home_pts_list = [s[home]['pts'] for s in res['simulations']]
         away_pts_list = [s[away]['pts'] for s in res['simulations']]
@@ -341,7 +341,7 @@ class ReportGenerator:
             else:
                 home_wins = sum(1 for s in res['simulations'] if s[home]['pts'] > s[away]['pts'])
                 total_sims = len(res['simulations'])
-                home_win_prob = home_wins / total_sims
+                home_win_prob = home_wins / total_sims if total_sims > 0 else 0.5
                 away_win_prob = 1 - home_win_prob
             
             if 'team_summaries' in res:

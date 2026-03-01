@@ -93,7 +93,10 @@ class EnsembleModel(ABC):
             weights: Optional weights for each model (uniform if None)
         """
         self.models = models
-        self.weights = weights or np.ones(len(models)) / len(models)
+        n = len(models)
+        if n == 0:
+            raise ValueError("EnsembleModel requires at least one model")
+        self.weights = weights or np.ones(n) / n
     
     @abstractmethod
     def fit_weights(
