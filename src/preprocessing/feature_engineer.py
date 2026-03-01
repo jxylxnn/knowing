@@ -323,9 +323,11 @@ class FeatureEngineer:
             logger.debug(f"Removing {len(tmp_cols)} temporary columns")
             df = df.drop(columns=tmp_cols)
         
-        # Handle infinite values and NaN safely
-        df = df.replace([np.inf, -np.inf], 0)
-        df = df.fillna(0)
+        # Handle infinite values and NaN in one pass
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        df[numeric_cols] = np.nan_to_num(
+            df[numeric_cols].values, nan=0.0, posinf=0.0, neginf=0.0
+        )
         
         logger.info(f"Feature engineering complete. Final shape: {df.shape}")
         return df
@@ -394,58 +396,43 @@ class FeatureEngineer:
             return None
 
     def _create_rolling_features_vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generates rolling features using fast vectorized operations.
-        Avoids slow lambda functions and processes columns efficiently.
-        """
+        """Rolling features using fast vectorized operations (no lambdas)."""
         stat_cols = self.target_cols + self.efficiency_cols
         valid_cols = [c for c in stat_cols if c in df.columns]
-        
+
         logger.info(f"Starting rolling feature generation for {len(valid_cols)} columns, {len(self.rolling_windows)} windows...")
-        
-        # Pre-shift all columns at once (avoids repeated groupby.shift calls)
+
         shifted = df.groupby('PLAYER_ID')[valid_cols].shift(1)
-        
+        grouped_shifted = shifted.groupby(df['PLAYER_ID'])
+
+        all_parts = []
         total_windows = len(self.rolling_windows)
         for idx, window in enumerate(self.rolling_windows):
             logger.info(f"  Processing window {window} ({idx+1}/{total_windows})...")
-            
+
             min_periods = max(1, window // 3)
-            
-            # Core aggregations - use only string names for speed
-            # Pandas optimizes these with C/Cython code
             core_agg_funcs = ['mean']
-            if window >= 5: 
+            if window >= 5:
                 core_agg_funcs.append('std')
-            if window >= 10: 
+            if window >= 10:
                 core_agg_funcs.extend(['min', 'max'])
-            
+
             try:
-                # Create rolling object once
-                rolled = shifted.groupby(df['PLAYER_ID']).rolling(
-                    window=window, min_periods=min_periods
-                )
-                
-                # Apply only fast string-based aggregations
+                rolled = grouped_shifted.rolling(window=window, min_periods=min_periods)
                 window_stats = rolled.agg(core_agg_funcs)
-                
-                # Flatten MultiIndex columns
-                new_columns = []
-                for col, func in window_stats.columns:
-                    new_columns.append(f"ROLL_{col}_{func.upper()}_{window}")
-                window_stats.columns = new_columns
-                
-                # Remove grouping index to align with original df
+                window_stats.columns = [
+                    f"ROLL_{col}_{func.upper()}_{window}"
+                    for col, func in window_stats.columns
+                ]
                 window_stats = window_stats.reset_index(level=0, drop=True)
-                
-                # Merge efficiently
-                df = pd.concat([df, window_stats], axis=1)
-                
-            except Exception as e:
+                all_parts.append(window_stats)
+            except (ValueError, KeyError, TypeError) as e:
                 logger.warning(f"Rolling window {window} failed: {e}")
                 continue
 
-        # Post-processing for Range which require multi-column ops
+        if all_parts:
+            df = pd.concat([df] + all_parts, axis=1)
+
         for window in [10, 20]:
             base_col = f'ROLL_PTS_MIN_{window}'
             if base_col in df.columns:
@@ -454,8 +441,9 @@ class FeatureEngineer:
                     max_c = f'ROLL_{col}_MAX_{window}'
                     if min_c in df.columns and max_c in df.columns:
                         df[f'ROLL_{col}_RANGE_{window}'] = df[max_c] - df[min_c]
-        
-        logger.info(f"Rolling features complete. Added {len([c for c in df.columns if c.startswith('ROLL_')])} columns.")
+
+        roll_count = sum(1 for c in df.columns if c.startswith('ROLL_'))
+        logger.info(f"Rolling features complete. Added {roll_count} columns.")
         return df
 
     def _create_efficiency_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -496,34 +484,32 @@ class FeatureEngineer:
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _create_momentum_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Momentum features using EWMA and expanding windows."""
+        """Momentum features using EWMA and expanding windows (vectorized, no lambdas)."""
         new_cols = {}
-        
+        pid = df['PLAYER_ID']
+
         for stat in self.target_cols:
+            shifted = df.groupby('PLAYER_ID')[stat].shift(1)
+            grouped = shifted.groupby(pid)
+
             for span in [3, 5, 10, 20]:
-                new_cols[f'{stat}_EWMA_{span}'] = df.groupby('PLAYER_ID')[stat].transform(
-                    lambda x: x.shift(1).ewm(span=span, adjust=False).mean()
-                )
-            
-            # Expanding mean (Vectorized)
-            season_avg = df.groupby('PLAYER_ID')[stat].transform(
-                lambda x: x.shift(1).expanding().mean()
-            )
-            new_cols[f'{stat}_SEASON_AVG'] = season_avg
-            
-            # Trend
+                new_cols[f'{stat}_EWMA_{span}'] = grouped.ewm(
+                    span=span, adjust=False
+                ).mean().reset_index(level=0, drop=True)
+
+            new_cols[f'{stat}_SEASON_AVG'] = grouped.expanding().mean().reset_index(level=0, drop=True)
+
             for short, long in [(3, 10), (5, 20)]:
-                short_avg = df.groupby('PLAYER_ID')[stat].transform(lambda x: x.shift(1).rolling(short, min_periods=1).mean())
-                long_avg = df.groupby('PLAYER_ID')[stat].transform(lambda x: x.shift(1).rolling(long, min_periods=long//3).mean())
+                short_avg = grouped.rolling(short, min_periods=1).mean().reset_index(level=0, drop=True)
+                long_avg = grouped.rolling(long, min_periods=long // 3).mean().reset_index(level=0, drop=True)
                 new_cols[f'{stat}_TREND_{short}_{long}'] = short_avg - long_avg
 
-            # Streaks
             roll_3 = new_cols.get(f'{stat}_EWMA_3', df.get(f'ROLL_{stat}_AVG_3'))
             roll_10 = new_cols.get(f'{stat}_EWMA_10', df.get(f'ROLL_{stat}_AVG_10'))
             if roll_3 is not None and roll_10 is not None:
                 new_cols[f'{stat}_HOT_STREAK'] = (roll_3 > roll_10 * 1.15).astype(int)
                 new_cols[f'{stat}_COLD_STREAK'] = (roll_3 < roll_10 * 0.85).astype(int)
-                
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _create_contextual_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -581,62 +567,49 @@ class FeatureEngineer:
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_pace_adjusted_stats(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pace-adjusted statistics."""
-        # Placeholder logic if team stats missing
+        """Pace-adjusted statistics (vectorized)."""
         team_cols = ['FGA_TEAM', 'FTA_TEAM', 'OREB_TEAM', 'OPP_DREB', 'TOV_TEAM']
         for col in team_cols:
             if col not in df.columns:
                 df[col] = 85 if 'FGA' in col else 20 if 'FTA' in col else 10
-        
+
         fgm_team = df.get('FGM_TEAM', df['FGA_TEAM'] * 0.45)
         df['EST_POSS'] = 0.5 * (
-            df['FGA_TEAM'] + 0.4 * df['FTA_TEAM'] - 
-            1.07 * (df['OREB_TEAM'] / (df['OREB_TEAM'] + df['OPP_DREB'] + 1e-6)) * 
+            df['FGA_TEAM'] + 0.4 * df['FTA_TEAM'] -
+            1.07 * (df['OREB_TEAM'] / (df['OREB_TEAM'] + df['OPP_DREB'] + 1e-6)) *
             (df['FGA_TEAM'] - fgm_team) + df['TOV_TEAM']
         )
-        
-        df['TEAM_PACE_10'] = df.groupby('TEAM_ID')['EST_POSS'].transform(
-            lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-        ).fillna(100)
-        
-        league_avg_pace = 100
-        df['PACE_FACTOR'] = (df['TEAM_PACE_10'] / league_avg_pace).clip(0.8, 1.2)
-        
+
+        shifted_poss = df.groupby('TEAM_ID')['EST_POSS'].shift(1)
+        df['TEAM_PACE_10'] = shifted_poss.groupby(
+            df['TEAM_ID']
+        ).rolling(10, min_periods=3).mean().reset_index(level=0, drop=True).fillna(100)
+
+        df['PACE_FACTOR'] = (df['TEAM_PACE_10'] / 100.0).clip(0.8, 1.2)
         return df
 
     def _add_teammate_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Teammate context features.
-        
-        Computes features capturing team-level context for each player:
-        - How dominant is this player relative to their team (share of team production)
-        - Rolling team performance (shifted to prevent leakage)
-        """
+        """Teammate context features (vectorized, no lambdas)."""
         new_cols = {}
-        
-        # Default: no star teammate out info available
         new_cols['STAR_TEAMMATE_OUT'] = 0
-        
-        # Team-level rolling stats (shifted to prevent leakage)
+
         if 'TEAM_ID' in df.columns:
             for stat in self.target_cols:
                 team_col = f'{stat}_TEAM'
                 if team_col in df.columns:
-                    # Rolling team average for context (shifted by 1 to prevent leakage)
-                    team_avg = df.groupby('TEAM_ID')[team_col].transform(
-                        lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-                    )
-                    # Player's share of team production (shifted)
+                    team_shifted = df.groupby('TEAM_ID')[team_col].shift(1)
+                    team_avg = team_shifted.groupby(
+                        df['TEAM_ID']
+                    ).rolling(10, min_periods=3).mean().reset_index(level=0, drop=True)
+
                     player_shifted = df.groupby('PLAYER_ID')[stat].shift(1)
-                    team_shifted = df.groupby('TEAM_ID')[team_col].transform(
-                        lambda x: x.shift(1)
-                    )
                     player_share = (player_shifted / (team_shifted + 1e-6)).clip(0, 1)
-                    
+
                     new_cols[f'TEAM_{stat}_AVG_10'] = team_avg
                     new_cols[f'PLAYER_{stat}_SHARE'] = player_share.groupby(
                         df['PLAYER_ID']
                     ).rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
-        
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_opponent_strength(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -683,24 +656,19 @@ class FeatureEngineer:
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_bayesian_estimates(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Bayesian shrinkage estimates (Optimized)."""
+        """Bayesian shrinkage estimates (vectorized, no lambdas)."""
         new_cols = {}
-        
+        pid = df['PLAYER_ID']
+        player_counts = df.groupby('PLAYER_ID').cumcount() + 1
+
         for stat in self.target_cols:
-            # Global stats
             global_mean = df[stat].mean()
-            
-            # Player stats (Optimized: no lambda for expanding)
-            player_means = df.groupby('PLAYER_ID')[stat].transform(lambda x: x.shift(1).expanding().mean())
-            # Count games per player
-            player_counts = df.groupby('PLAYER_ID').cumcount() + 1
-            
-            # Shrinkage
+            shifted = df.groupby('PLAYER_ID')[stat].shift(1)
+            player_means = shifted.groupby(pid).expanding().mean().reset_index(level=0, drop=True)
+
             shrinkage = player_counts / (player_counts + 10)
-            new_cols[f'{stat}_BAYESIAN'] = (
-                shrinkage * player_means + (1 - shrinkage) * global_mean
-            )
-            
+            new_cols[f'{stat}_BAYESIAN'] = shrinkage * player_means + (1 - shrinkage) * global_mean
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_seasonality_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -713,185 +681,141 @@ class FeatureEngineer:
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_advanced_custom_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adds 5 high-signal features: Usage Rate, Pace-Adjusted Usage, 
-        Strength of Schedule, Efficiency Z-Score, and Fantasy Points.
-        """
+        """High-signal features: Usage, SOS, Z-Score, Fantasy (vectorized)."""
         new_cols = {}
-        
-        # 1. & 2. Usage and Pace-Adjusted Usage
+        pid = df['PLAYER_ID']
+
         team_cols = ['FGA_TEAM', 'FTA_TEAM', 'TOV_TEAM']
         if all(c in df.columns for c in team_cols):
             player_poss = df['FGA'] + 0.44 * df['FTA'] + df['TOV']
             team_poss = df['FGA_TEAM'] + 0.44 * df['FTA_TEAM'] + df['TOV_TEAM']
             safe_min = df['MIN'].replace(0, 1)
-            mins_factor = 48 / safe_min
-            raw_usage = (player_poss / (team_poss + 1e-6)) * mins_factor
-            raw_usage = raw_usage.clip(0, 0.40)
-            
-            usg_rolled = raw_usage.groupby(df['PLAYER_ID']).transform(
-                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-            )
+            raw_usage = ((player_poss / (team_poss + 1e-6)) * (48 / safe_min)).clip(0, 0.40)
+
+            shifted_usg = raw_usage.groupby(pid).shift(1)
+            usg_rolled = shifted_usg.groupby(pid).rolling(
+                10, min_periods=3
+            ).mean().reset_index(level=0, drop=True)
             new_cols['ROLL_USG_PCT_10'] = usg_rolled
             if 'PACE_FACTOR' in df.columns:
                 new_cols['PACE_ADJ_USAGE'] = usg_rolled * df['PACE_FACTOR']
-                
-        # 3. SOS_OPP_DEF_5 (Strength of Schedule)
+
         if 'OPPONENT_ID' in df.columns and 'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10' in df.columns:
-            # Map Team ID -> Their Defensive Rating for vectorized lookup
             team_def_map = df.groupby('TEAM_ID')['TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10'].last().to_dict()
             temp_opp_def = df['OPPONENT_ID'].map(team_def_map).fillna(105)
-            
-            new_cols['SOS_OPP_DEF_5'] = temp_opp_def.groupby(df['PLAYER_ID']).transform(
-                lambda x: x.shift(1).rolling(5, min_periods=2).mean()
-            )
-            
-        # 4. EFF_Z_SCORE (Hot Hand / Slump Detector)
+            shifted_sos = temp_opp_def.groupby(pid).shift(1)
+            new_cols['SOS_OPP_DEF_5'] = shifted_sos.groupby(pid).rolling(
+                5, min_periods=2
+            ).mean().reset_index(level=0, drop=True)
+
         if 'PTS' in df.columns:
-            player_mean = df.groupby('PLAYER_ID')['PTS'].transform(lambda x: x.shift(1).expanding().mean())
-            player_std = df.groupby('PLAYER_ID')['PTS'].transform(lambda x: x.shift(1).expanding().std())
-            recent_avg = df.groupby('PLAYER_ID')['PTS'].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean())
+            shifted_pts = df.groupby('PLAYER_ID')['PTS'].shift(1)
+            grouped_pts = shifted_pts.groupby(pid)
+            player_mean = grouped_pts.expanding().mean().reset_index(level=0, drop=True)
+            player_std = grouped_pts.expanding().std().reset_index(level=0, drop=True)
+            recent_avg = grouped_pts.rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
             safe_std = player_std.fillna(player_std.mean()).replace(0, 1)
             new_cols['EFF_Z_SCORE'] = (recent_avg - player_mean) / (safe_std + 1e-6)
 
-        # 5. ROLL_FANTASY_PTS_10
         if 'FANTASY_PTS' in df.columns:
-            new_cols['ROLL_FANTASY_PTS_10'] = df.groupby('PLAYER_ID')['FANTASY_PTS'].transform(
-                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-            )
+            shifted_fp = df.groupby('PLAYER_ID')['FANTASY_PTS'].shift(1)
+            new_cols['ROLL_FANTASY_PTS_10'] = shifted_fp.groupby(pid).rolling(
+                10, min_periods=3
+            ).mean().reset_index(level=0, drop=True)
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_league_ranking_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        NEW: Converts raw stats to Percentile Ranks (0-1).
-        This allows the model to understand that 20 PTS in 2015 is 'Elite' 
-        but 20 PTS in 2023 might be 'Average'.
+        """Converts raw stats to percentile ranks (vectorized, no lambdas).
+
+        Uses pandas rolling rank instead of a Python callback over
+        each 2000-row window, giving orders-of-magnitude speedup.
         """
         new_cols = {}
-        
-        # We calculate a rolling rank over the last 30 days globally to simulate "current league landscape"
         df_sorted = df.sort_values('GAME_DATE')
-        
-        # Rolling window for league context (e.g., last 100 games league-wide)
-        window_size = 2000 
-        
+        window_size = 2000
+
         for stat in self.target_cols:
-            # Calculate percentile rank within a rolling window of games
-            pct_rank = df_sorted[stat].rolling(window=window_size, min_periods=500).apply(
-                lambda x: (x.iloc[-1] >= x).mean(), raw=False
-            )
-            
-            # Align index back to df
-            new_cols[f'LEAGUE_PCT_{stat}'] = pct_rank.reindex(df.index)
-            
+            new_cols[f'LEAGUE_PCT_{stat}'] = df_sorted[stat].rolling(
+                window=window_size, min_periods=500
+            ).rank(pct=True).reindex(df.index)
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
     def _add_target_encodings(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Target encoding (Optimized).
-        Replaces lambda x: x.shift(1).expanding().mean() with direct groupby operations.
-        """
+        """Target encoding with shrinkage (vectorized, no lambdas)."""
         new_cols = {}
-        
+        pid = df['PLAYER_ID']
+        player_counts = df.groupby('PLAYER_ID').cumcount()
+        has_team = 'TEAM_ID' in df.columns
+        if has_team:
+            team_counts = df.groupby('TEAM_ID').cumcount()
+
+        smoothing = 20
         for stat in self.target_cols:
             global_mean = df[stat].mean()
-            smoothing = 20
-            
-            # Player Target Encoding
-            # Direct expanding mean is faster than lambda
-            player_expanding = df.groupby('PLAYER_ID')[stat].transform(lambda x: x.shift(1).expanding().mean())
-            player_counts = df.groupby('PLAYER_ID').cumcount()
-            
-            # Shrinkage weight
-            shrinkage_weight = player_counts / (player_counts + smoothing)
-            new_cols[f'{stat}_PLAYER_TE'] = (
-                shrinkage_weight * player_expanding + 
-                (1 - shrinkage_weight) * global_mean
-            ).fillna(global_mean)
-            
-            # Team Target Encoding
-            if 'TEAM_ID' in df.columns:
-                team_expanding = df.groupby('TEAM_ID')[stat].transform(lambda x: x.shift(1).expanding().mean())
-                team_counts = df.groupby('TEAM_ID').cumcount()
-                shrinkage_weight = team_counts / (team_counts + smoothing)
-                new_cols[f'{stat}_TEAM_TE'] = (
-                    shrinkage_weight * team_expanding + 
-                    (1 - shrinkage_weight) * global_mean
-                ).fillna(global_mean)
+
+            shifted = df.groupby('PLAYER_ID')[stat].shift(1)
+            player_expanding = shifted.groupby(pid).expanding().mean().reset_index(level=0, drop=True)
+            sw = player_counts / (player_counts + smoothing)
+            new_cols[f'{stat}_PLAYER_TE'] = (sw * player_expanding + (1 - sw) * global_mean).fillna(global_mean)
+
+            if has_team:
+                team_shifted = df.groupby('TEAM_ID')[stat].shift(1)
+                team_expanding = team_shifted.groupby(df['TEAM_ID']).expanding().mean().reset_index(level=0, drop=True)
+                tw = team_counts / (team_counts + smoothing)
+                new_cols[f'{stat}_TEAM_TE'] = (tw * team_expanding + (1 - tw) * global_mean).fillna(global_mean)
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_advanced_scoring_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Advanced features specifically tuned for PTS and REB prediction.
-        Adds Usage Rate, Opportunity Metrics, and Shot Profiles.
-        """
+        """Advanced scoring/rebound features (vectorized, no lambdas)."""
         new_cols = {}
-        
-        # --- 1. USAGE RATE (The Alpha Feature for PTS) ---
-        # Formula: 100 * ((FGA + 0.44 * FTA + TOV) * (Team_Mins / (5 * Mins))) / (Team_FGA + 0.44 * Team_FTA + Team_TOV)
+        pid = df['PLAYER_ID']
+
+        def _shifted_rolling(series, windows):
+            """Pre-shift then rolling mean for each window size."""
+            shifted = series.groupby(pid).shift(1)
+            grouped = shifted.groupby(pid)
+            results = {}
+            for w in windows:
+                results[w] = grouped.rolling(w, min_periods=1).mean().reset_index(level=0, drop=True)
+            return results
+
         player_poss = df['FGA'] + 0.44 * df['FTA'] + df['TOV']
-        
         team_poss = df.get('FGA_TEAM', 0) + 0.44 * df.get('FTA_TEAM', 0) + df.get('TOV_TEAM', 0)
-        team_poss = team_poss.replace(0, 100) # Baseline if missing
-        
-        mins_factor = (df['MIN'] / 48.0).replace(0, 1) # Standard 48 min game
-        
-        # Store temporary column for transform
-        df['_tmp_usage'] = (player_poss / team_poss) * (1 / mins_factor)
-        df['_tmp_usage'] = df['_tmp_usage'].clip(0, 0.50).fillna(0)
-        
-        for window in [5, 10]:
-            new_cols[f'ROLL_USG_PCT_{window}'] = df.groupby('PLAYER_ID')['_tmp_usage'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-            )
+        if isinstance(team_poss, pd.Series):
+            team_poss = team_poss.replace(0, 100)
+        else:
+            team_poss = 100
+        mins_factor = (df['MIN'] / 48.0).replace(0, 1)
+        usage = ((player_poss / team_poss) * (1 / mins_factor)).clip(0, 0.50).fillna(0)
+        for w, rolled in _shifted_rolling(usage, [5, 10]).items():
+            new_cols[f'ROLL_USG_PCT_{w}'] = rolled
 
-        # --- 2. OPPONENT MISSES (The Alpha Feature for REB) ---
         if 'OPP_FGA_ALLOWED' in df.columns and 'OPP_FGM_ALLOWED' in df.columns:
-            opp_fg_pct = (df['OPP_FGM_ALLOWED'] / (df['OPP_FGA_ALLOWED'] + 1e-6)).clip(0.3, 0.7)
-            df['_tmp_reb_opp'] = 1.0 - opp_fg_pct
-            
-            for window in [5, 10]:
-                new_cols[f'ROLL_REB_OPPORTUNITY_{window}'] = df.groupby('PLAYER_ID')['_tmp_reb_opp'].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
+            reb_opp = 1.0 - (df['OPP_FGM_ALLOWED'] / (df['OPP_FGA_ALLOWED'] + 1e-6)).clip(0.3, 0.7)
+            for w, rolled in _shifted_rolling(reb_opp, [5, 10]).items():
+                new_cols[f'ROLL_REB_OPPORTUNITY_{w}'] = rolled
 
-        # --- 3. SHOT PROFILE (For PTS Variance & Ceiling) ---
         if 'FG3A' in df.columns and 'FGA' in df.columns:
-            df['_tmp_3pt_freq'] = (df['FG3A'] / (df['FGA'] + 1e-6)).clip(0, 1)
-            for window in [10, 20]:
-                new_cols[f'ROLL_3PT_FREQ_{window}'] = df.groupby('PLAYER_ID')['_tmp_3pt_freq'].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
-        
+            freq_3pt = (df['FG3A'] / (df['FGA'] + 1e-6)).clip(0, 1)
+            for w, rolled in _shifted_rolling(freq_3pt, [10, 20]).items():
+                new_cols[f'ROLL_3PT_FREQ_{w}'] = rolled
+
         if 'FTA' in df.columns and 'FGA' in df.columns:
-            df['_tmp_ft_rate'] = (df['FTA'] / (df['FGA'] + 1e-6)).clip(0, 1)
-            for window in [10]:
-                new_cols[f'ROLL_FT_RATE_{window}'] = df.groupby('PLAYER_ID')['_tmp_ft_rate'].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
+            ft_rate = (df['FTA'] / (df['FGA'] + 1e-6)).clip(0, 1)
+            for w, rolled in _shifted_rolling(ft_rate, [10]).items():
+                new_cols[f'ROLL_FT_RATE_{w}'] = rolled
 
-        # --- 4. ROLE / SHARE FEATURES ---
         if 'PTS_TEAM' in df.columns:
-            df['_tmp_pts_share'] = (df['PTS'] / (df['PTS_TEAM'] + 1e-6)).clip(0, 0.6)
-            for window in [10]:
-                new_cols[f'ROLL_PTS_SHARE_{window}'] = df.groupby('PLAYER_ID')['_tmp_pts_share'].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-                )
+            pts_share = (df['PTS'] / (df['PTS_TEAM'] + 1e-6)).clip(0, 0.6)
+            for w, rolled in _shifted_rolling(pts_share, [10]).items():
+                new_cols[f'ROLL_PTS_SHARE_{w}'] = rolled
 
-        # --- 5. EFFICIENCY MOMENTUM ---
-        ts_fga = df['FGA'] + 0.44 * df['FTA']
-        df['_tmp_ts_pct'] = (df['PTS'] / (2 * ts_fga + 1e-6)).clip(0.3, 0.8)
-        
-        for window in [5, 10]:
-            new_cols[f'ROLL_TS_PCT_MOMENTUM_{window}'] = df.groupby('PLAYER_ID')['_tmp_ts_pct'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).mean()
-            )
-
-        # Clean up temporary columns
-        tmp_cols = [c for c in df.columns if c.startswith('_tmp_')]
-        df.drop(columns=tmp_cols, inplace=True)
+        ts_pct = (df['PTS'] / (2 * (df['FGA'] + 0.44 * df['FTA']) + 1e-6)).clip(0.3, 0.8)
+        for w, rolled in _shifted_rolling(ts_pct, [5, 10]).items():
+            new_cols[f'ROLL_TS_PCT_MOMENTUM_{w}'] = rolled
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
