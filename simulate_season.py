@@ -10,6 +10,7 @@ from src.simulation.game_simulator import GameSimulator
 from src.data.schedule_scraper import ScheduleScraper
 from src.simulation.season_simulator import SeasonSimulator
 from src.simulation.report_generator import ReportGenerator
+from src.config.config import load_config
 import pandas as pd
 
 if sys.platform == "win32":
@@ -51,11 +52,16 @@ def main() -> None:
     parser.add_argument('--stat', type=str, default='mode', choices=['mode', 'mean', 'both'],
                        help='Statistic type to display: mode (most likely), mean (average), or both')
     parser.add_argument('--no-csv', action='store_true', help='Disable CSV export')
-    parser.add_argument('--data-dir', type=str, default='data', help='Data directory (default: data)')
-    parser.add_argument('--models-dir', type=str, default='models', help='Models directory (default: models)')
+    parser.add_argument('--config', type=str, default=None, help='Path to YAML config file (default: config/default.yaml)')
+    parser.add_argument('--data-dir', type=str, default=None, help='Data directory (default: from config)')
+    parser.add_argument('--models-dir', type=str, default=None, help='Models directory (default: from config)')
     parser.add_argument('--output-dir', type=str, default=None, help='Output directory for projections (default: <data-dir>/sim_results)')
     
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    args.data_dir = args.data_dir or str(cfg.data.data_dir)
+    args.models_dir = args.models_dir or str(cfg.data.models_dir)
 
     # Safety check for Windows + GPU + Parallelism
     if args.workers > 1 and sys.platform == "win32":

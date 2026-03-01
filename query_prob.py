@@ -116,10 +116,17 @@ Examples:
     )
     
     parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        help='Path to YAML config file (default: config/default.yaml)'
+    )
+    
+    parser.add_argument(
         '--data-dir',
         type=str,
-        default='data/sim_results',
-        help='Directory containing projection data'
+        default=None,
+        help='Directory containing projection data (default: from config)'
     )
     
     parser.add_argument(
@@ -137,11 +144,15 @@ Examples:
     
     args = parser.parse_args()
     
+    import os
+    from src.config.config import load_config
     from src.query.interactive_cli import InteractiveCLI
     from src.query.probability_calculator import ProbabilityCalculator
     from src.query.projection_loader import ProjectionLoader
     
-    cli = InteractiveCLI(data_dir=args.data_dir, num_sims=args.sims)
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or os.path.join(str(cfg.data.data_dir), 'sim_results')
+    cli = InteractiveCLI(data_dir=data_dir, num_sims=args.sims)
     
     if args.list_players:
         cli._list_players()
@@ -169,7 +180,7 @@ Examples:
         if not args.stat:
             args.stat = 'pts'
         
-        loader = ProjectionLoader(data_dir=args.data_dir)
+        loader = ProjectionLoader(data_dir=data_dir)
         projection = loader.find_player(
             player_name=args.player,
             team=args.team,
