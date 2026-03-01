@@ -506,8 +506,8 @@ class LineupScraper:
                 try:
                     with open(cache_file, 'r') as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (OSError, json.JSONDecodeError, ValueError) as e:
+                    logger.debug("Failed to read rotation cache %s: %s", cache_file, e)
         
         return {
             'full_rotation': [],

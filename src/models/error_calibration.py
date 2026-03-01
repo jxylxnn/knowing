@@ -478,8 +478,8 @@ class AdaptiveBlender:
                 with open(weights_file, 'r') as f:
                     data = json.load(f)
                     self.model_weights = data.get('weights', {})
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                logger.debug("Failed to load model weights from %s: %s", weights_file, e)
     
     def _save_weights(self):
         """Save model weights."""
@@ -488,8 +488,8 @@ class AdaptiveBlender:
         try:
             with open(weights_file, 'w') as f:
                 json.dump({'weights': self.model_weights}, f, indent=2)
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError) as e:
+            logger.debug("Failed to save model weights to %s: %s", weights_file, e)
     
     def record_model_error(
         self, 

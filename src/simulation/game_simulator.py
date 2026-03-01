@@ -187,7 +187,8 @@ class GameSimulator:
             densities = kde(x_grid)
             mode_idx = np.argmax(densities)
             return float(x_grid[mode_idx])
-        except Exception:
+        except (np.linalg.LinAlgError, ValueError) as e:
+            logger.debug("KDE mode computation failed, using median: %s", e)
             return float(np.median(values))
 
     def _build_roster_context(
@@ -354,7 +355,8 @@ class GameSimulator:
                             adj = team_def_factor
                     else:
                         adj = team_def_factor
-                except Exception:
+                except (KeyError, TypeError, ValueError) as e:
+                    logger.debug("Position defense lookup failed for %s: %s", position, e)
                     adj = team_def_factor
                 
                 adjustments[player['name']] = {
@@ -365,8 +367,8 @@ class GameSimulator:
                     'blk': 1.0,
                     'tov': float(np.clip(2.0 - adj, 0.90, 1.10)),
                 }
-        except Exception as e:
-            logger.debug(f"Defensive adjustment failed for opponent {opponent}: {e}")
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            logger.debug("Defensive adjustment failed for opponent %s: %s", opponent, e)
         
         return adjustments
 
@@ -385,8 +387,8 @@ class GameSimulator:
                     if 'PTS' in team_games.columns:
                         avg_pts = team_games['PTS'].mean()
                         pace = float(np.clip(avg_pts / 1.12, 90, 110))
-        except Exception:
-            pass
+        except (KeyError, TypeError, ValueError) as e:
+            logger.debug("Pace lookup failed for team %s: %s", team, e)
         
         self._pace_cache[team] = pace
         return pace

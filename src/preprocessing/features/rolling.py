@@ -81,7 +81,9 @@ class RollingFeatureGroup(FeatureGroup):
                 window_stats = window_stats.reset_index(level=0, drop=True)
                 df = pd.concat([df, window_stats], axis=1)
                 
-            except Exception:
+            except (ValueError, KeyError, TypeError) as e:
+                import logging
+                logging.getLogger(__name__).warning("Rolling window %d failed: %s", window, e)
                 continue
         
         for window in [10, 20]:
