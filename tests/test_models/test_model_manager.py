@@ -57,10 +57,11 @@ class TestModelRegistry:
     
     def test_registry_initialization(self, temp_data_dir):
         """Test ModelRegistry initializes correctly."""
+        from pathlib import Path
         from src.models.base import ModelRegistry
         
         registry = ModelRegistry(str(temp_data_dir['models_dir']))
-        assert registry.models_dir == str(temp_data_dir['models_dir'])
+        assert registry.models_dir == Path(temp_data_dir['models_dir'])
     
     def test_registry_list_models_empty(self, mock_model_registry):
         """Test ModelRegistry list_models returns empty when no models."""
