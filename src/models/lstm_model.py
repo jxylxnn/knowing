@@ -145,10 +145,13 @@ class LSTMWrapper:
         idx = 0
         for s, gl in zip(valid_starts, valid_lens):
             n_seq = gl - self.seq_len
-            for i in range(n_seq):
-                X[idx] = features[s + i: s + i + self.seq_len]
-                y[idx] = targets[s + i + self.seq_len]
-                idx += 1
+            end = s + gl
+            feat_window = np.lib.stride_tricks.sliding_window_view(
+                features[s:end], (self.seq_len, n_feat)
+            ).reshape(-1, self.seq_len, n_feat)[:n_seq]
+            X[idx:idx + n_seq] = feat_window
+            y[idx:idx + n_seq] = targets[s + self.seq_len:end]
+            idx += n_seq
 
         return X, y
 

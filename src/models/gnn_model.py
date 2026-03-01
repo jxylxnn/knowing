@@ -223,14 +223,14 @@ class GNNWrapper:
     def predict(self, player_context_df: pd.DataFrame) -> np.ndarray:
         if not self.is_trained:
             return np.zeros((len(player_context_df), len(self.target_names)))
-        
-        preds = np.zeros((len(player_context_df), len(self.target_names)))
-        for i, pid in enumerate(player_context_df['PLAYER_ID']):
-            if pid in self.player_map:
-                idx = self.player_map[pid]
-                preds[i] = self.trained_embeddings[idx]
-            else:
-                preds[i] = 0.0
+
+        n_targets = len(self.target_names)
+        player_ids = player_context_df['PLAYER_ID'].values
+        indices = np.array([self.player_map.get(pid, -1) for pid in player_ids])
+        preds = np.zeros((len(player_ids), n_targets))
+        valid = indices >= 0
+        if valid.any():
+            preds[valid] = self.trained_embeddings[indices[valid]]
         return preds
 
     def save(self, path: str):
