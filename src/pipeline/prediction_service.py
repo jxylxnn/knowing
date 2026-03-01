@@ -48,7 +48,9 @@ class PredictionService:
         history_df: Optional[pd.DataFrame] = None
     ) -> PredictionResult:
         """Predict stats for a single player."""
-        # Get player info
+        if player_context_df is None or player_context_df.empty:
+            raise ValueError("player_context_df must be a non-empty DataFrame")
+        
         player_id = int(player_context_df['PLAYER_ID'].iloc[0])
         player_name = player_context_df.get('PLAYER_NAME', pd.Series(['Unknown'])).iloc[0]
         team = player_context_df.get('TEAM_ABBREVIATION', pd.Series(['UNK'])).iloc[0]

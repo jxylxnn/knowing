@@ -181,8 +181,8 @@ class GPURollingFeatures:
 class FeatureEngineer:
     """High-Performance Feature Engineering with GPU Acceleration Support."""
     
-    def __init__(self, rolling_windows: List[int] = [3, 5, 10, 20, 50], use_gpu: bool = True):
-        self.rolling_windows = rolling_windows
+    def __init__(self, rolling_windows: Optional[List[int]] = None, use_gpu: bool = True):
+        self.rolling_windows = rolling_windows if rolling_windows is not None else [3, 5, 10, 20, 50]
         self.target_cols = ['PTS', 'REB', 'AST']
         self.efficiency_cols = ['FGA', 'FGM', 'FTA', 'FTM', 'FG3M', 'FG3A', 'TOV', 'MIN']
         self.use_gpu = use_gpu
