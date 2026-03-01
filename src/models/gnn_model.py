@@ -254,7 +254,12 @@ class GNNWrapper:
         import joblib
         state = joblib.load(path)
         config = state.get('config', {})
-        input_dim = state.get('input_dim', state['model_state']['conv1.projection.weight'].shape[1])
+        input_dim = state.get('input_dim')
+        if input_dim is None:
+            try:
+                input_dim = state['model_state']['conv1.projection.weight'].shape[1]
+            except KeyError:
+                input_dim = 64  # safe default
         
         instance = cls(input_dim, target_names=state['target_names'], config=config)
         instance.model.load_state_dict(state['model_state'])

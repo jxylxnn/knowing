@@ -892,6 +892,6 @@ class FeatureEngineer:
 
         # Clean up temporary columns
         tmp_cols = [c for c in df.columns if c.startswith('_tmp_')]
-        df.drop(columns=tmp_cols, inplace=True)
+        df = df.drop(columns=tmp_cols, errors='ignore')
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
