@@ -61,16 +61,44 @@ logging:
 # Model configurations
 catboost:
   enabled: true
-  iterations: 2000
-  learning_rate: 0.03
-  depth: 6
-  l2_leaf_reg: 3.0
+  # Core hyperparameters (tuned for NBA stat prediction)
+  iterations: 3000
+  learning_rate: 0.02
+  depth: 8
+  l2_leaf_reg: 5.0
   random_strength: 1.0
   bagging_temperature: 0.5
-  border_count: 128
+  border_count: 254
   thread_count: -1
   random_seed: 42
-  early_stopping_rounds: 100
+  early_stopping_rounds: 150
+
+  # Advanced tree structure
+  grow_policy: "Depthwise"
+  min_data_in_leaf: 10
+  score_function: "Cosine"
+  rsm: 0.8                       # Random subspace method (column sampling per split)
+
+  # Langevin stochastic gradient boosting (regularization via noise injection)
+  langevin: true
+  diffusion_temperature: 10000.0
+
+  # Multi-loss training: trains RMSE + MAE models and blends for robustness
+  use_multi_loss: true
+  multi_loss_rmse_weight: 0.6
+  multi_loss_mae_weight: 0.4
+
+  # Quantile regression for calibrated uncertainty intervals
+  use_quantile_models: true
+  quantile_alpha_low: 0.1
+  quantile_alpha_high: 0.9
+
+  # Temporal K-fold CV: trains across multiple time splits for robustness
+  n_temporal_folds: 3
+
+  # Per-target tuning: PTS/REB/AST get deeper trees; STL/BLK/TOV get
+  # heavier regularization suited to sparse count distributions
+  use_per_target_tuning: true
 
 lstm:
   enabled: true
@@ -82,7 +110,7 @@ lstm:
   epochs: 100
   patience: 10
   random_seed: 42
-  sequence_length: 5
+  sequence_length: 10
   bidirectional: true
 
 transformer:
@@ -91,7 +119,7 @@ transformer:
   nhead: 8
   num_encoder_layers: 4
   dim_feedforward: 512
-  max_seq_length: 10
+  max_seq_length: 50
   hidden_size: 128
   num_layers: 4
   dropout: 0.2
@@ -114,6 +142,7 @@ gnn:
   epochs: 100
   patience: 10
   random_seed: 42
+  use_attention: true
 
 # Ensemble configuration
 ensemble:

@@ -160,6 +160,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'epochs': _clamp(50 + int(scale * 2), 50, 200),
             'lr': max(1e-5, 1e-3 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
+            'seq_len': 10,
         },
         
         # ===== TRANSFORMER CONFIG =====
@@ -174,6 +175,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
             'grad_checkpoint': score > 30,
+            'seq_len': 50,
         },
         
         # ===== MULTI-OUTPUT NN CONFIG =====
@@ -196,6 +198,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'batch_size': _clamp(int(64 * scale), 32, 512),
             'epochs': _clamp(50 + int(scale), 50, 100),
             'lr': max(5e-4, 1e-2 / (scale ** 0.1)),
+            'use_attention': True,
         },
         
         # ===== TEMPORAL ATTENTION CONFIG =====
@@ -207,16 +210,31 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'epochs': _clamp(50 + int(scale * 1.5), 50, 150),
             'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
+            'seq_len': 20,
         },
         
         # ===== CATBOOST CONFIG =====
         'catboost': {
-            'iterations': _clamp(int(2000 * (scale ** 0.4)), 1500, 8000),
-            'depth': _clamp(6 + int(scale / 10), 6, 10),
-            'learning_rate': max(0.01, 0.03 / (scale ** 0.1)),
-            'l2_leaf_reg': 3 + int(scale / 5),
+            'iterations': _clamp(int(3000 * (scale ** 0.4)), 2000, 10000),
+            'depth': _clamp(8 + int(scale / 8), 6, 12),
+            'learning_rate': max(0.005, 0.02 / (scale ** 0.15)),
+            'l2_leaf_reg': 5.0 + scale * 0.3,
             'random_strength': 1.0,
             'bagging_temperature': 0.5,
+            'border_count': 254,
+            'grow_policy': 'Depthwise',
+            'min_data_in_leaf': max(5, 10 - int(scale / 5)),
+            'score_function': 'Cosine',
+            'rsm': max(0.6, 0.8 - scale * 0.005),
+            'langevin': score >= 10,
+            'diffusion_temperature': 10000.0,
+            'early_stopping_rounds': _clamp(150 + int(scale * 5), 100, 300),
+            'use_multi_loss': True,
+            'multi_loss_rmse_weight': 0.6,
+            'multi_loss_mae_weight': 0.4,
+            'use_quantile_models': score >= 5,
+            'n_temporal_folds': _clamp(3 + int(scale / 10), 2, 5),
+            'use_per_target_tuning': True,
         },
         
         # ===== TRAINING CONFIG =====
@@ -480,7 +498,9 @@ def print_config_summary(config: Dict[str, Any], hw_info: Dict[str, Any]) -> Non
         f"  TemporalAttention:",
         f"    hidden={config['temporal']['hidden_dim']}, heads={config['temporal']['num_heads']}",
         f"  CatBoost:",
-        f"    iterations={config['catboost']['iterations']}, depth={config['catboost']['depth']}",
+        f"    iterations={config['catboost']['iterations']}, depth={config['catboost']['depth']}, "
+        f"grow={config['catboost']['grow_policy']}, multi_loss={config['catboost']['use_multi_loss']}, "
+        f"quantile={config['catboost']['use_quantile_models']}",
         "",
         f"Training Settings:",
         f"  Warmup Steps: {config['training']['warmup_steps']}",

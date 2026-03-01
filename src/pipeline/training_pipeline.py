@@ -53,6 +53,8 @@ class TrainingPipeline:
         
         # Model containers
         self.models: Dict[str, Any] = {}
+        self.catboost_mae_models: Dict[str, Any] = {}
+        self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
         self.joint_model: Optional[MultiOutputWrapper] = None
         self.temporal_model: Optional[LSTMWrapper] = None
         self.attention_model: Optional[TransformerWrapper] = None
@@ -166,6 +168,10 @@ class TrainingPipeline:
         if self.config.gnn.enabled:
             self._train_gnn_model(fit_df, nn_features)
         
+        # Train advanced temporal attention
+        if self.config.ensemble.use_advanced_temporal:
+            self._train_temporal_attention_model(fit_df, nn_features)
+        
         # Train blender
         if self.config.ensemble.enabled:
             self._train_blender(val_df)
@@ -194,6 +200,106 @@ class TrainingPipeline:
         
         return df
     
+    # Per-target CatBoost hyperparameter profiles matching ModelManager.
+    _TARGET_PROFILES: Dict[str, Dict[str, Any]] = {
+        'PTS': {'depth': 9, 'iterations': 3500, 'learning_rate': 0.018,
+                'l2_leaf_reg': 5.0, 'min_data_in_leaf': 8, 'grow_policy': 'Depthwise'},
+        'REB': {'depth': 8, 'iterations': 3000, 'learning_rate': 0.02,
+                'l2_leaf_reg': 5.0, 'min_data_in_leaf': 10, 'grow_policy': 'Depthwise'},
+        'AST': {'depth': 8, 'iterations': 3000, 'learning_rate': 0.02,
+                'l2_leaf_reg': 5.0, 'min_data_in_leaf': 10, 'grow_policy': 'Depthwise'},
+        'STL': {'depth': 6, 'iterations': 2500, 'learning_rate': 0.025,
+                'l2_leaf_reg': 8.0, 'min_data_in_leaf': 20, 'grow_policy': 'SymmetricTree'},
+        'BLK': {'depth': 6, 'iterations': 2500, 'learning_rate': 0.025,
+                'l2_leaf_reg': 8.0, 'min_data_in_leaf': 20, 'grow_policy': 'SymmetricTree'},
+        'TOV': {'depth': 7, 'iterations': 2500, 'learning_rate': 0.022,
+                'l2_leaf_reg': 6.0, 'min_data_in_leaf': 15, 'grow_policy': 'SymmetricTree'},
+    }
+
+    def _build_catboost_params(
+        self, target: str, loss_function: str = 'RMSE'
+    ) -> Dict[str, Any]:
+        """Build CatBoost param dict from config + per-target profile."""
+        cfg = self.config.catboost
+        params: Dict[str, Any] = {
+            'iterations': cfg.iterations,
+            'learning_rate': cfg.learning_rate,
+            'depth': cfg.depth,
+            'l2_leaf_reg': cfg.l2_leaf_reg,
+            'border_count': cfg.border_count,
+            'random_strength': cfg.random_strength,
+            'bagging_temperature': cfg.bagging_temperature,
+            'early_stopping_rounds': cfg.early_stopping_rounds,
+            'random_seed': cfg.random_seed,
+            'grow_policy': cfg.grow_policy,
+            'min_data_in_leaf': cfg.min_data_in_leaf,
+            'rsm': cfg.rsm,
+        }
+
+        # Per-target overrides first (before derived params)
+        if cfg.use_per_target_tuning and target in self._TARGET_PROFILES:
+            params.update(self._TARGET_PROFILES[target])
+
+        # Ordered boosting is only supported for SymmetricTree
+        gp = params['grow_policy']
+        if gp == 'SymmetricTree':
+            params['boosting_type'] = 'Ordered'
+        else:
+            params['boosting_type'] = 'Plain'
+
+        if cfg.langevin:
+            params['langevin'] = True
+            params['diffusion_temperature'] = cfg.diffusion_temperature
+
+        if gp in ('SymmetricTree', 'Depthwise'):
+            params['score_function'] = cfg.score_function
+
+        params['loss_function'] = loss_function
+        if loss_function == 'RMSE':
+            params['eval_metric'] = 'RMSE'
+        elif loss_function == 'MAE':
+            params['eval_metric'] = 'MAE'
+        elif loss_function.startswith('Quantile'):
+            params['eval_metric'] = loss_function
+
+        return params
+
+    def _fit_catboost(
+        self,
+        params: Dict[str, Any],
+        cat_features: List[str],
+        X_train, y_train, X_val, y_val,
+        sample_weights=None,
+    ):
+        """Train a CatBoostRegressor with automatic GPU→CPU fallback."""
+        from catboost import CatBoostRegressor
+
+        task_type = 'GPU' if self.use_gpu else 'CPU'
+        fit_kw: Dict[str, Any] = {
+            'eval_set': (X_val, y_val), 'use_best_model': True,
+        }
+        if sample_weights is not None:
+            fit_kw['sample_weight'] = sample_weights
+
+        def _make(tt: str):
+            p = {**params, 'cat_features': cat_features, 'verbose': 200,
+                 'task_type': tt}
+            if tt == 'GPU':
+                p['devices'] = '0'
+            return CatBoostRegressor(**p)
+
+        try:
+            model = _make(task_type)
+            model.fit(X_train, y_train, **fit_kw)
+            return model
+        except Exception as exc:
+            if task_type == 'GPU':
+                logger.warning(f"GPU failed ({exc}), falling back to CPU")
+                model = _make('CPU')
+                model.fit(X_train, y_train, **fit_kw)
+                return model
+            raise
+
     def _train_catboost_models(
         self,
         fit_df: pd.DataFrame,
@@ -201,81 +307,75 @@ class TrainingPipeline:
         cat_cols: List[str],
         sample_weights: Optional[np.ndarray] = None
     ) -> None:
-        """Train CatBoost models for each target."""
-        from catboost import CatBoostRegressor
-        
-        catboost_config = self.config.catboost
+        """Train advanced multi-model CatBoost per target.
+
+        For each target trains:
+        1. Primary RMSE model with per-target tuned hyperparameters
+        2. MAE companion model (if ``use_multi_loss``)
+        3. Quantile P10/P90 models (if ``use_quantile_models``)
+        """
+        cfg = self.config.catboost
         targets = self.training_config.targets
-        
+        cat_features = [c for c in cat_cols if c in self.feature_cols]
+
         for target in targets:
-            logger.info(f"Training CatBoost for: {target}")
-            y = fit_df[target]
-            
-            # Get cat features that exist in feature_cols
-            cat_features = [c for c in cat_cols if c in self.feature_cols]
-            
-            # Try GPU first, fallback to CPU
-            task_type = "GPU" if self.use_gpu else "CPU"
-            
-            try:
-                model = CatBoostRegressor(
-                    iterations=catboost_config.iterations,
-                    learning_rate=catboost_config.learning_rate,
-                    depth=catboost_config.depth,
-                    l2_leaf_reg=catboost_config.l2_leaf_reg,
-                    loss_function='RMSE',
-                    eval_metric='RMSE',
-                    cat_features=cat_features,
-                    verbose=200,
-                    early_stopping_rounds=catboost_config.early_stopping_rounds,
-                    task_type=task_type,
-                    devices='0',
-                    random_seed=catboost_config.random_seed
-                )
-                
-                fit_kwargs = {
-                    'eval_set': (val_df[self.feature_cols], val_df[target]),
-                    'use_best_model': True
-                }
-                if sample_weights is not None:
-                    fit_kwargs['sample_weight'] = sample_weights
-                
-                model.fit(fit_df[self.feature_cols], y, **fit_kwargs)
-                
-            except Exception as e:
-                logger.error(f"GPU training failed for {target}: {e}. Falling back to CPU.")
-                
-                model = CatBoostRegressor(
-                    iterations=catboost_config.iterations,
-                    learning_rate=catboost_config.learning_rate,
-                    depth=catboost_config.depth,
-                    l2_leaf_reg=catboost_config.l2_leaf_reg,
-                    loss_function='RMSE',
-                    eval_metric='RMSE',
-                    cat_features=cat_features,
-                    verbose=200,
-                    early_stopping_rounds=catboost_config.early_stopping_rounds,
-                    task_type="CPU",
-                    random_seed=catboost_config.random_seed
-                )
-                
-                model.fit(fit_df[self.feature_cols], y, **fit_kwargs)
-            
+            logger.info(f"=== Training Advanced CatBoost for: {target} ===")
+            y_fit = fit_df[target]
+            y_val = val_df[target]
+            X_fit = fit_df[self.feature_cols]
+            X_v = val_df[self.feature_cols]
+
+            # 1. Primary RMSE model
+            rmse_params = self._build_catboost_params(target, 'RMSE')
+            logger.info(
+                f"  RMSE: depth={rmse_params['depth']}, "
+                f"iter={rmse_params['iterations']}, lr={rmse_params['learning_rate']:.4f}"
+            )
+            model = self._fit_catboost(
+                rmse_params, cat_features, X_fit, y_fit, X_v, y_val, sample_weights
+            )
             self.models[target] = model
-            
-            # Save model
+
             model_path = self.data_config.models_dir / f'{target.lower()}_catboost.cbm'
             model.save_model(str(model_path))
-            
-            # Register in registry
+
             metadata = ModelMetadata(
                 name=f'{target}_catboost',
                 model_type='catboost',
-                training_params=catboost_config.__dict__
+                training_params=rmse_params,
             )
             self.registry.register(f'{target}_catboost', model, metadata)
-            
-            logger.info(f"Saved {target} model to {model_path}")
+
+            # 2. MAE companion
+            if cfg.use_multi_loss:
+                mae_params = self._build_catboost_params(target, 'MAE')
+                mae_params['iterations'] = int(mae_params['iterations'] * 0.8)
+                mae_model = self._fit_catboost(
+                    mae_params, cat_features, X_fit, y_fit, X_v, y_val, sample_weights
+                )
+                self.catboost_mae_models[target] = mae_model
+                mae_path = self.data_config.models_dir / f'{target.lower()}_catboost_mae.cbm'
+                mae_model.save_model(str(mae_path))
+                logger.info(f"  Saved MAE model to {mae_path}")
+
+            # 3. Quantile models
+            if cfg.use_quantile_models:
+                q_iter = int(rmse_params['iterations'] * 0.6)
+                for alpha, label in [(cfg.quantile_alpha_low, 'low'),
+                                     (cfg.quantile_alpha_high, 'high')]:
+                    q_params = self._build_catboost_params(
+                        target, f'Quantile:alpha={alpha}'
+                    )
+                    q_params['iterations'] = q_iter
+                    q_model = self._fit_catboost(
+                        q_params, cat_features, X_fit, y_fit, X_v, y_val, sample_weights
+                    )
+                    self.catboost_quantile_models.setdefault(target, {})[label] = q_model
+                    q_path = self.data_config.models_dir / f'{target.lower()}_catboost_q{label}.cbm'
+                    q_model.save_model(str(q_path))
+                    logger.info(f"  Saved quantile-{label} model to {q_path}")
+
+            logger.info(f"  {target} complete.")
     
     def _train_joint_model(self, fit_df: pd.DataFrame, nn_features: List[str]) -> None:
         """Train joint neural network model."""
@@ -356,6 +456,33 @@ class TrainingPipeline:
         
         logger.info(f"Saved GNN model to {model_path}")
     
+    def _train_temporal_attention_model(self, fit_df: pd.DataFrame, nn_features: List[str]) -> None:
+        """Train advanced Temporal Attention model (context-aware)."""
+        logger.info("Training Temporal Attention model...")
+        
+        core_targets = self.training_config.targets[:3]
+        
+        self.adv_temporal_model = TemporalAttentionWrapper(
+            input_dim=len(nn_features),
+            seq_len=20
+        )
+        
+        self.adv_temporal_model.fit(fit_df, nn_features, core_targets)
+        
+        model_path = self.data_config.models_dir / 'adv_temporal_attention.pkl'
+        self.adv_temporal_model.save(str(model_path))
+        
+        logger.info(f"Saved Temporal Attention model to {model_path}")
+    
+    def _predict_catboost_blended(self, target: str, X) -> np.ndarray:
+        """Blend RMSE + MAE CatBoost predictions for *target*."""
+        rmse_pred = self.models[target].predict(X)
+        if target in self.catboost_mae_models:
+            w = self.config.catboost.multi_loss_rmse_weight
+            mae_pred = self.catboost_mae_models[target].predict(X)
+            return rmse_pred * w + mae_pred * (1 - w)
+        return rmse_pred
+
     def _train_blender(self, val_df: pd.DataFrame) -> None:
         """Train meta-learner blender using Ridge regression."""
         logger.info("Training Super Learner (Blender)...")
@@ -363,7 +490,7 @@ class TrainingPipeline:
         core_targets = self.training_config.targets[:3]
         blender_y = val_df[core_targets].values
         
-        # Get predictions from base models
+        # Get blended predictions from base models
         ens_preds_list = []
         for target in core_targets:
             if target not in self.models:
@@ -372,8 +499,9 @@ class TrainingPipeline:
             model = self.models[target]
             X_val = val_df[self.feature_cols]
             
-            # Handle different model types
-            if hasattr(model, 'predict'):
+            if 'CatBoost' in str(type(model)):
+                p = self._predict_catboost_blended(target, X_val)
+            elif hasattr(model, 'predict'):
                 try:
                     p = model.predict(X_val)
                 except (TypeError, AttributeError):
@@ -443,15 +571,38 @@ class TrainingPipeline:
             self.feature_cols = joblib.load(feature_cols_path)
             logger.info(f"Loaded {len(self.feature_cols)} feature columns")
         
-        # Load CatBoost models
+        # Load CatBoost models (primary + MAE + quantile)
+        from catboost import CatBoostRegressor
         for target in self.training_config.targets:
             model_path = self.data_config.models_dir / f'{target.lower()}_catboost.cbm'
             if model_path.exists():
-                from catboost import CatBoostRegressor
                 model = CatBoostRegressor()
                 model.load_model(str(model_path))
                 self.models[target] = model
                 logger.info(f"Loaded {target} CatBoost model")
+
+            # MAE companion
+            mae_path = self.data_config.models_dir / f'{target.lower()}_catboost_mae.cbm'
+            if mae_path.exists():
+                try:
+                    mae_m = CatBoostRegressor()
+                    mae_m.load_model(str(mae_path))
+                    self.catboost_mae_models[target] = mae_m
+                    logger.info(f"Loaded {target} MAE model")
+                except Exception as e:
+                    logger.debug(f"Failed to load MAE for {target}: {e}")
+
+            # Quantile models
+            for label in ('low', 'high'):
+                q_path = self.data_config.models_dir / f'{target.lower()}_catboost_q{label}.cbm'
+                if q_path.exists():
+                    try:
+                        q_m = CatBoostRegressor()
+                        q_m.load_model(str(q_path))
+                        self.catboost_quantile_models.setdefault(target, {})[label] = q_m
+                        logger.info(f"Loaded {target} quantile-{label} model")
+                    except Exception as e:
+                        logger.debug(f"Failed to load quantile-{label} for {target}: {e}")
         
         # Load other models
         model_files = [
@@ -499,7 +650,10 @@ class TrainingPipeline:
             y_test = test_df[target]
             
             try:
-                y_pred = model.predict(X_test)
+                if 'CatBoost' in str(type(model)):
+                    y_pred = self._predict_catboost_blended(target, X_test)
+                else:
+                    y_pred = model.predict(X_test)
             except (TypeError, AttributeError):
                 y_pred = model.predict(X_test, test_df)
             

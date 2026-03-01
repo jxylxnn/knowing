@@ -2,7 +2,9 @@
 Enhanced NBA Game Simulator with Realistic Simulation Features.
 Integrates Four Factors, Possession Simulation, Game Context, and Player Correlations.
 """
+import os
 import numpy as np
+import pandas as pd
 import torch
 import logging
 from typing import Dict, List, Any, Optional, Tuple
@@ -95,9 +97,9 @@ class EnhancedGameSimulator:
     def load_context(self):
         """Loads the raw data to extract rosters and recent stats."""
         if self.players_df is None:
-            self.players_df = pd.read_csv(self.manager.data_dir + '/nba_players.csv')
+            self.players_df = pd.read_csv(os.path.join(self.manager.data_dir, 'nba_players.csv'))
             self.players_df['GAME_DATE'] = pd.to_datetime(self.players_df['GAME_DATE'])
-            self.games_df = pd.read_csv(self.manager.data_dir + '/nba_games.csv')
+            self.games_df = pd.read_csv(os.path.join(self.manager.data_dir, 'nba_games.csv'))
             self.games_df['GAME_DATE'] = pd.to_datetime(self.games_df['GAME_DATE'])
     
     def get_available_teams(self) -> List[str]:
@@ -403,7 +405,7 @@ class EnhancedGameSimulator:
                         team_a_stats.get('team', 'UNK'),
                         team_b_stats.get('team', 'UNK')
                     )
-                except:
+                except Exception:
                     pass
             
             pace_a = team_a_stats.get('pace', 100)
@@ -719,13 +721,10 @@ class EnhancedGameSimulator:
             logger.info("Preparing shared simulation context...")
             from src.preprocessing.data_loader import DataLoader
             loader = DataLoader(
-                self.manager.data_dir + '/nba_players.csv',
-                self.manager.data_dir + '/nba_games.csv'
+                os.path.join(self.manager.data_dir, 'nba_players.csv'),
+                os.path.join(self.manager.data_dir, 'nba_games.csv')
             )
             self.merged_data = loader.merge_datasets()
             self.all_merged_with_features = self.manager.feature_engineer.create_features(self.merged_data)
             self.latest_player_stats = self.all_merged_with_features.sort_values('GAME_DATE').groupby('PLAYER_ID').tail(1)
             logger.info("Shared context prepared.")
-
-
-import pandas as pd

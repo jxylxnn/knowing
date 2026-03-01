@@ -135,7 +135,7 @@ class PredictionService:
             logger.error(f"Error preparing features: {e}")
             return self._fallback_prediction(player_context_df)
         
-        # 1. Base predictions from CatBoost models
+        # 1. Base predictions from CatBoost models (blended RMSE+MAE)
         for target in self.config.training.targets:
             if target not in self.pipeline.models:
                 pred = self._get_fallback_value(player_context_df, target)
@@ -146,7 +146,15 @@ class PredictionService:
             model = self.pipeline.models[target]
             
             try:
-                if hasattr(model, 'predict'):
+                # Use blended RMSE+MAE when MAE companion exists
+                mae_models = getattr(self.pipeline, 'catboost_mae_models', {})
+                if 'CatBoost' in str(type(model)) and target in mae_models:
+                    rmse_pred = model.predict(X)
+                    mae_pred = mae_models[target].predict(X)
+                    w = self.config.catboost.multi_loss_rmse_weight
+                    blended = rmse_pred * w + mae_pred * (1 - w)
+                    pred = blended[0]
+                elif hasattr(model, 'predict'):
                     pred = model.predict(X)[0]
                 else:
                     pred = model.predict(X, df_meta=player_context_df)[0]
@@ -156,6 +164,15 @@ class PredictionService:
                 
                 predictions[target] = float(pred)
                 base_predictions[target] = predictions[target]
+
+                # Quantile-derived uncertainty
+                q_models = getattr(self.pipeline, 'catboost_quantile_models', {})
+                if target in q_models:
+                    q = q_models[target]
+                    if 'low' in q and 'high' in q:
+                        ci_low = float(q['low'].predict(X)[0])
+                        ci_high = float(q['high'].predict(X)[0])
+                        predictions[f'{target}_STD'] = (ci_high - ci_low) / 2.56
                 
             except Exception as e:
                 logger.warning(f"Prediction failed for {target}: {e}")
