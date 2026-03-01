@@ -268,8 +268,10 @@ class QueryParser:
         potential_names = []
         
         for i, word in enumerate(words):
+            if not word:
+                continue
             if word[0].isupper() and word.lower() not in STAT_ALIASES and word.lower() not in ('compare', 'vs', 'and'):
-                if i + 1 < len(words) and words[i + 1][0].isupper():
+                if i + 1 < len(words) and words[i + 1] and words[i + 1][0].isupper():
                     potential_names.append(f"{word} {words[i + 1]}")
                 else:
                     potential_names.append(word)

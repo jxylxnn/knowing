@@ -69,8 +69,8 @@ class MinutesPredictor:
                     self.feature_cols = data.get('feature_cols', self.FEATURE_COLS)
                     self.is_trained = self.model is not None
                 logger.info("Loaded minutes prediction model")
-            except Exception as e:
-                logger.debug(f"Failed to load minutes model: {e}")
+            except (OSError, pickle.UnpicklingError, EOFError, KeyError) as e:
+                logger.warning("Failed to load minutes model from %s: %s", model_path, e)
     
     def train(self, players_df: pd.DataFrame, games_df: pd.DataFrame):
         """
@@ -399,8 +399,8 @@ class MinutesPredictor:
                 with open(cache_file, 'r') as f:
                     tendencies = json.load(f)
                     return tendencies.get(team_abbr.upper(), {}).get('rotation_tightness', 0.5)
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                logger.debug("Failed to load coach tendencies: %s", e)
         
         coach_profiles = {
             'MIA': 0.75, 'BOS': 0.70, 'GSW': 0.65, 'DEN': 0.65,

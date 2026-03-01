@@ -510,14 +510,18 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
                         help='Fetch only new games since the last game in dataset (incremental update)')
     parser.add_argument('--force', action='store_true', 
                         help='Force re-fetch all data (ignore existing)')
-    parser.add_argument('--data-dir', type=str, default='data',
-                        help='Directory to save data files (default: data)')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to YAML config file (default: config/default.yaml)')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory to save data files (default: from config)')
     parser.add_argument('--current-season', action='store_true',
                         help='Fetch current season only')
     
     args = parser.parse_args()
     
-    data_dir = args.data_dir
+    from src.config.config import load_config
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or str(cfg.data.data_dir)
     players_file = os.path.join(data_dir, 'nba_players.csv')
     games_file = os.path.join(data_dir, 'nba_games.csv')
     os.makedirs(data_dir, exist_ok=True)

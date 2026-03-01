@@ -361,8 +361,8 @@ class RotoWireLineupScraper:
                 try:
                     with open(cache_file, 'r') as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (OSError, json.JSONDecodeError, ValueError) as e:
+                    logger.debug("Failed to read lineup cache %s: %s", cache_file, e)
         
         result = self._fetch_projected_minutes(team_abbr)
         
@@ -371,8 +371,8 @@ class RotoWireLineupScraper:
             try:
                 with open(cache_file, 'w') as f:
                     json.dump(result, f, indent=2)
-            except Exception:
-                pass
+            except (OSError, TypeError, ValueError) as e:
+                logger.debug("Failed to write lineup cache %s: %s", cache_file, e)
         
         return result
     

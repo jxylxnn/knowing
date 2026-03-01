@@ -4,20 +4,27 @@ import pandas as pd
 from src.models.model_manager import ModelManager
 from src.utils.logging_config import setup_logging
 from src.config.model_config import get_model_config, print_config_summary
+from src.config.config import load_config
 
 setup_logging()
 
 
 def main():
     parser = argparse.ArgumentParser(description='Train NBA prediction models')
-    parser.add_argument('--data-dir', type=str, default='data',
-                        help='Directory containing NBA data files (default: data)')
-    parser.add_argument('--models-dir', type=str, default='models',
-                        help='Directory to save trained models (default: models)')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to YAML config file (default: config/default.yaml)')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory containing NBA data files (default: from config)')
+    parser.add_argument('--models-dir', type=str, default=None,
+                        help='Directory to save trained models (default: from config)')
     parser.add_argument('--model-size', type=str, default='auto',
                         choices=['auto', 'small', 'medium', 'large', 'ultra'],
                         help='Model size preset: auto (detect), small, medium, large, ultra (default: auto)')
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or str(cfg.data.data_dir)
+    models_dir = args.models_dir or str(cfg.data.models_dir)
     
     model_config, hw_info = get_model_config(force_size=None if args.model_size == 'auto' else args.model_size)
     
@@ -60,8 +67,8 @@ def main():
     print("=" * 60 + "\n")
     
     manager = ModelManager(
-        data_dir=args.data_dir, 
-        models_dir=args.models_dir,
+        data_dir=data_dir,
+        models_dir=models_dir,
         model_config=model_config
     )
     
@@ -82,7 +89,7 @@ def main():
         for metric_name, value in metrics.items():
             print(f"  {metric_name.upper()}: {value:.4f}")
             
-    print(f"\nTraining and Evaluation Complete. Models are saved in '{args.models_dir}' directory.")
+    print(f"\nTraining and Evaluation Complete. Models are saved in '{models_dir}' directory.")
 
 
 if __name__ == "__main__":

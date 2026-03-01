@@ -62,16 +62,33 @@ class TestFeatureEngineer:
         assert result.empty
     
     def test_feature_engineer_no_data_leakage(self, sample_player_data):
-        """Test that feature engineering doesn't leak future data."""
+        """Test that rolling features only use past data (no future leakage).
+
+        For each player, the first rolling-average value must be NaN or 0
+        (because there is no prior game to draw from) — if it equals the
+        player's actual first-game PTS, future data leaked in.
+        """
         from src.preprocessing.feature_engineer import FeatureEngineer
-        
+
         fe = FeatureEngineer()
-        result = fe.create_features(sample_player_data, is_training=True)
-        
-        rolling_cols = [c for c in result.columns if c.startswith('ROLL_')]
-        for col in rolling_cols:
-            if 'PTS' in col and 'AVG' in col:
-                assert result[col].isna().sum() >= 0
+        result = fe.create_features(sample_player_data.copy(), is_training=True)
+
+        rolling_avg_cols = [
+            c for c in result.columns
+            if c.startswith('ROLL_PTS') and 'MEAN' in c
+        ]
+
+        for col in rolling_avg_cols:
+            for pid in result['PLAYER_ID'].unique():
+                player_rows = result[result['PLAYER_ID'] == pid].sort_values('GAME_DATE')
+                if player_rows.empty:
+                    continue
+                first_val = player_rows[col].iloc[0]
+                first_pts = player_rows['PTS'].iloc[0] if 'PTS' in player_rows.columns else None
+                assert first_val == 0 or pd.isna(first_val) or first_val != first_pts, (
+                    f"Possible leakage: {col} first value ({first_val}) "
+                    f"matches first-game PTS ({first_pts}) for player {pid}"
+                )
 
 
 class TestDataLoader:

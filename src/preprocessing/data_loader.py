@@ -3,7 +3,6 @@ import numpy as np
 import logging
 from typing import Tuple
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class DataLoader:
@@ -14,6 +13,29 @@ class DataLoader:
         self.games_path = games_path
         self.players_df = None
         self.games_df = None
+
+    @staticmethod
+    def _parse_minutes_vectorized(series: pd.Series) -> pd.Series:
+        """Vectorized minutes parsing — avoids row-by-row .apply()."""
+        result = pd.to_numeric(series, errors='coerce')
+
+        str_mask = result.isna() & series.notna()
+        if not str_mask.any():
+            return result
+
+        str_vals = series[str_mask].astype(str).str.strip()
+        colon_mask = str_vals.str.contains(':', na=False)
+        if colon_mask.any():
+            parts = str_vals[colon_mask].str.split(':', expand=True)
+            mins = pd.to_numeric(parts[0], errors='coerce').fillna(0)
+            secs = pd.to_numeric(parts[1], errors='coerce').fillna(0)
+            result.loc[colon_mask[colon_mask].index] = mins + secs / 60.0
+
+        remaining = str_mask & result.isna()
+        if remaining.any():
+            result.loc[remaining] = pd.to_numeric(series[remaining], errors='coerce')
+
+        return result
 
     def _parse_minutes(self, val):
         if pd.isna(val): return np.nan
@@ -36,7 +58,7 @@ class DataLoader:
             if c in self.players_df.columns: self.players_df[c] = pd.to_numeric(self.players_df[c], errors='coerce')
 
         if 'MIN' in self.players_df.columns:
-            self.players_df['MIN'] = self.players_df['MIN'].apply(self._parse_minutes).clip(0, 60)
+            self.players_df['MIN'] = self._parse_minutes_vectorized(self.players_df['MIN']).clip(0, 60)
 
         self.players_df['GAME_DATE'] = pd.to_datetime(self.players_df['GAME_DATE'])
         self.games_df['GAME_DATE'] = pd.to_datetime(self.games_df['GAME_DATE'])
@@ -74,11 +96,13 @@ class DataLoader:
             'FGA_OPP': 'OPP_FGA_ALLOWED', 'FGM_OPP': 'OPP_FGM_ALLOWED'
         }, inplace=True)
         
-        # Calculate Rolling Defensive Ratings for the TEAM
-        for stat in ['OPP_PTS_ALLOWED', 'OPP_REB_ALLOWED', 'OPP_AST_ALLOWED']:
-            merged_games[f'TEAM_DEF_{stat}_ROLL_10'] = merged_games.groupby('TEAM_ID')[stat].transform(
-                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-            )
+        def_stats = ['OPP_PTS_ALLOWED', 'OPP_REB_ALLOWED', 'OPP_AST_ALLOWED']
+        shifted_def = merged_games.groupby('TEAM_ID')[def_stats].shift(1)
+        rolled_def = shifted_def.groupby(
+            merged_games['TEAM_ID']
+        ).rolling(10, min_periods=3).mean().reset_index(level=0, drop=True)
+        for stat in def_stats:
+            merged_games[f'TEAM_DEF_{stat}_ROLL_10'] = rolled_def[stat]
             
         # Merge Defensive Stats back to main Games DF
         # We only need the team's defensive stats

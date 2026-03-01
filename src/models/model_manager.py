@@ -1403,37 +1403,44 @@ class ModelManager:
         histories_map: Optional[Dict[int, pd.DataFrame]],
         target: str
     ) -> np.ndarray:
-        """Estimate prediction std from player history when model doesn't provide it."""
-        stds = []
-        
-        for _, row in context_df.iterrows():
-            player_id = row.get('PLAYER_ID')
-            std_val = None
-            
-            # Try to get from history
-            if histories_map and player_id in histories_map:
-                hist = histories_map[player_id]
-                if target in hist.columns and len(hist) >= 3:
-                    std_val = hist[target].tail(10).std()
-            
-            # Try rolling std columns from the row
-            if std_val is None or np.isnan(std_val):
-                for col in [f'ROLL_{target}_STD_10', f'ROLL_{target}_STD_20']:
-                    if col in row.index and pd.notna(row[col]):
-                        std_val = row[col]
-                        break
-            
-            # Fallback to coefficient of variation estimate
-            if std_val is None or np.isnan(std_val):
-                mean_val = row.get(f'ROLL_{target}_AVG_10', row.get(target, 0))
-                # Approximate CVs for NBA stats
-                cv_map = {'PTS': 0.45, 'REB': 0.40, 'AST': 0.50, 'STL': 0.80, 'BLK': 0.90, 'TOV': 0.60}
-                cv = cv_map.get(target, 0.40)
-                std_val = max(1.0, float(mean_val) * cv) if pd.notna(mean_val) and mean_val > 0 else 2.0
-            
-            stds.append(float(std_val))
-        
-        return np.array(stds)
+        """Estimate prediction std from player history (vectorized where possible)."""
+        n = len(context_df)
+        stds = np.full(n, np.nan)
+
+        if histories_map:
+            player_ids = context_df['PLAYER_ID'].values
+            for i, pid in enumerate(player_ids):
+                if pid in histories_map:
+                    hist = histories_map[pid]
+                    if target in hist.columns and len(hist) >= 3:
+                        stds[i] = hist[target].tail(10).std()
+
+        nan_mask = np.isnan(stds)
+        for col in [f'ROLL_{target}_STD_10', f'ROLL_{target}_STD_20']:
+            if col in context_df.columns and nan_mask.any():
+                col_vals = context_df[col].values
+                fill_mask = nan_mask & pd.notna(col_vals)
+                stds[fill_mask] = col_vals[fill_mask]
+                nan_mask = np.isnan(stds)
+
+        if nan_mask.any():
+            cv_map = {'PTS': 0.45, 'REB': 0.40, 'AST': 0.50, 'STL': 0.80, 'BLK': 0.90, 'TOV': 0.60}
+            cv = cv_map.get(target, 0.40)
+            mean_col = f'ROLL_{target}_AVG_10'
+            if mean_col in context_df.columns:
+                means = context_df[mean_col].values
+            elif target in context_df.columns:
+                means = context_df[target].values
+            else:
+                means = np.zeros(n)
+            fallback = np.where(
+                (pd.notna(means)) & (means > 0),
+                np.maximum(1.0, means * cv),
+                2.0
+            )
+            stds[nan_mask] = fallback[nan_mask]
+
+        return np.nan_to_num(stds, nan=2.0)
 
     def _fallback_prediction(self, player_context_df: pd.DataFrame) -> Dict[str, float]:
         """Fallback prediction using historical averages."""

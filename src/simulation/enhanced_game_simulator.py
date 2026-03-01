@@ -405,8 +405,8 @@ class EnhancedGameSimulator:
                         team_a_stats.get('team', 'UNK'),
                         team_b_stats.get('team', 'UNK')
                     )
-                except Exception:
-                    pass
+                except (AttributeError, KeyError, TypeError, ValueError) as e:
+                    logger.debug("Matchup pace calculation failed: %s", e)
             
             pace_a = team_a_stats.get('pace', 100)
             pace_b = team_b_stats.get('pace', 100)

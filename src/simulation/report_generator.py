@@ -43,15 +43,13 @@ class ReportGenerator:
             return float((bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2)
         
         try:
-            # Use KDE for continuous data
             kde = scipy_stats.gaussian_kde(values)
-            # Search for mode in a fine grid
             x_grid = np.linspace(values.min(), values.max(), 200)
             densities = kde(x_grid)
             mode_idx = np.argmax(densities)
             return float(x_grid[mode_idx])
-        except Exception:
-            # Fallback to median if KDE fails
+        except (np.linalg.LinAlgError, ValueError) as e:
+            logger.debug("KDE mode computation failed, using median: %s", e)
             return float(np.median(values))
 
     def _compute_stats_summary(self, values: List[float]) -> Dict[str, float]:

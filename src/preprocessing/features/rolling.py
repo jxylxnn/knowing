@@ -81,7 +81,9 @@ class RollingFeatureGroup(FeatureGroup):
                 window_stats = window_stats.reset_index(level=0, drop=True)
                 df = pd.concat([df, window_stats], axis=1)
                 
-            except Exception:
+            except (ValueError, KeyError, TypeError) as e:
+                import logging
+                logging.getLogger(__name__).warning("Rolling window %d failed: %s", window, e)
                 continue
         
         for window in [10, 20]:
@@ -97,96 +99,80 @@ class RollingFeatureGroup(FeatureGroup):
 
 
 class EfficiencyFeatureGroup(FeatureGroup):
-    """Generates efficiency metrics like TS%, eFG%, etc."""
-    
+    """Generates efficiency metrics like TS%, eFG%, etc. (vectorized)."""
+
     def __init__(self, windows: Optional[List[int]] = None):
         self.windows = windows or [5, 10, 20]
-    
+
     @property
     def name(self) -> str:
         return "efficiency_features"
-    
+
     def create(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         new_cols = {}
-        
+        eff_cols = ['FGA', 'FTA', 'TOV', 'PTS', 'FGM', 'FG3M', 'FG3A', 'AST', 'MIN', 'REB']
+        valid_eff = [c for c in eff_cols if c in df.columns]
+
+        shifted = df.groupby('PLAYER_ID')[valid_eff].shift(1)
+        grouped = shifted.groupby(df['PLAYER_ID'])
+
         for window in self.windows:
-            fg_sum = df.groupby('PLAYER_ID')['FGA'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            ft_sum = df.groupby('PLAYER_ID')['FTA'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            tov_sum = df.groupby('PLAYER_ID')['TOV'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            pts_sum = df.groupby('PLAYER_ID')['PTS'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            fgm_sum = df.groupby('PLAYER_ID')['FGM'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            fg3m_sum = df.groupby('PLAYER_ID')['FG3M'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            fg3a_sum = df.groupby('PLAYER_ID')['FG3A'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            ast_sum = df.groupby('PLAYER_ID')['AST'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(0)
-            mins_sum = df.groupby('PLAYER_ID')['MIN'].transform(
-                lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-            ).fillna(1)
-            
+            rolled = grouped.rolling(window, min_periods=1).sum().reset_index(level=0, drop=True)
+
+            fg_sum = rolled['FGA'].fillna(0) if 'FGA' in rolled.columns else 0
+            ft_sum = rolled['FTA'].fillna(0) if 'FTA' in rolled.columns else 0
+            tov_sum = rolled['TOV'].fillna(0) if 'TOV' in rolled.columns else 0
+            pts_sum = rolled['PTS'].fillna(0) if 'PTS' in rolled.columns else 0
+            fgm_sum = rolled['FGM'].fillna(0) if 'FGM' in rolled.columns else 0
+            fg3m_sum = rolled['FG3M'].fillna(0) if 'FG3M' in rolled.columns else 0
+            fg3a_sum = rolled['FG3A'].fillna(0) if 'FG3A' in rolled.columns else 0
+            ast_sum = rolled['AST'].fillna(0) if 'AST' in rolled.columns else 0
+            mins_sum = rolled['MIN'].fillna(1) if 'MIN' in rolled.columns else 1
+
             new_cols[f'ROLL_TS_PCT_{window}'] = pts_sum / (2 * (fg_sum + 0.44 * ft_sum + 1e-6))
             new_cols[f'ROLL_EFG_PCT_{window}'] = (fgm_sum + 0.5 * fg3m_sum) / (fg_sum + 1e-6)
             new_cols[f'ROLL_3PT_PCT_{window}'] = fg3m_sum / (fg3a_sum + 1e-6)
             new_cols[f'ROLL_AST_TOV_{window}'] = ast_sum / (tov_sum + 1e-6)
-            
+
             for stat in ['PTS', 'REB', 'AST']:
-                stat_sum = df.groupby('PLAYER_ID')[stat].transform(
-                    lambda x: x.shift(1).rolling(window, min_periods=1).sum()
-                ).fillna(0)
-                new_cols[f'ROLL_{stat}_PER_MIN_{window}'] = stat_sum / (mins_sum + 1e-6)
-        
+                if stat in rolled.columns:
+                    new_cols[f'ROLL_{stat}_PER_MIN_{window}'] = rolled[stat].fillna(0) / (mins_sum + 1e-6)
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 
 class MomentumFeatureGroup(FeatureGroup):
-    """Generates momentum and trend features using EWMA."""
-    
+    """Generates momentum and trend features using EWMA (vectorized)."""
+
     def __init__(self, target_cols: Optional[List[str]] = None):
         self.target_cols = target_cols or ['PTS', 'REB', 'AST']
-    
+
     @property
     def name(self) -> str:
         return "momentum_features"
-    
+
     def create(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         new_cols = {}
-        
+        pid = df['PLAYER_ID']
+
         for stat in self.target_cols:
+            shifted = df.groupby('PLAYER_ID')[stat].shift(1)
+            grouped = shifted.groupby(pid)
+
             for span in [3, 5, 10, 20]:
-                new_cols[f'{stat}_EWMA_{span}'] = df.groupby('PLAYER_ID')[stat].transform(
-                    lambda x: x.shift(1).ewm(span=span, adjust=False).mean()
-                )
-            
-            season_avg = df.groupby('PLAYER_ID')[stat].transform(
-                lambda x: x.shift(1).expanding().mean()
-            )
-            new_cols[f'{stat}_SEASON_AVG'] = season_avg
-            
+                new_cols[f'{stat}_EWMA_{span}'] = grouped.ewm(
+                    span=span, adjust=False
+                ).mean().reset_index(level=0, drop=True)
+
+            new_cols[f'{stat}_SEASON_AVG'] = grouped.expanding().mean().reset_index(level=0, drop=True)
+
             for short, long in [(3, 10), (5, 20)]:
-                short_avg = df.groupby('PLAYER_ID')[stat].transform(
-                    lambda x: x.shift(1).rolling(short, min_periods=1).mean()
-                )
-                long_avg = df.groupby('PLAYER_ID')[stat].transform(
-                    lambda x: x.shift(1).rolling(long, min_periods=long//3).mean()
-                )
+                short_avg = grouped.rolling(short, min_periods=1).mean().reset_index(level=0, drop=True)
+                long_avg = grouped.rolling(long, min_periods=long // 3).mean().reset_index(level=0, drop=True)
                 new_cols[f'{stat}_TREND_{short}_{long}'] = short_avg - long_avg
-        
+
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
 

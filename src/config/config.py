@@ -1,10 +1,13 @@
 """Configuration management for NBA prediction system."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import Optional, List, Dict, Any
 from pathlib import Path
+import logging
 import yaml
 import json
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -205,30 +208,36 @@ class Config:
     
     @classmethod
     def _from_dict(cls, data: Dict[str, Any]) -> "Config":
-        """Helper to create Config from nested dictionary."""
+        """Helper to create Config from nested dictionary.
+
+        Extra keys in *data* that don't correspond to a dataclass field are
+        silently ignored so that the YAML can evolve without breaking older
+        code.
+        """
         config = cls()
-        
-        if 'data' in data:
-            config.data = DataConfig(**data['data'])
-        if 'training' in data:
-            config.training = TrainingConfig(**data['training'])
-        if 'features' in data:
-            config.features = FeatureConfig(**data['features'])
-        if 'simulation' in data:
-            config.simulation = SimulationConfig(**data['simulation'])
-        if 'logging' in data:
-            config.logging = LoggingConfig(**data['logging'])
-        if 'catboost' in data:
-            config.catboost = CatBoostConfig(**data['catboost'])
-        if 'lstm' in data:
-            config.lstm = LSTMConfig(**data['lstm'])
-        if 'transformer' in data:
-            config.transformer = TransformerConfig(**data['transformer'])
-        if 'gnn' in data:
-            config.gnn = GNNConfig(**data['gnn'])
-        if 'ensemble' in data:
-            config.ensemble = EnsembleConfig(**data['ensemble'])
-            
+
+        section_map: Dict[str, type] = {
+            'data': DataConfig,
+            'training': TrainingConfig,
+            'features': FeatureConfig,
+            'simulation': SimulationConfig,
+            'logging': LoggingConfig,
+            'catboost': CatBoostConfig,
+            'lstm': LSTMConfig,
+            'transformer': TransformerConfig,
+            'gnn': GNNConfig,
+            'ensemble': EnsembleConfig,
+        }
+
+        for section_name, dc_cls in section_map.items():
+            if section_name in data:
+                valid_keys = {f.name for f in fields(dc_cls)}
+                filtered = {k: v for k, v in data[section_name].items() if k in valid_keys}
+                skipped = set(data[section_name]) - valid_keys
+                if skipped:
+                    logger.debug("Ignoring unknown keys in '%s': %s", section_name, skipped)
+                setattr(config, section_name, dc_cls(**filtered))
+
         return config
     
     def to_dict(self) -> Dict[str, Any]:
@@ -272,18 +281,30 @@ class Config:
         return config_map.get(model_name.lower())
 
 
+DEFAULT_CONFIG_PATH = Path("config/default.yaml")
+
+
 def load_config(path: Optional[Path] = None) -> Config:
-    """Load configuration from file or return default.
-    
+    """Load configuration from file.
+
+    Resolution order:
+      1. Explicit *path* argument.
+      2. ``config/default.yaml`` if it exists.
+      3. Hardcoded dataclass defaults.
+
     Args:
-        path: Path to config file. If None, returns default config.
-        
+        path: Path to config file.  When ``None`` the function falls back
+              to ``config/default.yaml`` (if present) or built-in defaults.
+
     Returns:
         Config object
     """
-    if path is None:
-        return Config()
-    return Config.from_yaml(path)
+    if path is not None:
+        return Config.from_yaml(path)
+    if DEFAULT_CONFIG_PATH.exists():
+        logger.debug("Loading config from %s", DEFAULT_CONFIG_PATH)
+        return Config.from_yaml(DEFAULT_CONFIG_PATH)
+    return Config()
 
 
 def save_config(config: Config, path: Path) -> None:
@@ -302,13 +323,16 @@ _config: Optional[Config] = None
 
 def get_config() -> Config:
     """Get the global configuration instance.
-    
+
+    On first call the config is loaded via :func:`load_config` (which
+    tries ``config/default.yaml`` before falling back to defaults).
+
     Returns:
         Global Config instance
     """
     global _config
     if _config is None:
-        _config = Config()
+        _config = load_config()
     return _config
 
 

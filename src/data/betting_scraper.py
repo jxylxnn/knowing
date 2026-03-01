@@ -75,8 +75,8 @@ class BettingScraper:
                 try:
                     with open(cache_file, 'r') as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (OSError, json.JSONDecodeError, ValueError) as e:
+                    logger.debug("Failed to read betting cache %s: %s", cache_file, e)
         
         lines = self._fetch_game_lines(home_team, away_team, game_date)
         
@@ -86,8 +86,8 @@ class BettingScraper:
         try:
             with open(cache_file, 'w') as f:
                 json.dump(lines, f, indent=2, default=str)
-        except Exception:
-            pass
+        except (OSError, TypeError, ValueError) as e:
+            logger.debug("Failed to write betting cache %s: %s", cache_file, e)
         
         return lines
     
