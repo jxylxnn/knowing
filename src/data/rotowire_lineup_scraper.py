@@ -11,24 +11,9 @@ import time
 import json
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
-logger = logging.getLogger(__name__)
-
-from src.utils.team_mappings import normalize_team
-
-TEAM_ROTONAMES = {
-    'ATL': 'Atlanta', 'BOS': 'Boston', 'BKN': 'Brooklyn', 'CHA': 'Charlotte',
-    'CHI': 'Chicago', 'CLE': 'Cleveland', 'DAL': 'Dallas', 'DEN': 'Denver',
-    'DET': 'Detroit', 'GSW': 'Golden State', 'HOU': 'Houston', 'IND': 'Indiana',
-    'LAC': 'LA Clippers', 'LAL': 'LA Lakers', 'MEM': 'Memphis', 'MIA': 'Miami',
-    'MIL': 'Milwaukee', 'MIN': 'Minnesota', 'NOP': 'New Orleans', 'NYK': 'New York',
-    'OKC': 'Oklahoma City', 'ORL': 'Orlando', 'PHI': 'Philadelphia', 'PHX': 'Phoenix',
-    'POR': 'Portland', 'SAC': 'Sacramento', 'SAS': 'San Antonio', 'TOR': 'Toronto',
-    'UTA': 'Utah', 'WAS': 'Washington'
-}
-
-ROTONAME_TO_TEAM = {v.lower(): k for k, v in TEAM_ROTONAMES.items()}
+from src.utils.team_mappings import normalize_team, get_all_abbrs, TEAMS
 
 
 class RotoWireLineupScraper:
@@ -37,27 +22,57 @@ class RotoWireLineupScraper:
     Provides real-time lineup information including injury status.
     """
     
-    LINEUPS_URL = "https://www.rotowire.com/basketball/nba-lineups.php"
-    DAILY_URL = "https://www.rotowire.com/basketball/nba-lineups-daily.php"
-    PROJECTED_MINUTES_URL = "https://www.rotowire.com/basketball/projections-daily.php"
-    
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-    
-    CACHE_TTL_MINUTES = 30
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2
-    
-    def __init__(self, cache_dir: str = 'data/cache'):
+    def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self._session = requests.Session()
-        self._session.headers.update(self.HEADERS)
+        self._session.headers.update(self._get_headers())
         self._lineups_cache: Dict[str, dict] = {}
+        
+        self.max_retries = self._get_config_value('http.max_retries', 3)
+        self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
+        self.cache_ttl_minutes = self._get_config_value('cache.rotowire_ttl_minutes', 30.0)
+    
+    def _get_headers(self) -> Dict[str, str]:
+        """Get HTTP headers from config or use defaults."""
+        if self._config and hasattr(self._config, 'http'):
+            return {
+                'User-Agent': getattr(self._config.http, 'user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        return {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    
+    @property
+    def LINEUPS_URL(self) -> str:
+        return self._get_config_value('api.rotowire_lineups_url', 'https://www.rotowire.com/basketball/nba-lineups.php')
+    
+    @property
+    def DAILY_URL(self) -> str:
+        return self._get_config_value('api.rotowire_lineups_daily_url', 'https://www.rotowire.com/basketball/nba-lineups-daily.php')
+    
+    @property
+    def PROJECTED_MINUTES_URL(self) -> str:
+        return self._get_config_value('api.rotowire_projections_url', 'https://www.rotowire.com/basketball/projections-daily.php')
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
         self._cache_timestamp: Optional[datetime] = None
         
     def get_todays_lineups(self) -> Dict[str, dict]:

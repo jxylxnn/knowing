@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import logging
 from typing import List, Dict, Tuple, Optional, Any
-import math
+
+from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
 
 logger = logging.getLogger(__name__)
 
@@ -71,29 +72,6 @@ class TeamChemistryGNN(nn.Module):
         return self.fc(x)
 
 
-class WarmupScheduler:
-    """Learning rate warmup + cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        self.current_step = 0
-    
-    def step(self):
-        self.current_step += 1
-        if self.current_step < self.warmup_steps:
-            lr = self.base_lr * self.current_step / self.warmup_steps
-        else:
-            progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        return lr
-
-
 class GNNWrapper:
     """Wrapper for handling player graph construction and GNN inference."""
     
@@ -107,14 +85,13 @@ class GNNWrapper:
         'warmup_ratio': 0.1,
         'use_attention': False,
         'top_players': 1000,
+        'use_compile': False,
     }
     
     def __init__(self, input_dim: int, target_names: List[str] = None, 
                  config: Optional[Dict[str, Any]] = None):
         if target_names is None:
             target_names = ['PTS', 'REB', 'AST']
-            
-        from src.models.gpu_utils import get_device
         
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
         self.target_names = target_names
@@ -130,6 +107,11 @@ class GNNWrapper:
             use_attention=self.config['use_attention']
         ).to(self.device)
         
+        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
+        use_compile = self.config.get('use_compile', False) and get_compile_status()
+        if use_compile:
+            self.model = apply_compile(self.model, True, "GNN")
+        
         self.is_trained = False
         self.player_map = {}
         self.adj = None
@@ -139,7 +121,7 @@ class GNNWrapper:
         
         logger.info(f"GNN initialized: hidden={self.config['hidden_dim']}, "
                    f"layers={self.config['num_layers']}, attention={self.config['use_attention']}, "
-                   f"device={self.device}")
+                   f"compile={use_compile}, device={self.device}")
 
     def build_graph(self, df: pd.DataFrame):
         """Builds a global adjacency matrix from historical co-occurrence (vectorized)."""
@@ -172,7 +154,7 @@ class GNNWrapper:
 
     def fit(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str], 
             epochs: Optional[int] = None):
-        """Train GNN with warmup + cosine decay scheduler."""
+        """Train GNN with warmup + cosine decay scheduler and mixed precision."""
         epochs = epochs or self.config['epochs']
         lr = self.config['lr']
         warmup_ratio = self.config['warmup_ratio']
@@ -198,17 +180,26 @@ class GNNWrapper:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         total_steps = epochs * 1  # Single batch per epoch
         warmup_steps = int(total_steps * warmup_ratio)
-        scheduler = WarmupScheduler(optimizer, warmup_steps, total_steps)
+        scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
         criterion = nn.MSELoss()
+        
+        # Mixed precision training
+        device_str = self.device.type
+        grad_scaler = torch.amp.GradScaler(device_str, enabled=(device_str == 'cuda'))
         
         self.model.train()
         for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = self.model(X_tensor, self.adj)
-            loss = criterion(output, Y_tensor)
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            
+            with torch.amp.autocast(device_str, enabled=(device_str == 'cuda')):
+                output = self.model(X_tensor, self.adj)
+                loss = criterion(output, Y_tensor)
+            
+            grad_scaler.scale(loss).backward()
+            grad_scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            optimizer.step()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
             scheduler.step()
             
             if (epoch + 1) % 10 == 0:

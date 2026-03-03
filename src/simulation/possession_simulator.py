@@ -4,10 +4,12 @@ Simulates games at the possession level for maximum realism.
 """
 import numpy as np
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import random
+
+from src.config.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -136,27 +138,36 @@ class PossessionSimulator:
     4. Enforcing team total constraints via possession flow
     """
     
-    LEAGUE_AVERAGES = {
-        'fg_pct': 0.472,
-        'fg3_pct': 0.362,
-        'ft_pct': 0.780,
-        'tov_pct': 0.135,
-        'orb_pct': 0.250,
-        'fg3_freq': 0.39,
-        'ft_rate': 0.230,
-        'ast_pct': 0.60
-    }
-    
-    PLAYER_TYPE_PROFILES = {
-        'star': {'usage': 0.28, 'fg3_freq': 0.35, 'ft_rate': 0.25, 'tov_rate': 0.12},
-        'starter': {'usage': 0.20, 'fg3_freq': 0.38, 'ft_rate': 0.20, 'tov_rate': 0.14},
-        'role_player': {'usage': 0.14, 'fg3_freq': 0.45, 'ft_rate': 0.15, 'tov_rate': 0.16},
-        'bench': {'usage': 0.12, 'fg3_freq': 0.42, 'ft_rate': 0.12, 'tov_rate': 0.18}
-    }
-    
-    def __init__(self, seed: int = None):
+    def __init__(self, seed: int = None, config: Optional[Any] = None):
+        self._config = config if config else get_config()
         self.rng = np.random.default_rng(seed)
         self._game_log: List[dict] = []
+        
+        self._init_league_averages()
+        self._init_player_profiles()
+    
+    def _init_league_averages(self):
+        """Initialize league averages from config or defaults."""
+        la = self._config.league_averages if hasattr(self._config, 'league_averages') else None
+        self.LEAGUE_AVERAGES = {
+            'fg_pct': getattr(la, 'fg_pct', 0.472) if la else 0.472,
+            'fg3_pct': getattr(la, 'fg3_pct', 0.362) if la else 0.362,
+            'ft_pct': getattr(la, 'ft_pct', 0.780) if la else 0.780,
+            'tov_pct': getattr(la, 'turnover_pct', 0.135) if la else 0.135,
+            'orb_pct': getattr(la, 'offensive_rebound_pct', 0.250) if la else 0.250,
+            'fg3_freq': 0.39,
+            'ft_rate': getattr(la, 'free_throw_rate', 0.230) if la else 0.230,
+            'ast_pct': 0.60
+        }
+    
+    def _init_player_profiles(self):
+        """Initialize player type profiles from config."""
+        self.PLAYER_TYPE_PROFILES = {
+            'star': {'usage': 0.28, 'fg3_freq': 0.35, 'ft_rate': 0.25, 'tov_rate': 0.12},
+            'starter': {'usage': 0.20, 'fg3_freq': 0.38, 'ft_rate': 0.20, 'tov_rate': 0.14},
+            'role_player': {'usage': 0.14, 'fg3_freq': 0.45, 'ft_rate': 0.15, 'tov_rate': 0.16},
+            'bench': {'usage': 0.12, 'fg3_freq': 0.42, 'ft_rate': 0.12, 'tov_rate': 0.18}
+        }
     
     def simulate_game(
         self,

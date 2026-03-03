@@ -2,13 +2,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 import pandas as pd
 import logging
 from typing import List, Dict, Any, Tuple, Optional
 import torch.backends.cudnn
 from copy import deepcopy
-import math
+
+from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
 
 logger = logging.getLogger(__name__)
 
@@ -87,29 +89,6 @@ class MultiOutputNN(nn.Module):
         return means, logvars
 
 
-class WarmupCosineScheduler:
-    """Learning rate warmup + cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        self.current_step = 0
-    
-    def step(self):
-        self.current_step += 1
-        if self.current_step < self.warmup_steps:
-            lr = self.base_lr * self.current_step / self.warmup_steps
-        else:
-            progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        return lr
-
-
 class MultiOutputWrapper:
     """Wrapper for the Wide-SE-ResNet with config support and torch.compile."""
     
@@ -130,8 +109,6 @@ class MultiOutputWrapper:
                  config: Optional[Dict[str, Any]] = None):
         if target_names is None:
             target_names = ['PTS', 'REB', 'AST']
-            
-        from src.models.gpu_utils import get_device
         
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
         self.input_dim = input_dim
@@ -146,13 +123,18 @@ class MultiOutputWrapper:
             output_dim=len(target_names)
         ).to(self.device)
         
+        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
+        use_compile = self.config.get('use_compile', False) and get_compile_status()
+        if use_compile:
+            self.model = apply_compile(self.model, True, "MultiOutputNN")
+        
         self.scaler_X = None
         self.scaler_y = None
         self.is_trained = False
         
         logger.info(f"MultiOutputNN initialized: hidden={self.config['hidden_dim']}, "
                    f"blocks={self.config['num_blocks']}, dropout={self.config['dropout']}, "
-                   f"device={self.device}")
+                   f"compile={use_compile}, device={self.device}")
 
     def _nll_loss(self, y_true, y_pred_mean, y_pred_logvar):
         """Negative log-likelihood loss with uncertainty estimation."""

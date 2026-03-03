@@ -9,21 +9,12 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import re
 
+from src.utils.team_mappings import get_bref_abbr
+
 logger = logging.getLogger(__name__)
-
-TEAM_ABBR_TO_BREF = {
-    'ATL': 'ATL', 'BOS': 'BOS', 'BKN': 'BRK', 'CHA': 'CHO', 'CHI': 'CHI',
-    'CLE': 'CLE', 'DAL': 'DAL', 'DEN': 'DEN', 'DET': 'DET', 'GSW': 'GSW',
-    'HOU': 'HOU', 'IND': 'IND', 'LAC': 'LAC', 'LAL': 'LAL', 'MEM': 'MEM',
-    'MIA': 'MIA', 'MIL': 'MIL', 'MIN': 'MIN', 'NOP': 'NOP', 'NYK': 'NYK',
-    'OKC': 'OKC', 'ORL': 'ORL', 'PHI': 'PHI', 'PHX': 'PHO', 'POR': 'POR',
-    'SAC': 'SAC', 'SAS': 'SAS', 'TOR': 'TOR', 'UTA': 'UTA', 'WAS': 'WAS'
-}
-
-BREF_TO_TEAM_ABBR = {v: k for k, v in TEAM_ABBR_TO_BREF.items()}
 
 
 class BasketballRefScraper:
@@ -32,25 +23,50 @@ class BasketballRefScraper:
     Focuses on pace, offensive/defensive rating, and four factors.
     """
     
-    BASE_URL = "https://www.basketball-reference.com"
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-    
-    CACHE_TTL_HOURS = 6
-    MAX_RETRIES = 3
-    RETRY_DELAY = 3
-    
-    def __init__(self, cache_dir: str = 'data/cache'):
+    def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self._session = requests.Session()
-        self._session.headers.update(self.HEADERS)
+        self._session.headers.update(self._get_headers())
         self._team_stats_cache: Dict[str, dict] = {}
         self._cache_timestamp: Optional[datetime] = None
+        
+        self.max_retries = self._get_config_value('http.max_retries', 3)
+        self.retry_delay = self._get_config_value('http.retry_delay', 3.0)
+        self.cache_ttl_hours = self._get_config_value('cache.basketball_ref_ttl_hours', 6.0)
+    
+    def _get_headers(self) -> Dict[str, str]:
+        """Get HTTP headers from config or use defaults."""
+        if self._config and hasattr(self._config, 'http'):
+            return {
+                'User-Agent': getattr(self._config.http, 'user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+        return {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    
+    @property
+    def BASE_URL(self) -> str:
+        return self._get_config_value('api.basketball_reference_base_url', 'https://www.basketball-reference.com')
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
         
     def get_team_stats(self, team_abbr: str, season: str = None) -> dict:
         """

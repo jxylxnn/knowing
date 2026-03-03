@@ -56,9 +56,9 @@ class StackedEnsembleModel:
         self.base_models = {
             # XGBoost: Primary engine. Hist method is key.
             'xgb': XGBRegressor(
-                n_estimators=300, 
-                learning_rate=0.05, 
-                max_depth=6, 
+                n_estimators=500, 
+                learning_rate=0.04, 
+                max_depth=7, 
                 subsample=0.8, 
                 colsample_bytree=0.8, 
                 n_jobs=-1, 
@@ -67,8 +67,8 @@ class StackedEnsembleModel:
             
             # LightGBM: Very fast on GPU
             'lgbm': LGBMRegressor(
-                n_estimators=300, 
-                learning_rate=0.05, 
+                n_estimators=500, 
+                learning_rate=0.04, 
                 num_leaves=63, 
                 feature_fraction=0.8, 
                 **lgbm_gpu
@@ -76,8 +76,8 @@ class StackedEnsembleModel:
             
             # RF Proxy (XGB with higher depth)
             'rf_proxy': XGBRegressor(
-                n_estimators=200, 
-                learning_rate=0.1, 
+                n_estimators=350, 
+                learning_rate=0.08, 
                 max_depth=12, # RF usually deeper
                 subsample=0.7, 
                 colsample_bytree=0.7, 
@@ -90,18 +90,18 @@ class StackedEnsembleModel:
         
         if HAS_CATBOOST:
             self.base_models['catboost'] = CatBoostRegressor(
-                iterations=1000,
-                learning_rate=0.03,
-                depth=8,
-                l2_leaf_reg=5.0,
+                iterations=2000,
+                learning_rate=0.025,
+                depth=9,
+                l2_leaf_reg=4.0,
                 border_count=254,
                 grow_policy='Depthwise',
-                min_data_in_leaf=10,
+                min_data_in_leaf=8,
                 rsm=0.8,
                 boosting_type='Plain',
                 score_function='Cosine',
                 verbose=False,
-                early_stopping_rounds=50,
+                early_stopping_rounds=100,
                 **cb_gpu
             )
         

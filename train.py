@@ -15,8 +15,8 @@ def main():
     parser.add_argument('--models-dir', type=str, default='models',
                         help='Directory to save trained models (default: models)')
     parser.add_argument('--model-size', type=str, default='auto',
-                        choices=['auto', 'small', 'medium', 'large', 'ultra'],
-                        help='Model size preset: auto (detect), small, medium, large, ultra (default: auto)')
+                        choices=['auto', 'small', 'medium', 'large', 'pro', 'ultra'],
+                        help='Model size preset: auto (detect), small, medium, large, pro, ultra (default: auto)')
     args = parser.parse_args()
     
     model_config, hw_info = get_model_config(force_size=None if args.model_size == 'auto' else args.model_size)

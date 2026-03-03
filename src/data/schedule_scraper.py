@@ -10,23 +10,38 @@ from nba_api.stats.static import teams as nba_teams
 
 logger = logging.getLogger(__name__)
 
+
 class ScheduleScraper:
     """
     Robust NBA game schedule fetcher with comprehensive error handling and caching.
     Includes retry logic, multiple fallback strategies, and circuit breaker pattern.
     """
     
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2  # seconds
-    CACHE_TTL_HOURS = 1  # For daily schedules
-    SEASON_CACHE_TTL_DAYS = 1  # For full season schedules
-    
-    def __init__(self, cache_dir: str = 'data/cache'):
+    def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
             
         self.team_map = self._get_team_mapping()
+        
+        self.max_retries = self._get_config_value('http.max_retries', 3)
+        self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
+        self.cache_ttl_hours = self._get_config_value('cache.schedule_ttl_hours', 1.0)
+        self.season_cache_ttl_days = self._get_config_value('cache.season_schedule_ttl_days', 1.0)
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
     
     def _get_team_mapping(self) -> Dict[int, str]:
         """Returns a mapping from NBA team IDs to 3-letter abbreviations."""

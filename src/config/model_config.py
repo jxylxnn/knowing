@@ -161,6 +161,8 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'lr': max(1e-5, 1e-3 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
             'seq_len': 10,
+            'grad_checkpoint': score > 20,  # Enable gradient checkpointing for larger models
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
         },
         
         # ===== TRANSFORMER CONFIG =====
@@ -176,6 +178,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'warmup_ratio': 0.1,
             'grad_checkpoint': score > 30,
             'seq_len': 50,
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
         },
         
         # ===== MULTI-OUTPUT NN CONFIG =====
@@ -188,6 +191,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'lr': max(5e-5, 1e-3 / (scale ** 0.15)),
             'warmup_ratio': 0.05,
             'label_smoothing': 0.05 if score > 20 else 0,
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
         },
         
         # ===== GNN CONFIG =====
@@ -199,6 +203,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'epochs': _clamp(50 + int(scale), 50, 100),
             'lr': max(5e-4, 1e-2 / (scale ** 0.1)),
             'use_attention': True,
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
         },
         
         # ===== TEMPORAL ATTENTION CONFIG =====
@@ -211,14 +216,15 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
             'warmup_ratio': 0.1,
             'seq_len': 20,
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
         },
         
         # ===== CATBOOST CONFIG =====
         'catboost': {
-            'iterations': _clamp(int(3000 * (scale ** 0.4)), 2000, 10000),
-            'depth': _clamp(8 + int(scale / 8), 6, 12),
+            'iterations': _clamp(int(5000 * (scale ** 0.4)), 3000, 10000),
+            'depth': _clamp(9 + int(scale / 8), 6, 12),
             'learning_rate': max(0.005, 0.02 / (scale ** 0.15)),
-            'l2_leaf_reg': 5.0 + scale * 0.3,
+            'l2_leaf_reg': 4.0 + scale * 0.3,
             'random_strength': 1.0,
             'bagging_temperature': 0.5,
             'border_count': 254,
@@ -232,7 +238,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'use_multi_loss': True,
             'multi_loss_rmse_weight': 0.6,
             'multi_loss_mae_weight': 0.4,
-            'use_quantile_models': score >= 5,
+            'use_quantile_models': True,  # Always train quantile models for uncertainty
             'n_temporal_folds': _clamp(3 + int(scale / 10), 2, 5),
             'use_per_target_tuning': True,
         },
@@ -243,7 +249,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'warmup_steps': _clamp(int(scale * 20), 0, 1000),
             'early_stop_patience': _clamp(15 + int(scale / 2), 15, 40),
             'label_smoothing': 0.05 if score > 20 else 0,
-            'use_compile': score > 10,
+            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+ on capable hardware
             'amp': True,  # Always use mixed precision
             'gradient_accumulation_steps': 1 if score > 10 else 2,
         },
@@ -351,7 +357,7 @@ def get_model_config(
     Get model configuration based on detected or specified hardware.
     
     Args:
-        force_size: Override auto-detection. One of 'small', 'medium', 'large', 'ultra'
+        force_size: Override auto-detection. One of 'small', 'medium', 'large', 'pro', 'ultra'
         custom_score: Override detected score
         custom_vram: Override detected VRAM
     
@@ -363,6 +369,7 @@ def get_model_config(
         'small': (5.0, 0.0),    # CPU-like
         'medium': (16.0, 16.0),  # T4-like
         'large': (50.0, 40.0),   # A100-40GB-like
+        'pro': (140.0, 80.0),    # A100-80GB-like
         'ultra': (240.0, 80.0),  # H100-like
     }
     

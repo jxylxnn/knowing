@@ -4,6 +4,7 @@ Provides GPU detection, memory management, and tensor conversion helpers.
 """
 
 import logging
+import math
 import numpy as np
 import pandas as pd
 from typing import Union, Optional, Tuple
@@ -278,3 +279,78 @@ class GPUMemoryContext:
         label = f"[{self.label}] " if self.label else ""
         logger.info(f"{label}GPU memory delta: {delta:+.2f}GB "
                    f"(now at {self.end_allocated:.2f}GB)")
+
+
+class WarmupCosineScheduler:
+    """
+    Shared learning rate scheduler with warmup + cosine decay.
+    
+    Used by all PyTorch models for consistent training behavior.
+    """
+    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.min_lr = min_lr
+        self.base_lr = optimizer.param_groups[0]['lr']
+        self.current_step = 0
+    
+    def step(self):
+        self.current_step += 1
+        if self.current_step < self.warmup_steps:
+            lr = self.base_lr * self.current_step / self.warmup_steps
+        else:
+            progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        return lr
+
+
+def apply_compile(model, use_compile: bool, model_name: str):
+    """
+    Apply torch.compile() for PyTorch 2.0+ speedup.
+    
+    Args:
+        model: PyTorch model
+        use_compile: Whether to compile
+        model_name: Name for logging
+    
+    Returns:
+        Compiled model or original model
+    """
+    import math
+    
+    if not use_compile:
+        return model
+    
+    try:
+        import torch
+        if not hasattr(torch, 'compile'):
+            logger.debug("torch.compile() not available (PyTorch < 2.0)")
+            return model
+        
+        logger.info(f"Compiling {model_name} with torch.compile()...")
+        compiled_model = torch.compile(model, mode='reduce-overhead')
+        logger.info(f"{model_name} compiled successfully")
+        return compiled_model
+    except Exception as e:
+        logger.warning(f"torch.compile() failed for {model_name}: {e}")
+        return model
+
+
+def get_compile_status() -> bool:
+    """
+    Check if torch.compile is available and should be used.
+    
+    Returns:
+        True if torch.compile is available and GPU is detected
+    """
+    try:
+        import torch
+        if not hasattr(torch, 'compile'):
+            return False
+        return check_gpu_compatibility()
+    except ImportError:
+        return False

@@ -11,7 +11,7 @@ import os
 import json
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +30,37 @@ class BettingScraper:
     - Implied team totals
     """
     
-    CACHE_TTL_HOURS = 4
-    MAX_RETRIES = 3
-    
-    def __init__(self, cache_dir: str = 'data/cache'):
+    def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         
         self._session = requests.Session()
         self._session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': self._get_config_value('http.user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         })
+    
+    @property
+    def CACHE_TTL_HOURS(self) -> float:
+        return self._get_config_value('cache.betting_lines_ttl_hours', 4.0)
+    
+    @property
+    def MAX_RETRIES(self) -> int:
+        return self._get_config_value('http.max_retries', 3)
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
     
     def get_game_lines(
         self, 

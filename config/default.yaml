@@ -18,7 +18,7 @@ training:
     - "STL"
     - "BLK"
     - "TOV"
-  test_split_date: "2024-03-01"
+  test_split_date: "2025-01-01"
   temporal_decay_lambda: 0.023
   outlier_percentile: 0.99
   use_sample_weights: true
@@ -33,6 +33,41 @@ features:
     - 3
     - 5
     - 10
+    - 20
+    - 50
+  use_matchup_features: true
+  use_fatigue_features: true
+  use_momentum_features: true
+  use_contextual_features: true
+  max_lag_days: 7
+
+# Extended feature engineering configuration
+features_ext:
+  rolling_windows:
+    - 3
+    - 5
+    - 10
+    - 20
+    - 50
+  ewma_spans:
+    - 3
+    - 5
+    - 10
+    - 20
+  trend_window_pairs:
+    - [3, 10]
+    - [5, 20]
+  hot_streak_threshold: 1.15
+  cold_streak_threshold: 0.85
+  rest_days_max: 7
+  matchup_history_window: 5
+  bayesian_shrinkage_factor: 10
+  league_percentile_window: 2000
+  league_percentile_min_periods: 500
+  target_encoding_smoothing: 20
+  usage_windows:
+    - 5
+    - 10
   use_matchup_features: true
   use_fatigue_features: true
   use_momentum_features: true
@@ -41,7 +76,7 @@ features:
 
 # Simulation configuration
 simulation:
-  default_num_sims: 1000
+  default_num_sims: 2500
   max_workers: 4
   use_gpu: true
   cache_rosters: true
@@ -49,6 +84,83 @@ simulation:
   minutes_distribution: "dirichlet"
   correlation_injection: true
   clutch_adjustment: true
+
+# Detailed simulation parameters
+simulation_params:
+  # Fatigue multipliers (days of rest)
+  fatigue_3in4: 0.96
+  fatigue_back_to_back: 0.975
+  fatigue_2_days: 1.0
+  fatigue_3_days: 1.01
+  fatigue_4plus_days: 1.005
+  
+  # Defense adjustment bounds
+  defense_pts_range: [0.85, 1.15]
+  defense_reb_range: [0.90, 1.10]
+  defense_ast_range: [0.92, 1.08]
+  defense_tov_range: [0.90, 1.10]
+  
+  # Pace distribution
+  pace_multiplier_mean: 1.0
+  pace_multiplier_std: 0.04
+  pace_clip_range: [0.88, 1.12]
+  
+  # Environment factor
+  env_factor_mean: 1.0
+  env_factor_std: 0.05
+  env_factor_clip_range: [0.88, 1.15]
+  
+  # Minutes distribution
+  minutes_std_high: 2.0
+  minutes_std_low: 3.5
+  minutes_threshold: 32.0
+  
+  # Team totals bounds
+  team_totals_min: [70, 30, 15, 3, 2, 5]
+  team_totals_max: [160, 70, 45, 20, 15, 28]
+  
+  # Dirichlet concentrations
+  dirichlet_concentrations: [70.0, 90.0, 85.0, 95.0, 95.0, 90.0]
+  
+  # Correlation noise
+  noise_intensity: 0.25
+  
+  # Clutch settings
+  clutch_score_threshold: 118.0
+  clutch_boost_multiplier: 1.3
+  blowout_bench_multiplier: 1.5
+  
+  # FG2/FG3 adjustments
+  fg2_pct_boost: 1.05
+  
+  # Three point frequency modifiers
+  three_pt_freq_high_shooter: 1.5
+  three_pt_freq_low_shooter: 0.8
+  three_pt_clutch_modifier: 1.2
+  three_pt_blowout_modifier: 0.8
+  
+  # FT rate modifiers
+  ft_rate_fg3_modifier: 0.8
+  ft_rate_fg2_modifier: 1.2
+  
+  # Overtime settings
+  overtime_margin_threshold: 3.0
+  overtime_points_mean: 5.0
+  overtime_points_std: 2.5
+  overtime_points_clip: [0, 15]
+  overtime_home_win_prob: 0.48
+  
+  # Home court advantage
+  home_edge: 2.5
+  
+  # Stat correlation matrix (6x6 for PTS, REB, AST, STL, BLK, TOV)
+  stat_correlation_matrix:
+    - [1.0, 0.35, 0.45, 0.15, 0.08, 0.20]
+    - [0.35, 1.0, 0.25, 0.12, 0.18, 0.10]
+    - [0.45, 0.25, 1.0, 0.18, 0.06, 0.28]
+    - [0.15, 0.12, 0.18, 1.0, 0.22, 0.35]
+    - [0.08, 0.18, 0.06, 0.22, 1.0, 0.12]
+    - [0.20, 0.10, 0.28, 0.35, 0.12, 1.0]
 
 # Logging configuration
 logging:
@@ -58,24 +170,107 @@ logging:
   max_bytes: 10000000
   backup_count: 5
 
+# HTTP configuration
+http:
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  timeout: 15
+  max_retries: 3
+  retry_delay: 2.0
+
+# Cache TTL configuration (in hours unless specified)
+cache:
+  schedule_ttl_hours: 1.0
+  season_schedule_ttl_days: 1.0
+  betting_lines_ttl_hours: 4.0
+  defense_stats_ttl_hours: 12.0
+  lineup_ttl_hours: 6.0
+  injury_ttl_minutes: 30.0
+  rotowire_ttl_minutes: 30.0
+  basketball_ref_ttl_hours: 6.0
+  directory: "cache"
+
+# API endpoint configuration
+api:
+  # NBA Stats API
+  nba_stats_base_url: "https://stats.nba.com/stats"
+  nba_player_logs_url: "https://stats.nba.com/stats/playergamelogs"
+  nba_matchups_url: "https://stats.nba.com/stats/leagueplayerposstats"
+  bref_ratings_url_base: "https://www.basketball-reference.com/leagues/NBA_{year}_ratings.html"
+  
+  # Basketball Reference
+  basketball_reference_base_url: "https://www.basketball-reference.com"
+  
+  # ESPN
+  espn_injuries_url: "https://www.espn.com/nba/injuries"
+  espn_health_api_url: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/health"
+  
+  # Action Network (Betting)
+  action_network_base_url: "https://www.actionnetwork.com/nba"
+  
+  # RotoWire
+  rotowire_lineups_url: "https://www.rotowire.com/basketball/nba-lineups.php"
+  rotowire_lineups_daily_url: "https://www.rotowire.com/basketball/nba-lineups-daily.php"
+  rotowire_projections_url: "https://www.rotowire.com/basketball/projections-daily.php"
+  
+  # Rate limiting
+  rate_limit_delay: 0.6
+  team_fetch_delay: 0.5
+  team_fetch_delay_bref: 1.5
+
+# Team configuration
+teams:
+  mappings_file: "data/team_mappings.json"
+  switch_profiles_file: "data/team_switch_profiles.json"
+  interior_defense_file: "data/team_interior_defense.json"
+  default_opponent: "LAL"
+
+# League average statistics (fallback defaults when dynamic fetch unavailable)
+league_averages:
+  points_per_100: 114.0
+  offensive_rating: 114.0
+  defensive_rating: 114.0
+  pace: 100.0
+  effective_fg_pct: 0.54
+  turnover_pct: 0.135
+  offensive_rebound_pct: 0.25
+  free_throw_rate: 0.23
+  
+  # Default game totals
+  default_total: 225.0
+  implied_home_pts: 112.5
+  default_home_rating: 114.0
+  default_away_rating: 114.0
+  
+  # Player position defaults
+  fg_pct: 0.470
+  fg3_pct: 0.360
+  ft_pct: 0.75
+  
+  # Historical spread std
+  historical_std_total: 11.0
+  historical_std_spread: 10.5
+  
+  # Vegas calibration
+  vegas_weight: 0.30
+
 # Model configurations
 catboost:
   enabled: true
   # Core hyperparameters (tuned for NBA stat prediction)
-  iterations: 3000
-  learning_rate: 0.02
-  depth: 8
-  l2_leaf_reg: 5.0
+  iterations: 5000
+  learning_rate: 0.015
+  depth: 9
+  l2_leaf_reg: 4.0
   random_strength: 1.0
   bagging_temperature: 0.5
   border_count: 254
   thread_count: -1
   random_seed: 42
-  early_stopping_rounds: 150
+  early_stopping_rounds: 200
 
   # Advanced tree structure
   grow_policy: "Depthwise"
-  min_data_in_leaf: 10
+  min_data_in_leaf: 8
   score_function: "Cosine"
   rsm: 0.8                       # Random subspace method (column sampling per split)
 
@@ -93,40 +288,37 @@ catboost:
   quantile_alpha_low: 0.1
   quantile_alpha_high: 0.9
 
-  # Temporal K-fold CV: trains across multiple time splits for robustness
-  n_temporal_folds: 3
-
   # Per-target tuning: PTS/REB/AST get deeper trees; STL/BLK/TOV get
   # heavier regularization suited to sparse count distributions
   use_per_target_tuning: true
 
 lstm:
   enabled: true
-  hidden_size: 128
-  num_layers: 2
-  dropout: 0.2
-  learning_rate: 0.001
+  hidden_size: 192
+  num_layers: 3
+  dropout: 0.15
+  learning_rate: 0.0008
   batch_size: 512
-  epochs: 100
-  patience: 10
+  epochs: 120
+  patience: 15
   random_seed: 42
-  sequence_length: 10
+  sequence_length: 12
   bidirectional: true
 
 transformer:
   enabled: true
-  d_model: 128
+  d_model: 192
   nhead: 8
-  num_encoder_layers: 4
-  dim_feedforward: 512
+  num_encoder_layers: 6
+  dim_feedforward: 768
   max_seq_length: 50
-  hidden_size: 128
-  num_layers: 4
-  dropout: 0.2
-  learning_rate: 0.001
+  hidden_size: 192
+  num_layers: 6
+  dropout: 0.15
+  learning_rate: 0.0008
   batch_size: 512
-  epochs: 100
-  patience: 10
+  epochs: 120
+  patience: 15
   random_seed: 42
 
 gnn:
@@ -134,13 +326,13 @@ gnn:
   num_node_features: 64
   num_edge_features: 16
   num_graph_layers: 3
-  hidden_size: 128
+  hidden_size: 192
   num_layers: 3
-  dropout: 0.2
-  learning_rate: 0.001
+  dropout: 0.15
+  learning_rate: 0.0008
   batch_size: 512
-  epochs: 100
-  patience: 10
+  epochs: 120
+  patience: 15
   random_seed: 42
   use_attention: true
 

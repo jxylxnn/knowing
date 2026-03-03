@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 
 from src.utils.team_mappings import normalize_team
@@ -37,13 +37,8 @@ class InjuryScraper:
     Fallback sources: ESPN API, Cached data
     """
     
-    URL = "https://www.espn.com/nba/injuries"
-    API_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/health"
-    CACHE_TTL_MINUTES = 30
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2  # seconds
-    
-    def __init__(self, cache_dir='data/cache'):
+    def __init__(self, cache_dir='data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
@@ -51,8 +46,41 @@ class InjuryScraper:
         self._cached_df = None
         self._session = requests.Session()
         self._session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': self._get_config_value('http.user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         })
+    
+    @property
+    def URL(self) -> str:
+        return self._get_config_value('api.espn_injuries_url', 'https://www.espn.com/nba/injuries')
+    
+    @property
+    def API_URL(self) -> str:
+        return self._get_config_value('api.espn_health_api_url', 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/health')
+    
+    @property
+    def CACHE_TTL_MINUTES(self) -> float:
+        return self._get_config_value('cache.injury_ttl_minutes', 30.0)
+    
+    @property
+    def MAX_RETRIES(self) -> int:
+        return self._get_config_value('http.max_retries', 3)
+    
+    @property
+    def RETRY_DELAY(self) -> float:
+        return self._get_config_value('http.retry_delay', 2.0)
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
             
     def fetch_injuries(self, force_refresh: bool = False) -> pd.DataFrame:
         """

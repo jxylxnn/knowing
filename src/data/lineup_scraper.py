@@ -10,23 +10,12 @@ import os
 import json
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set, Any
 import re
 
+from src.utils.team_mappings import ID_TO_ABBR, ABBR_TO_ID, get_team_by_abbr
+
 logger = logging.getLogger(__name__)
-
-TEAM_ID_MAP = {
-    'ATL': 1610612737, 'BOS': 1610612738, 'BKN': 1610612751, 'CHA': 1610612766,
-    'CHI': 1610612741, 'CLE': 1610612739, 'DAL': 1610612742, 'DEN': 1610612743,
-    'DET': 1610612765, 'GSW': 1610612744, 'HOU': 1610612745, 'IND': 1610612754,
-    'LAC': 1610612746, 'LAL': 1610612747, 'MEM': 1610612763, 'MIA': 1610612748,
-    'MIL': 1610612749, 'MIN': 1610612750, 'NOP': 1610612740, 'NYK': 1610612752,
-    'OKC': 1610612760, 'ORL': 1610612753, 'PHI': 1610612755, 'PHX': 1610612756,
-    'POR': 1610612757, 'SAC': 1610612758, 'SAS': 1610612759, 'TOR': 1610612761,
-    'UTA': 1610612762, 'WAS': 1610612764
-}
-
-ID_TO_TEAM = {v: k for k, v in TEAM_ID_MAP.items()}
 
 
 class LineupScraper:
@@ -34,30 +23,52 @@ class LineupScraper:
     Scrapes NBA starting lineups from multiple sources with reliability scoring.
     """
     
-    HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/html',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.nba.com/',
-    }
-    
-    NBA_HEADERS = {
-        **HEADERS,
-        'x-nba-stats-origin': 'stats',
-        'x-nba-stats-token': 'true',
-        'Origin': 'https://www.nba.com',
-    }
-    
-    CACHE_TTL_HOURS = 6
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2
-    
-    def __init__(self, cache_dir: str = 'data/cache'):
+    def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
+        self._config = config
         self.cache_dir = cache_dir
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self._session = requests.Session()
-        self._session.headers.update(self.HEADERS)
+        self._session.headers.update(self._get_headers())
+        
+        self.max_retries = self._get_config_value('http.max_retries', 3)
+        self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
+        self.cache_ttl_hours = self._get_config_value('cache.lineup_ttl_hours', 6.0)
+    
+    def _get_headers(self) -> Dict[str, str]:
+        """Get HTTP headers from config or use defaults."""
+        if self._config and hasattr(self._config, 'http'):
+            return {
+                'User-Agent': getattr(self._config.http, 'user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'),
+                'Accept': 'application/json, text/html',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.nba.com/',
+                'x-nba-stats-origin': 'stats',
+                'x-nba-stats-token': 'true',
+                'Origin': 'https://www.nba.com',
+            }
+        return {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/html',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.nba.com/',
+            'x-nba-stats-origin': 'stats',
+            'x-nba-stats-token': 'true',
+            'Origin': 'https://www.nba.com',
+        }
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        if self._config is None:
+            return default
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
         self._lineup_cache: Dict[str, dict] = {}
         self._coach_tendencies: Dict[str, dict] = {}
         self._load_coach_tendencies()

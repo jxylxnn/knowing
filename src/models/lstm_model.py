@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 import pandas as pd
 import logging
 from typing import List, Tuple, Dict, Any, Optional
 import torch.backends.cudnn as cudnn
-import math
+
+from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +30,16 @@ class PlayerSequenceDataset(Dataset):
 
 
 class LSTMModel(nn.Module):
-    """LSTM for temporal pattern recognition in player stats."""
+    """LSTM for temporal pattern recognition in player stats with optional gradient checkpointing."""
     def __init__(self, input_dim: int, hidden_dim: int = 128, num_layers: int = 2, 
-                 output_dim: int = 3, dropout: float = 0.2, bidirectional: bool = False):
+                 output_dim: int = 3, dropout: float = 0.2, bidirectional: bool = False,
+                 grad_checkpoint: bool = False):
         super(LSTMModel, self).__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.input_dim = input_dim
+        self.grad_checkpoint = grad_checkpoint
         
         self.lstm = nn.LSTM(
             input_dim, 
@@ -50,32 +54,13 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(lstm_output_dim, output_dim)
 
     def forward(self, x):
-        lstm_out, (h_n, c_n) = self.lstm(x)
+        if self.grad_checkpoint and self.training:
+            # Use gradient checkpointing for memory efficiency
+            lstm_out, (h_n, c_n) = checkpoint(self.lstm, x, use_reentrant=False)
+        else:
+            lstm_out, (h_n, c_n) = self.lstm(x)
         out = self.fc(lstm_out[:, -1, :])
         return out
-
-
-class WarmupScheduler:
-    """Learning rate warmup + cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        self.current_step = 0
-    
-    def step(self):
-        self.current_step += 1
-        if self.current_step < self.warmup_steps:
-            lr = self.base_lr * self.current_step / self.warmup_steps
-        else:
-            progress = (self.current_step - self.warmup_steps) / (self.total_steps - self.warmup_steps)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        return lr
 
 
 class LSTMWrapper:
@@ -90,23 +75,32 @@ class LSTMWrapper:
         'epochs': 50,
         'lr': 1e-3,
         'warmup_ratio': 0.1,
+        'grad_checkpoint': False,
         'use_compile': False,
     }
     
     def __init__(self, input_dim: int, seq_len: int = 10, config: Optional[Dict[str, Any]] = None):
-        from src.models.gpu_utils import get_device
         self.seq_len = seq_len
         self.device = get_device()
         
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+        
+        # Enable gradient checkpointing for larger models or GPU memory constraints
+        grad_checkpoint = self.config.get('grad_checkpoint', False)
         
         self.model = LSTMModel(
             input_dim=input_dim,
             hidden_dim=self.config['hidden_dim'],
             num_layers=self.config['num_layers'],
             dropout=self.config['dropout'],
-            bidirectional=self.config['bidirectional']
+            bidirectional=self.config['bidirectional'],
+            grad_checkpoint=grad_checkpoint
         ).to(self.device)
+        
+        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
+        use_compile = self.config.get('use_compile', False) and get_compile_status()
+        if use_compile:
+            self.model = apply_compile(self.model, True, "LSTM")
         
         self.input_dim = input_dim
         self.is_trained = False
@@ -115,7 +109,7 @@ class LSTMWrapper:
         
         logger.info(f"LSTM initialized: hidden={self.config['hidden_dim']}, "
                    f"layers={self.config['num_layers']}, bidirectional={self.config['bidirectional']}, "
-                   f"device={self.device}")
+                   f"grad_ckpt={grad_checkpoint}, compile={use_compile}, device={self.device}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         """Creates sliding window sequences for each player (vectorized)."""
@@ -179,7 +173,7 @@ class LSTMWrapper:
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         total_steps = epochs * len(loader)
         warmup_steps = int(total_steps * warmup_ratio)
-        scheduler = WarmupScheduler(optimizer, warmup_steps, total_steps)
+        scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
         criterion = nn.MSELoss()
         
         device_str = self.device.type

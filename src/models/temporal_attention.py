@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 import pandas as pd
 import logging
 from typing import List, Tuple, Optional, Dict, Any
-import math
 import joblib
+
+from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
 
 logger = logging.getLogger(__name__)
 
@@ -72,29 +74,6 @@ class TemporalAttentionModel(nn.Module):
         return self.output_head(combined), attn_weights
 
 
-class WarmupScheduler:
-    """Learning rate warmup + cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        self.current_step = 0
-    
-    def step(self):
-        self.current_step += 1
-        if self.current_step < self.warmup_steps:
-            lr = self.base_lr * self.current_step / self.warmup_steps
-        else:
-            progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        return lr
-
-
 class TemporalAttentionWrapper:
     """Wrapper for handling sequence processing and training for the TemporalAttentionModel."""
     
@@ -107,11 +86,10 @@ class TemporalAttentionWrapper:
         'lr': 5e-4,
         'warmup_ratio': 0.1,
         'output_dim': 3,
+        'use_compile': False,
     }
     
     def __init__(self, input_dim: int, seq_len: int = 20, config: Optional[Dict[str, Any]] = None):
-        from src.models.gpu_utils import get_device
-        
         self.seq_len = seq_len
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
         self.device = get_device()
@@ -125,13 +103,18 @@ class TemporalAttentionWrapper:
             output_dim=self.config['output_dim']
         ).to(self.device)
         
+        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
+        use_compile = self.config.get('use_compile', False) and get_compile_status()
+        if use_compile:
+            self.model = apply_compile(self.model, True, "TemporalAttention")
+        
         self.is_trained = False
         self.feat_mean = None
         self.feat_std = None
         
         logger.info(f"TemporalAttention initialized: hidden={self.config['hidden_dim']}, "
                    f"heads={self.config['num_heads']}, dropout={self.config['dropout']}, "
-                   f"device={self.device}")
+                   f"compile={use_compile}, device={self.device}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Creates sliding window sequences for each player, including next game context (vectorized)."""
@@ -200,7 +183,7 @@ class TemporalAttentionWrapper:
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-5)
         total_steps = epochs * len(loader)
         warmup_steps = int(total_steps * warmup_ratio)
-        scheduler = WarmupScheduler(optimizer, warmup_steps, total_steps)
+        scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
         criterion = nn.MSELoss()
         
         device_str = self.device.type

@@ -22,6 +22,7 @@ from src.models.minutes_predictor import MinutesPredictor
 from src.models.error_calibration import ErrorCalibrator
 from src.data.betting_scraper import BettingScraper
 from src.data.schedule_scraper import ScheduleScraper
+from src.config.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ class GameSimulator:
     - Blowout/garbage time minutes redistribution
     """
     
-    def __init__(self, manager: ModelManager, gnn_model=None, transformer_model=None, cache_dir='data/sim_cache'):
+    def __init__(self, manager: ModelManager, gnn_model=None, transformer_model=None, cache_dir='data/sim_cache', config: Optional[Any] = None):
+        self._config = config if config else get_config()
         self.manager = manager
         self.players_df = None
         self.games_df = None
@@ -63,20 +65,50 @@ class GameSimulator:
         self.device = get_device()
         logger.info(f"GameSimulator initialized on device: {self.device}")
         
-        # 6-stat correlation matrix: [PTS, REB, AST, STL, BLK, TOV]
-        # Based on empirical NBA stat correlations
-        self.CORR_MATRIX = torch.tensor([
-            # PTS    REB    AST    STL    BLK    TOV
-            [1.00,  0.15, -0.05,  0.12, -0.02,  0.35],   # PTS
-            [0.15,  1.00, -0.10, -0.03,  0.30, -0.05],   # REB
-            [-0.05, -0.10,  1.00,  0.15, -0.08,  0.25],  # AST
-            [0.12, -0.03,  0.15,  1.00,  0.05,  0.08],   # STL
-            [-0.02,  0.30, -0.08,  0.05,  1.00, -0.03],  # BLK
-            [0.35, -0.05,  0.25,  0.08, -0.03,  1.00],   # TOV
-        ], dtype=torch.float32, device=self.device)
+        self._init_simulation_params()
+        
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._roster_cache = {}
+        self._synergy_cache = {}
+        self._defense_cache = {}
+        self._pace_cache = {}
+        logger.info(f"Cache directory: {self.cache_dir}")
+    
+    def _init_simulation_params(self):
+        """Initialize simulation parameters from config."""
+        params = self._config.simulation_params if hasattr(self._config, 'simulation_params') else None
+        
+        corr_matrix = params.stat_correlation_matrix if params else None
+        if corr_matrix is None:
+            corr_matrix = [
+                [1.0, 0.35, 0.45, 0.15, 0.08, 0.20],
+                [0.35, 1.0, 0.25, 0.12, 0.18, 0.10],
+                [0.45, 0.25, 1.0, 0.18, 0.06, 0.28],
+                [0.15, 0.12, 0.18, 1.0, 0.22, 0.35],
+                [0.08, 0.18, 0.06, 0.22, 1.0, 0.12],
+                [0.20, 0.10, 0.28, 0.35, 0.12, 1.0],
+            ]
+        
+        self.CORR_MATRIX = torch.tensor(corr_matrix, dtype=torch.float32, device=self.device)
         self.COV_CHOLESKY = torch.linalg.cholesky(self.CORR_MATRIX)
         self.NUM_STATS = 6
         self.STAT_NAMES = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
+        
+        self.league_avg_pts = self._get_config_value('league_averages.points_per_100', 114.0)
+        self.vegas_weight = self._get_config_value('league_averages.vegas_weight', 0.30)
+        self.home_edge = self._get_config_value('simulation_params.home_edge', 2.5)
+    
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get config value using dot notation."""
+        parts = key.split('.')
+        obj = self._config
+        for part in parts:
+            if hasattr(obj, part):
+                obj = getattr(obj, part)
+            else:
+                return default
+        return obj
         
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -316,15 +348,15 @@ class GameSimulator:
         rest = rest_info['rest_days']
         
         if rest_info.get('is_3_in_4'):
-            return 0.96
+            return self._get_config_value('simulation_params.fatigue_3in4', 0.96)
         elif rest_info.get('is_b2b'):
-            return 0.975
+            return self._get_config_value('simulation_params.fatigue_back_to_back', 0.975)
         elif rest == 2:
-            return 1.0
+            return self._get_config_value('simulation_params.fatigue_2_days', 1.0)
         elif rest == 3:
-            return 1.01
+            return self._get_config_value('simulation_params.fatigue_3_days', 1.01)
         elif rest >= 4:
-            return 1.005
+            return self._get_config_value('simulation_params.fatigue_4plus_days', 1.005)
         return 1.0
 
     def _get_defensive_adjustments(self, opponent: str, roster_info: list) -> dict:
@@ -335,10 +367,15 @@ class GameSimulator:
             if not opp_defense:
                 return adjustments
             
-            league_avg_pts = 114.0
+            league_avg_pts = self.league_avg_pts
             opp_pts_allowed = opp_defense.get('pts_allowed_per_100', league_avg_pts)
             
             team_def_factor = opp_pts_allowed / league_avg_pts
+            
+            pts_range = self._get_config_value('simulation_params.defense_pts_range', (0.85, 1.15))
+            reb_range = self._get_config_value('simulation_params.defense_reb_range', (0.90, 1.10))
+            ast_range = self._get_config_value('simulation_params.defense_ast_range', (0.92, 1.08))
+            tov_range = self._get_config_value('simulation_params.defense_tov_range', (0.90, 1.10))
             
             for player in roster_info:
                 position = player.get('position', 'SF')
@@ -358,12 +395,12 @@ class GameSimulator:
                     adj = team_def_factor
                 
                 adjustments[player['name']] = {
-                    'pts': float(np.clip(adj, 0.85, 1.15)),
-                    'reb': float(np.clip(1.0 + (adj - 1.0) * 0.5, 0.90, 1.10)),
-                    'ast': float(np.clip(1.0 + (adj - 1.0) * 0.3, 0.92, 1.08)),
+                    'pts': float(np.clip(adj, pts_range[0], pts_range[1])),
+                    'reb': float(np.clip(1.0 + (adj - 1.0) * 0.5, reb_range[0], reb_range[1])),
+                    'ast': float(np.clip(1.0 + (adj - 1.0) * 0.3, ast_range[0], ast_range[1])),
                     'stl': 1.0,
                     'blk': 1.0,
-                    'tov': float(np.clip(2.0 - adj, 0.90, 1.10)),
+                    'tov': float(np.clip(2.0 - adj, tov_range[0], tov_range[1])),
                 }
         except Exception as e:
             logger.debug(f"Defensive adjustment failed for opponent {opponent}: {e}")
@@ -408,7 +445,7 @@ class GameSimulator:
         model_home = team_totals_mean.get(team_a, 110)
         model_away = team_totals_mean.get(team_b, 108)
         
-        vegas_weight = 0.30
+        vegas_weight = self.vegas_weight
         
         calibrated = {
             team_a: model_home * (1 - vegas_weight) + vegas_home * vegas_weight,
@@ -590,26 +627,29 @@ class GameSimulator:
             
             # 4. Team Totals with dynamic home court advantage
             rest_advantage = 0.0
+            home_edge = self.home_edge
             if is_home:
-                home_edge = 2.5
                 strength_diff = float(stat_means[:, 0].sum() - 100) / 50.0
                 home_edge += float(np.clip(strength_diff, -0.5, 0.5))
             else:
-                home_edge = -2.5
+                home_edge = -home_edge
             home_edge += rest_advantage
             
             team_m = p_means.sum(dim=1)  # (sims, S)
+            team_totals_min = self._get_config_value('simulation_params.team_totals_min', [70, 30, 15, 3, 2, 5])
+            team_totals_max = self._get_config_value('simulation_params.team_totals_max', [160, 70, 45, 20, 15, 28])
             team_s = torch.sqrt((p_stds**2).sum(dim=1)) + torch.tensor([5.0, 3.0, 2.5, 1.0, 0.8, 1.0], device=self.device)
             
             team_totals = torch.normal(team_m, team_s, generator=rng)
             team_totals[:, 0] += home_edge
             
             team_totals = torch.clamp(team_totals,
-                min=torch.tensor([70, 30, 15, 3, 2, 5], dtype=torch.float32, device=self.device),
-                max=torch.tensor([160, 70, 45, 20, 15, 28], dtype=torch.float32, device=self.device))
+                min=torch.tensor(team_totals_min, dtype=torch.float32, device=self.device),
+                max=torch.tensor(team_totals_max, dtype=torch.float32, device=self.device))
             
             # 5. Dirichlet Stat Allocation (all 6 stats)
-            conc = torch.tensor([70.0, 90.0, 85.0, 95.0, 95.0, 90.0], device=self.device)
+            dirichlet_conc = self._get_config_value('simulation_params.dirichlet_concentrations', [70.0, 90.0, 85.0, 95.0, 95.0, 90.0])
+            conc = torch.tensor(dirichlet_conc, device=self.device)
             alpha = (p_means / torch.clamp(p_means.sum(dim=1, keepdim=True), min=1e-6)) * conc.unsqueeze(0).unsqueeze(0)
             gamma_dist = torch.distributions.Gamma(torch.clamp(alpha, min=1e-6), 1.0)
             gamma_draws = gamma_dist.rsample()

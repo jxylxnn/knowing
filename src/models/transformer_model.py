@@ -10,6 +10,9 @@ from typing import List, Tuple, Dict, Any, Optional
 import math
 import torch.backends.cudnn as cudnn
 
+from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
+from src.models.lstm_model import PlayerSequenceDataset
+
 logger = logging.getLogger(__name__)
 
 cudnn.benchmark = True
@@ -71,29 +74,6 @@ class TransformerModel(nn.Module):
         return out
 
 
-class WarmupScheduler:
-    """Learning rate warmup + cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6):
-        self.optimizer = optimizer
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        self.current_step = 0
-    
-    def step(self):
-        self.current_step += 1
-        if self.current_step < self.warmup_steps:
-            lr = self.base_lr * self.current_step / self.warmup_steps
-        else:
-            progress = (self.current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        return lr
-
-
 class TransformerWrapper:
     """Wrapper for handling sequence processing and training for the Transformer."""
     
@@ -112,7 +92,6 @@ class TransformerWrapper:
     }
     
     def __init__(self, input_dim: int, seq_len: int = 50, config: Optional[Dict[str, Any]] = None):
-        from src.models.gpu_utils import get_device
         self.seq_len = seq_len
         self.device = get_device()
         
@@ -128,6 +107,11 @@ class TransformerWrapper:
             grad_checkpoint=self.config['grad_checkpoint']
         ).to(self.device)
         
+        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
+        use_compile = self.config.get('use_compile', False) and get_compile_status()
+        if use_compile:
+            self.model = apply_compile(self.model, True, "Transformer")
+        
         self.input_dim = input_dim
         self.is_trained = False
         self.feat_mean = None
@@ -136,7 +120,7 @@ class TransformerWrapper:
         logger.info(f"Transformer initialized: d_model={self.config['d_model']}, "
                    f"heads={self.config['nhead']}, layers={self.config['num_layers']}, "
                    f"ff_dim={self.config['dim_feedforward']}, grad_ckpt={self.config['grad_checkpoint']}, "
-                   f"device={self.device}")
+                   f"compile={use_compile}, device={self.device}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         """Creates sliding window sequences for each player (vectorized)."""
@@ -201,7 +185,7 @@ class TransformerWrapper:
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         total_steps = epochs * len(loader)
         warmup_steps = int(total_steps * warmup_ratio)
-        scheduler = WarmupScheduler(optimizer, warmup_steps, total_steps)
+        scheduler = WarmupCosineScheduler(optimizer, warmup_steps, total_steps)
         criterion = nn.MSELoss()
         
         device_str = self.device.type
