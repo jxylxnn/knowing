@@ -720,7 +720,14 @@ class FeatureEngineer:
         # Compare player's performance against top-5 defenses vs their season average
         if 'OPP_DEF_RATING' in new_cols:
             # Identify elite defenses (top 20% defense - lowest scores)
-            elite_def_mask = new_cols['OPP_DEF_RATING'] < new_cols['OPP_DEF_RATING'].quantile(0.20)
+            # Handle case where OPP_DEF_RATING is a scalar (no defensive data available)
+            has_def_data = isinstance(new_cols['OPP_DEF_RATING'], pd.Series)
+            
+            if has_def_data:
+                elite_def_mask = new_cols['OPP_DEF_RATING'] < new_cols['OPP_DEF_RATING'].quantile(0.20)
+            else:
+                # No defensive data available, create empty mask
+                elite_def_mask = pd.Series(False, index=df.index)
             
             for stat in self.target_cols:
                 # Player's average against elite defenses (if any)
@@ -742,7 +749,7 @@ class FeatureEngineer:
         # 4. DEF_MATCHUP_TREND - Rolling trend of performance against tough defenses
         for stat in self.target_cols:
             # If we have opponent defense info, compute player's rolling trend
-            if 'OPP_DEF_RATING' in new_cols:
+            if 'OPP_DEF_RATING' in new_cols and isinstance(new_cols['OPP_DEF_RATING'], pd.Series):
                 # Interaction: player's recent production vs opponent defense quality
                 recent_prod = df.groupby('PLAYER_ID')[stat].transform(
                     lambda x: x.shift(1).rolling(10, min_periods=3).mean()
@@ -751,9 +758,12 @@ class FeatureEngineer:
                 # Higher value = player performs better against tough defenses
                 def_trend = recent_prod / (new_cols['OPP_DEF_RATING'] + 1e-6)
                 new_cols[f'DEF_MATCHUP_TREND_{stat}'] = def_trend
+            else:
+                # No defensive data, set to 0
+                new_cols[f'DEF_MATCHUP_TREND_{stat}'] = 0.0
         
         # 5. HOME_AWAY_VS_DEF - Home court advantage adjustment based on opponent defense
-        if 'IS_HOME' in df.columns and 'OPP_DEF_RATING' in new_cols:
+        if 'IS_HOME' in df.columns and 'OPP_DEF_RATING' in new_cols and isinstance(new_cols['OPP_DEF_RATING'], pd.Series):
             # Home court can offset tough defenses
             home_advantage = 1.05  # ~5% boost at home
             tough_def_penalty = new_cols['OPP_DEF_RATING'] * 0.05  # Penalty for tough defense
@@ -765,15 +775,24 @@ class FeatureEngineer:
             new_cols['DEF_MATCHUP_AWAY_ADJ'] = (
                 1.0 - df['IS_HOME'] * tough_def_penalty
             )
+        else:
+            # No defensive data, set to default values
+            if 'IS_HOME' in df.columns:
+                new_cols['DEF_MATCHUP_HOME_ADJ'] = 1.0
+                new_cols['DEF_MATCHUP_AWAY_ADJ'] = 1.0
         
         # 6. QUALITY_DEFENSE_AVOIDANCE - How well player avoids top defenses
         # Based on opponent's defensive ranking vs league
-        if 'OPP_DEF_RATING' in new_cols:
+        if 'OPP_DEF_RATING' in new_cols and isinstance(new_cols['OPP_DEF_RATING'], pd.Series):
             # Rank of opponent defense (lower is better)
             opponent_rank = new_cols['OPP_DEF_RATING'].groupby(df['GAME_DATE']).rank(pct=True)
             new_cols['OPP_DEF_RANK'] = opponent_rank
             # Avoidance score: how much player avoids top defenses (if schedule allows)
             new_cols['QUALITY_DEF_AVOIDANCE'] = 1 - opponent_rank
+        else:
+            # No defensive data, set to default values
+            new_cols['OPP_DEF_RANK'] = 0.5  # Default: average defense
+            new_cols['QUALITY_DEF_AVOIDANCE'] = 0.5
         
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
