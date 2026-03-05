@@ -16,7 +16,14 @@
   - GPU-accelerated training
   - Multi-loss training (RMSE + MAE)
   - Quantile regression for uncertainty intervals
-- **LightGBM 4.6+** — Additional boosting support
+- **LightGBM 4.6+** — Fast gradient boosting with leaf-wise growth
+  - GPU-accelerated training
+  - Better accuracy on large datasets
+  - Efficient memory usage with leaf-wise strategy
+- **XGBoost 2.0+** — Alternative gradient boosting option
+  - GPU-accelerated training with hist method
+  - Better regularization options
+  - Support for custom objective functions
 
 ### Classical ML
 - **scikit-learn 1.8+** — Traditional ML utilities

@@ -16,6 +16,7 @@ except ImportError:
     HAS_CATBOOST = False
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
 
 # Import centralized GPU compatibility check
 from src.models.gpu_utils import check_gpu_compatibility

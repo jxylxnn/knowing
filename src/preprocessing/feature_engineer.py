@@ -283,6 +283,10 @@ class FeatureEngineer:
         logger.info("Phase 9/15: Adding Opponent Strength...")
         df = self._add_opponent_strength(df)
         
+        # Phase 9b: Defensive Matchup Features (NEW)
+        logger.info("Phase 9b/15: Adding Defensive Matchup Features...")
+        df = self._add_defensive_matchup_features(df)
+        
         # Phase 10: Interactions
         logger.info("Phase 10/15: Adding Interaction Features...")
         df = self._add_interaction_features(df)
@@ -652,6 +656,125 @@ class FeatureEngineer:
                 new_cols[f'RELATIVE_OPP_DEF_{stat}'] = 1.0
                 new_cols[f'ROLL_OPP_DEF_{stat}_10'] = 1.0
                 
+        return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+    def _add_defensive_matchup_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        NEW: Defensive Matchup Features.
+        These features capture how players perform against specific defensive opponents.
+        
+        Key features added:
+        1. DEF_MATCHUP_IMPACT - Estimated impact of opponent defense on player production
+        2. OPP_DEF_RATING - Opponent defensive rating (points allowed per 100 possessions)
+        3. PLAYER_DEF_OVERAGE - How much better/worse player does against elite defenses
+        4. DEF_MATCHUP_TREND - Rolling trend of performance against tough defenses
+        5. HOME_AWAY_VS_DEF - Home court advantage adjustment based on opponent defense
+        """
+        new_cols = {}
+        
+        # Get league average defensive metrics
+        league_defensive_ratings = {
+            'PTS': 105,  # League average points allowed
+            'REB': 42,   # League average rebounds allowed
+            'AST': 22,   # League average assists allowed
+        }
+        
+        # 1. DEF_MATCHUP_IMPACT (Defense vs Player Performance Interaction)
+        # Measures how much the opponent's defense affects the player's expected production
+        for stat in self.target_cols:
+            # Get opponent's defensive stats for this game
+            opp_def_col = f'OPP_DEF_{stat}_ALLOWED'
+            if opp_def_col in df.columns:
+                # Normalize opponent defense (1.0 = league average)
+                opp_def_normalized = df[opp_def_col] / league_defensive_ratings.get(stat, 105)
+                
+                # Defensive Impact: lower is better (defense allows fewer points)
+                # If opponent allows 120 PTS (above avg), this factor will be > 1 (bad for player)
+                # If opponent allows 90 PTS (below avg), this factor will be < 1 (good for player)
+                new_cols[f'DEF_MATCHUP_{stat}_IMPACT'] = 2 - opp_def_normalized
+                
+                # Rolling version: opponent's defense over past 5 games
+                opp_def_rolling = df.groupby('OPPONENT_ID')[opp_def_col].transform(
+                    lambda x: x.shift(1).rolling(5, min_periods=2).mean()
+                )
+                new_cols[f'ROLL_OPP_DEF_{stat}_5'] = opp_def_rolling / league_defensive_ratings.get(stat, 105)
+        
+        # 2. OPP_DEF_RATING - Combined defensive difficulty metric
+        # Weighted average of defense against PTS, REB, AST
+        def_scores = []
+        for stat, default_val in league_defensive_ratings.items():
+            col = f'OPP_DEF_{stat}_ALLOWED'
+            if col in df.columns:
+                def_scores.append(df[col] / default_val)
+        
+        if def_scores:
+            # Lower score = harder defense (allows fewer stats)
+            combined_def = pd.concat(def_scores, axis=1).mean(axis=1)
+            new_cols['OPP_DEF_RATING'] = combined_def
+            new_cols['DEF_DIFFICULTY'] = (2 - combined_def)  # Higher = easier opponent
+        else:
+            new_cols['OPP_DEF_RATING'] = 1.0
+            new_cols['DEF_DIFFICULTY'] = 1.0
+        
+        # 3. PLAYER_DEF_OVERAGE - How player performs vs elite defenses
+        # Compare player's performance against top-5 defenses vs their season average
+        if 'OPP_DEF_RATING' in new_cols:
+            # Identify elite defenses (top 20% defense - lowest scores)
+            elite_def_mask = new_cols['OPP_DEF_RATING'] < new_cols['OPP_DEF_RATING'].quantile(0.20)
+            
+            for stat in self.target_cols:
+                # Player's average against elite defenses (if any)
+                # Using conditional logic to compute over/under expectation
+                season_avg = df.groupby('PLAYER_ID')[stat].transform(
+                    lambda x: x.shift(1).expanding().mean()
+                )
+                
+                # Defensive overage: how much above/below season avg when facing elite defense
+                # This is computed at game level for historical data
+                if f'VS_OPP_{stat}_AVG' in df.columns:
+                    # Compare vs opponent average to season average
+                    vs_opp = df[f'VS_OPP_{stat}_AVG']
+                    overage = (vs_opp / (season_avg + 1e-6)) - 1
+                    new_cols[f'DEF_OVERAGE_{stat}'] = overage
+                else:
+                    new_cols[f'DEF_OVERAGE_{stat}'] = 0.0
+        
+        # 4. DEF_MATCHUP_TREND - Rolling trend of performance against tough defenses
+        for stat in self.target_cols:
+            # If we have opponent defense info, compute player's rolling trend
+            if 'OPP_DEF_RATING' in new_cols:
+                # Interaction: player's recent production vs opponent defense quality
+                recent_prod = df.groupby('PLAYER_ID')[stat].transform(
+                    lambda x: x.shift(1).rolling(10, min_periods=3).mean()
+                )
+                # Defensive trend: how does player perform as opponent defenses get tougher?
+                # Higher value = player performs better against tough defenses
+                def_trend = recent_prod / (new_cols['OPP_DEF_RATING'] + 1e-6)
+                new_cols[f'DEF_MATCHUP_TREND_{stat}'] = def_trend
+        
+        # 5. HOME_AWAY_VS_DEF - Home court advantage adjustment based on opponent defense
+        if 'IS_HOME' in df.columns and 'OPP_DEF_RATING' in new_cols:
+            # Home court can offset tough defenses
+            home_advantage = 1.05  # ~5% boost at home
+            tough_def_penalty = new_cols['OPP_DEF_RATING'] * 0.05  # Penalty for tough defense
+            
+            # Combined effect: home vs away adjustment
+            new_cols['DEF_MATCHUP_HOME_ADJ'] = (
+                home_advantage - (1 - df['IS_HOME']) * tough_def_penalty
+            )
+            new_cols['DEF_MATCHUP_AWAY_ADJ'] = (
+                1.0 - df['IS_HOME'] * tough_def_penalty
+            )
+        
+        # 6. QUALITY_DEFENSE_AVOIDANCE - How well player avoids top defenses
+        # Based on opponent's defensive ranking vs league
+        if 'OPP_DEF_RATING' in new_cols:
+            # Rank of opponent defense (lower is better)
+            opponent_rank = new_cols['OPP_DEF_RATING'].groupby(df['GAME_DATE']).rank(pct=True)
+            new_cols['OPP_DEF_RANK'] = opponent_rank
+            # Avoidance score: how much player avoids top defenses (if schedule allows)
+            new_cols['QUALITY_DEF_AVOIDANCE'] = 1 - opponent_rank
+        
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
 
     def _add_interaction_features(self, df: pd.DataFrame) -> pd.DataFrame:

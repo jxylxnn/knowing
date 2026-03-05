@@ -75,16 +75,17 @@ Provide an interactive CLI for probability queries and player comparisons.
 ## Future Enhancements (Potential)
 
 ### Model Improvements
-- [ ] Add XGBoost/LightGBM to ensemble
-- [ ] Implement cross-position models
-- [ ] Add playoff-specific adjustments
-- [ ] Incorporate player tracking data
+- [ ] Implement learned ensemble weights (adaptive blending per player-type)
+- [ ] Add cross-position models (guard/forward/center specific)
+- [ ] Add playoff-specific adjustments (different weighting for playoff games)
+- [ ] Incorporate player tracking data (shot distance, speed, distance to basket)
+- [ ] Add uncertainty calibration with isotonic regression for quantiles
 
 ### Data Enhancements
-- [ ] Add defensive matchup data
-- [ ] Include coaching impact factors
-- [ ] Weather/travel impact analysis
-- [ ] Historical playoff performance
+- [ ] Include coaching impact factors (rotation tendencies, play style)
+- [ ] Add travel impact analysis (time zones crossed, miles traveled)
+- [ ] Historical playoff performance data
+- [ ] Depth chart position information
 
 ### System Improvements
 - [ ] REST API for external access
@@ -92,6 +93,7 @@ Provide an interactive CLI for probability queries and player comparisons.
 - [ ] Automated daily predictions
 - [ ] Backtesting framework
 - [ ] Model performance monitoring
+- [ ] Performance drift detection
 
 ---
 

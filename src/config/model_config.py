@@ -234,13 +234,50 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'rsm': max(0.6, 0.8 - scale * 0.005),
             'langevin': score >= 10,
             'diffusion_temperature': 10000.0,
-            'early_stopping_rounds': _clamp(150 + int(scale * 5), 100, 300),
+            'early_stopping_rounds': _clamp(30 + int(scale * 2), 20, 100),  # Reduced from 100-300 for faster training
             'use_multi_loss': True,
             'multi_loss_rmse_weight': 0.6,
             'multi_loss_mae_weight': 0.4,
             'use_quantile_models': True,  # Always train quantile models for uncertainty
             'n_temporal_folds': _clamp(3 + int(scale / 10), 2, 5),
             'use_per_target_tuning': True,
+        },
+        
+        # ===== XGBOOST CONFIG =====
+        'xgboost': {
+            'n_estimators': _clamp(int(1000 * (scale ** 0.5)), 500, 3000),
+            'max_depth': _clamp(6 + int(scale / 10), 4, 12),
+            'learning_rate': max(0.005, 0.03 / (scale ** 0.15)),
+            'subsample': max(0.6, 0.8 - scale * 0.01),
+            'colsample_bytree': max(0.6, 0.8 - scale * 0.01),
+            'colsample_bylevel': max(0.6, 0.8 - scale * 0.01),
+            'reg_alpha': max(0.1, scale * 0.05),
+            'reg_lambda': max(1.0, 2.0 + scale * 0.2),
+            'min_child_weight': max(1, int(5 - scale * 0.2)),
+            'gamma': max(0, scale * 0.01),
+            'early_stopping_rounds': _clamp(50 + int(scale * 5), 30, 150),
+            'random_state': 42,
+            'n_jobs': -1,
+            'use_gpu': score >= 10,
+        },
+        
+        # ===== LIGHTGBM CONFIG =====
+        'lightgbm': {
+            'n_estimators': _clamp(int(1500 * (scale ** 0.6)), 500, 5000),
+            'max_depth': _clamp(6 + int(scale / 12), -1, 15),
+            'learning_rate': max(0.005, 0.05 / (scale ** 0.2)),
+            'num_leaves': _clamp(31 + int(scale * 3), 16, 128),
+            'feature_fraction': max(0.6, 0.8 - scale * 0.01),
+            'bagging_fraction': max(0.6, 0.8 - scale * 0.01),
+            'bagging_freq': 1,
+            'min_child_samples': max(5, int(20 - scale * 0.5)),
+            'reg_alpha': max(0.1, scale * 0.05),
+            'reg_lambda': max(0.1, scale * 0.1),
+            'early_stopping_rounds': _clamp(50 + int(scale * 5), 30, 150),
+            'random_state': 42,
+            'n_jobs': -1,
+            'use_gpu': score >= 10,
+            'verbose': -1,
         },
         
         # ===== TRAINING CONFIG =====
