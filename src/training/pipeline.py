@@ -102,6 +102,9 @@ class TrainingPipeline:
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         
+        # Convert cache_dir to Path immediately to avoid string division errors
+        cache_dir = Path(cache_dir)
+        
         # Training mode
         if mode not in self.TRAINING_MODES:
             raise ValueError(f"Invalid mode: {mode}. Choose from {list(self.TRAINING_MODES.keys())}")

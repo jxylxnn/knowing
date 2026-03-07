@@ -93,10 +93,10 @@ class GPURollingFeatures:
                     variance = ((windows - mean) ** 2).nanmean(dim=1)
                     result[start:end, col_idx] = torch.sqrt(variance)
                 elif stat == 'min':
-                    mins, _ = windows.nanmin(dim=1)
+                    mins, _ = torch.nanmin(windows, dim=1)
                     result[start:end, col_idx] = mins
                 elif stat == 'max':
-                    maxs, _ = windows.nanmax(dim=1)
+                    maxs, _ = torch.nanmax(windows, dim=1)
                     result[start:end, col_idx] = maxs
                 col_idx += 1
         
@@ -399,25 +399,31 @@ class FeatureEngineer:
 
     def _create_rolling_features_vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Generates rolling features using fast vectorized operations.
-        Avoids slow lambda functions and processes columns efficiently.
+        Generates rolling features using fast vectorized operations with parallel window processing.
+        Optimized version: processes all windows in parallel for significant speedup.
         """
+        from joblib import Parallel, delayed
+        import time
+        
         stat_cols = self.target_cols + self.efficiency_cols
         valid_cols = [c for c in stat_cols if c in df.columns]
         
-        logger.info(f"Starting rolling feature generation for {len(valid_cols)} columns, {len(self.rolling_windows)} windows...")
+        logger.info(f"Starting FAST rolling feature generation for {len(valid_cols)} columns, {len(self.rolling_windows)} windows...")
+        start_time = time.time()
         
         # Pre-shift all columns at once (avoids repeated groupby.shift calls)
         shifted = df.groupby('PLAYER_ID')[valid_cols].shift(1)
         
-        total_windows = len(self.rolling_windows)
-        for idx, window in enumerate(self.rolling_windows):
-            logger.info(f"  Processing window {window} ({idx+1}/{total_windows})...")
+        # Pre-create the groupby object for reuse
+        grouped = shifted.groupby(df['PLAYER_ID'])
+        
+        def process_single_window(window_data):
+            """Process a single window - to be run in parallel."""
+            window, grouped_shifted, player_ids, valid_columns = window_data
             
             min_periods = max(1, window // 3)
             
-            # Core aggregations - use only string names for speed
-            # Pandas optimizes these with C/Cython code
+            # Core aggregations
             core_agg_funcs = ['mean']
             if window >= 5: 
                 core_agg_funcs.append('std')
@@ -425,12 +431,12 @@ class FeatureEngineer:
                 core_agg_funcs.extend(['min', 'max'])
             
             try:
-                # Create rolling object once
-                rolled = shifted.groupby(df['PLAYER_ID']).rolling(
+                # Reconstruct groupby with the same player IDs
+                rolled = grouped_shifted.groupby(player_ids).rolling(
                     window=window, min_periods=min_periods
                 )
                 
-                # Apply only fast string-based aggregations
+                # Apply aggregations
                 window_stats = rolled.agg(core_agg_funcs)
                 
                 # Flatten MultiIndex columns
@@ -439,17 +445,35 @@ class FeatureEngineer:
                     new_columns.append(f"ROLL_{col}_{func.upper()}_{window}")
                 window_stats.columns = new_columns
                 
-                # Remove grouping index to align with original df
+                # Remove grouping index
                 window_stats = window_stats.reset_index(level=0, drop=True)
                 
-                # Merge efficiently
-                df = pd.concat([df, window_stats], axis=1)
+                return window_stats
                 
             except Exception as e:
                 logger.warning(f"Rolling window {window} failed: {e}")
-                continue
-
-        # Post-processing for Range which require multi-column ops
+                return None
+        
+        # Prepare data for parallel processing
+        window_data_list = [
+            (window, shifted, df['PLAYER_ID'], valid_cols) 
+            for window in self.rolling_windows
+        ]
+        
+        # Process windows in parallel using joblib
+        # Use threads since we're mostly I/O bound on pandas operations
+        n_jobs = min(len(self.rolling_windows), 4)  # Max 4 parallel workers
+        results = Parallel(n_jobs=n_jobs, prefer='threads')(
+            delayed(process_single_window)(wd) for wd in window_data_list
+        )
+        
+        # Concatenate all results
+        all_window_dfs = [r for r in results if r is not None]
+        if all_window_dfs:
+            rolling_features_df = pd.concat(all_window_dfs, axis=1)
+            df = pd.concat([df, rolling_features_df], axis=1)
+        
+        # Post-processing for Range features
         for window in [10, 20]:
             base_col = f'ROLL_PTS_MIN_{window}'
             if base_col in df.columns:
@@ -459,7 +483,8 @@ class FeatureEngineer:
                     if min_c in df.columns and max_c in df.columns:
                         df[f'ROLL_{col}_RANGE_{window}'] = df[max_c] - df[min_c]
         
-        logger.info(f"Rolling features complete. Added {len([c for c in df.columns if c.startswith('ROLL_')])} columns.")
+        elapsed = time.time() - start_time
+        logger.info(f"Rolling features complete in {elapsed:.1f}s. Added {len([c for c in df.columns if c.startswith('ROLL_')])} columns.")
         return df
 
     def _create_efficiency_features(self, df: pd.DataFrame) -> pd.DataFrame:
