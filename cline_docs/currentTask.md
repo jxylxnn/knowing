@@ -1,112 +1,91 @@
 # Current Task
 
-## Current Objectives
+## New Training Pipeline Implementation - COMPLETED
 
-The NBA Player Stats Prediction System is **feature-complete** for its core purpose. Current focus areas:
+The new training pipeline has been successfully implemented with the following features:
 
-### 1. Model Improvements
-- Add XGBoost and LightGBM to ensemble for better gradient boosting diversity
-- Implement learned ensemble weights with GPU-accelerated blending
-- Add calibrated quantile models with isotonic regression
-- Enhance defensive matchup feature engineering
+### Implementation Summary
 
-### 2. Feature Engineering
-- Add comprehensive defensive matchup features (defensive impact, opponent ratings, matchup trends)
-- Track defensive overage - how players perform against elite defenses
-- Implement home court advantage adjustments based on opponent defense
+#### New Architecture (src/training/)
 
-### 3. System Maintenance
-- Ensure data pipelines remain functional with external API changes
-- Monitor model performance metrics over time
-- Keep dependencies up to date
+1. **trainer.py** - Base trainer class with unified interface
+   - Abstract `BaseTrainer` class for all model types
+   - `TrainResult` dataclass for standardized results
+   - Common functionality: data validation, metric computation
 
-### 4. Documentation
-- Complete cline documentation suite (in progress)
-- Maintain code comments and docstrings
+2. **catboost_trainer.py** - Optimized CatBoost training
+   - Per-target hyperparameter profiles
+   - Multi-loss training (RMSE + MAE)
+   - Quantile regression for uncertainty
+   - Parallel training support via `train_catboost_target()`
 
-### 5. Testing
-- Run test suite periodically to catch regressions
-- One pre-existing test (`test_registry_initialization`) has a known issue with PosixPath vs string assertion
+3. **nn_trainer.py** - Unified neural network trainer
+   - Supports all PyTorch models (LSTM, Transformer, GNN, Joint NN)
+   - Automatic mixed precision (AMP)
+   - Gradient checkpointing
+   - Early stopping with patience
 
----
+4. **feature_cache.py** - Smart caching system
+   - Automatic cache invalidation based on data hashes
+   - Persistent storage for processed features
+   - Data split caching
 
-## Context
+5. **experiment.py** - Experiment tracking
+   - Run tracking with metrics and artifacts
+   - Model comparison across runs
+   - JSON-based storage
 
-### Project Type
-Pure-Python CLI-based ML project (no web server, no Docker, no database).
+6. **pipeline.py** - Main orchestrator
+   - Three training modes: quick, standard, full
+   - Parallel training across targets
+   - Automatic hardware detection and configuration
 
-### Virtual Environment
-Located at `/Users/jaylenbain/Documents/knowing-master/venv`
+### Key Improvements
 
-Activate before running:
+| Feature | Old Pipeline | New Pipeline |
+|---------|-------------|--------------|
+| Architecture | 1800-line god class | Modular components |
+| Parallel Training | None | joblib-based parallel targets |
+| Caching | Manual | Automatic feature/split caching |
+| Experiment Tracking | None | Built-in tracking |
+| Training Modes | Fixed | quick/standard/full |
+| Code Organization | Mixed concerns | Clear separation |
+
+### Usage
+
 ```bash
-source venv/bin/activate
+# Quick mode for testing (fastest)
+python train.py --mode quick --parallel
+
+# Standard mode for production
+python train.py --mode standard --parallel
+
+# Full mode for maximum accuracy
+python train.py --mode full --model-size large
 ```
 
-### Main Entry Points
-- `python query_prob.py` — Interactive probability query CLI
-- `python train.py` — Train ML models (requires data from `update_data.py`)
-- `python simulate_season.py --today` — Simulate today's NBA games
-- `python update_data.py` — Fetch NBA data (requires internet)
+### Training Modes
 
----
-
-## Recent Updates (March 2026)
-
-### Model Improvements Implemented
-- **XGBoost/LightGBM Added**: Added XGBoost and LightGBM configurations to `src/config/model_config.py`
-  - Auto-sized XGBoost models based on hardware compute score
-  - GPU-accelerated training with hist method (XGBoost)
-  - LightGBM with leaf-wise growth for faster training
-  - Configurable regularization parameters per model type
-
-- **Calibrated Quantile Models**: Enhanced `src/models/model_manager.py`
-  - Added `_calibrate_quantile()` method with residual-based adjustments
-  - Better uncertainty estimates for prediction intervals
-
-- **Learned Ensemble Weights**: Enhanced `src/models/stacked_ensemble.py`
-  - Integrated XGBoost, LightGBM, and CatBoost as base models
-  - GPU-accelerated training with optimal histogram methods
-  - ElasticNet meta-learner for adaptive ensemble blending
-
-### Performance Targets (Achieved)
-- PTS prediction: MAE ~4.82, RMSE ~6.31
-- REB prediction: MAE ~2.15, RMSE ~2.89
-- AST prediction: MAE ~1.89, RMSE ~2.54
-- Simulation speed: 1000+ sims/game in <1 second (GPU)
-
-### New Configuration Options
-```yaml
-# src/config/model_config.py now includes:
-- xgboost: Auto-sized XGBoost with GPU support
-- lightgbm: GPU-accelerated LightGBM with leaf-wise growth
-- catboost: Enhanced with calibrated quantile models
-```
+| Mode | CatBoost Iters | NN Epochs | Features |
+|------|---------------|-----------|----------|
+| quick | 500 | 20 | CatBoost only |
+| standard | 3000 | 100 | All models |
+| full | 5000 | 200 | All models |
 
 ---
 
 ## Next Steps
 
-### Immediate
-1. Verify new features work correctly after training
-2. Run model training with new defensive matchup features
-3. Compare performance before/after defensive matchup implementation
-
-### Recommended Future Work
-1. Implement learned ensemble weights (adaptive blending per player-type)
-2. Add cross-position models (guard/forward/center specific)
-3. Add playoff-specific adjustments (different weighting for playoff games)
-4. Add travel impact analysis (time zones crossed, miles traveled)
-5. Create backtesting framework for validation
-6. Add automated daily predictions
+1. **Testing** - Validate new pipeline with real data
+2. **Performance Benchmarking** - Compare training times vs old pipeline
+3. **Documentation** - Update README with new usage examples
+4. **Integration** - Ensure compatibility with existing prediction scripts
 
 ---
 
 ## Notes
 
-- The `data/` and `models/` directories are gitignored — they are created on first use by scripts
-- NBA.com Stats API has rate limits; fetching many seasons can be slow
-- PyTorch is installed with CUDA support but runs on CPU if no GPU is available (auto-detected)
-- Configuration is in `config/default.yaml`
-- Defensive matchup features require opponent defense data (`OPP_DEF_*_ALLOWED` columns)
-- These features will only be computed when opponent defense data is available
+- The old `ModelManager` class is preserved for backward compatibility
+- New models are saved in compatible format (`.cbm`, `.pkl`)
+- Experiment tracking is optional but recommended
+- GPU auto-detection with CPU fallback

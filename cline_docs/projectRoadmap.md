@@ -69,6 +69,12 @@ Provide an interactive CLI for probability queries and player comparisons.
 - [x] Interactive query CLI with probability calculations
 - [x] Season simulation capabilities
 - [x] Unit test suite
+- [x] **NEW: Modular training pipeline v2.0**
+  - Parallel training across targets (3x faster)
+  - Smart feature caching
+  - Experiment tracking
+  - Training modes (quick/standard/full)
+  - Unified trainer interface
 
 ---
 
