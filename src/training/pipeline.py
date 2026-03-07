@@ -22,7 +22,8 @@ from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
 from src.training.nn_trainer import NeuralNetworkTrainer
 from src.training.feature_cache import FeatureCache, DataSplitCache
 from src.training.experiment import ExperimentTracker
-from src.models.gpu_utils import check_gpu_compatibility, clear_gpu_memory
+from src.training.training_logger import get_training_logger, RichTrainingLogger
+from src.models.gpu_utils import check_gpu_compatibility, clear_gpu_memory, get_gpu_memory_usage
 from src.config.model_config import get_model_config
 
 logger = logging.getLogger(__name__)

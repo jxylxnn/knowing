@@ -13,9 +13,18 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.training.trainer import BaseTrainer, TrainResult
-from src.models.gpu_utils import get_device, clear_gpu_memory
+from src.models.gpu_utils import get_device, clear_gpu_memory, get_gpu_memory_usage
+from src.training.training_logger import get_training_logger
 
 logger = logging.getLogger(__name__)
+
+# Rich imports for progress bars
+try:
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
+    from rich.console import Console
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
 
 
 class NeuralNetworkTrainer(BaseTrainer):
@@ -59,8 +68,9 @@ class NeuralNetworkTrainer(BaseTrainer):
         y_val: Optional[Union[pd.Series, np.ndarray]] = None,
         **kwargs
     ) -> TrainResult:
-        """Train the neural network."""
+        """Train the neural network with detailed progress tracking."""
         start_time = time.time()
+        training_logger = get_training_logger()
         
         # Prepare data
         X_train_t, y_train_t = self._to_tensor(X_train, y_train)
@@ -87,28 +97,89 @@ class NeuralNetworkTrainer(BaseTrainer):
         train_loader = self._create_loader(X_train_t, y_train_t, batch_size, shuffle=True)
         val_loader = self._create_loader(X_val_t, y_val_t, batch_size, shuffle=False) if X_val_t is not None else None
         
-        # Training loop
+        # Training loop with progress bar
         best_state = None
-        for epoch in range(epochs):
-            train_loss = self._train_epoch(train_loader, optimizer)
-            val_loss = self._validate_epoch(val_loader) if val_loader else train_loss
-            
-            self.history.append({'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss})
-            scheduler.step(val_loss)
-            
-            # Early stopping
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-            else:
-                self.patience_counter += 1
-                if self.patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch}")
-                    break
-            
-            if epoch % 10 == 0:
-                logger.info(f"Epoch {epoch}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
+        
+        if RICH_AVAILABLE and training_logger.use_rich:
+            # Use Rich progress bar
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(complete_style="green", finished_style="green"),
+                MofNCompleteColumn(),
+                TextColumn("[yellow]loss: {task.fields[train_loss]:.4f}"),
+                TextColumn("[cyan]val: {task.fields[val_loss]:.4f}"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=training_logger.console if training_logger.console else None,
+            ) as progress:
+                task = progress.add_task(
+                    f"Training {self.model_name}",
+                    total=epochs,
+                    train_loss=0.0,
+                    val_loss=0.0,
+                )
+                
+                for epoch in range(epochs):
+                    train_loss = self._train_epoch(train_loader, optimizer)
+                    val_loss = self._validate_epoch(val_loader) if val_loader else train_loss
+                    
+                    self.history.append({'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss})
+                    scheduler.step(val_loss)
+                    
+                    # Get current learning rate
+                    current_lr = optimizer.param_groups[0]['lr']
+                    
+                    # Get GPU memory if available
+                    gpu_mem = 0.0
+                    if self.use_gpu:
+                        try:
+                            allocated, _ = get_gpu_memory_usage()
+                            gpu_mem = allocated
+                        except:
+                            pass
+                    
+                    # Update progress bar
+                    progress.update(
+                        task,
+                        advance=1,
+                        train_loss=train_loss,
+                        val_loss=val_loss,
+                        description=f"Epoch {epoch+1}/{epochs} | LR={current_lr:.6f} | GPU={gpu_mem:.1f}GB"
+                    )
+                    
+                    # Early stopping
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        self.patience_counter = 0
+                        best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                    else:
+                        self.patience_counter += 1
+                        if self.patience_counter >= patience:
+                            progress.console.print(f"[yellow]Early stopping at epoch {epoch}[/yellow]")
+                            break
+        else:
+            # Fallback to simple logging without Rich
+            for epoch in range(epochs):
+                train_loss = self._train_epoch(train_loader, optimizer)
+                val_loss = self._validate_epoch(val_loader) if val_loader else train_loss
+                
+                self.history.append({'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss})
+                scheduler.step(val_loss)
+                
+                # Early stopping
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                    best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= patience:
+                        logger.info(f"Early stopping at epoch {epoch}")
+                        break
+                
+                if epoch % 10 == 0:
+                    logger.info(f"Epoch {epoch}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
         
         # Restore best model
         if best_state is not None:

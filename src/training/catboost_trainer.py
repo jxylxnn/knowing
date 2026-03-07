@@ -9,11 +9,69 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import joblib
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 
 from src.training.trainer import BaseTrainer, TrainResult
+from src.training.training_logger import TrainingMetrics, get_training_logger
 
 logger = logging.getLogger(__name__)
+
+
+class CatBoostProgressCallback:
+    """Custom callback for detailed CatBoost training progress."""
+    
+    def __init__(self, target: str, total_iterations: int, log_every: int = 50):
+        self.target = target
+        self.total_iterations = total_iterations
+        self.log_every = log_every
+        self.start_time = time.time()
+        self.iter_times = []
+        self.best_val_loss = float('inf')
+        self.best_iteration = 0
+        self.training_logger = get_training_logger()
+        
+    def after_iteration(self, info):
+        """Called after each iteration."""
+        iteration = info.iteration
+        
+        # Calculate timing
+        elapsed = time.time() - self.start_time
+        if iteration > 0:
+            time_per_iter = elapsed / iteration
+            self.iter_times.append(time_per_iter)
+            remaining_iters = self.total_iterations - iteration
+            eta_seconds = remaining_iters * time_per_iter
+        else:
+            time_per_iter = 0
+            eta_seconds = 0
+        
+        # Get metrics from info
+        train_loss = info.learn_error[-1] if info.learn_error else 0
+        val_loss = info.test_error[-1] if info.test_error else 0
+        
+        # Track best
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.best_iteration = iteration
+        
+        # Create metrics object
+        metrics = TrainingMetrics(
+            target=self.target,
+            model_type='catboost',
+            iteration=iteration,
+            total_iterations=self.total_iterations,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            best_iteration=self.best_iteration,
+            best_val_loss=self.best_val_loss,
+            time_per_iter=time_per_iter,
+            eta_seconds=eta_seconds,
+        )
+        
+        # Log via training logger
+        self.training_logger.log_iteration(metrics)
+        
+        return True
 
 
 class CatBoostTrainer(BaseTrainer):
@@ -222,7 +280,7 @@ class CatBoostTrainer(BaseTrainer):
         model_type: str,
         sample_weight: Optional[np.ndarray] = None,
     ) -> CatBoostRegressor:
-        """Train a single CatBoost model."""
+        """Train a single CatBoost model with detailed progress tracking."""
         params = self._build_params(loss_function, model_type)
         
         task_type = 'GPU' if self.use_gpu else 'CPU'
@@ -232,12 +290,28 @@ class CatBoostTrainer(BaseTrainer):
         if task_type == 'GPU':
             model_params['task_type'] = 'GPU'
             model_params['devices'] = '0'
+            logger.info(f"Using GPU acceleration for {self.target} {model_type} model")
         else:
             model_params['task_type'] = 'CPU'
+            logger.info(f"Using CPU for {self.target} {model_type} model")
+        
+        # Disable verbose since we're using custom callback
+        model_params['verbose'] = False
         
         model = CatBoostRegressor(**model_params)
         
-        fit_kwargs = {'eval_set': (X_val, y_val), 'use_best_model': True}
+        # Create progress callback
+        callback = CatBoostProgressCallback(
+            target=self.target,
+            total_iterations=params['iterations'],
+            log_every=50
+        )
+        
+        fit_kwargs = {
+            'eval_set': (X_val, y_val),
+            'use_best_model': True,
+            'callbacks': [callback]
+        }
         if sample_weight is not None:
             fit_kwargs['sample_weight'] = sample_weight
         
