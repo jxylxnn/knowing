@@ -98,9 +98,13 @@ class CatBoostTrainer(BaseTrainer):
             'random_seed': self.random_state,
             'grow_policy': self.config.get('grow_policy', 'Depthwise'),
             'min_data_in_leaf': self.config.get('min_data_in_leaf', 10),
-            'rsm': self.config.get('rsm', 0.8),
             'verbose': 200,
         }
+        
+        # rsm (Random Subspace Method) is only supported on CPU, not GPU
+        # Only add it if we're using CPU
+        if not self.use_gpu:
+            params['rsm'] = self.config.get('rsm', 0.8)
         
         # Per-target overrides
         if self.config.get('use_per_target_tuning', True) and self.target in self.TARGET_PROFILES:

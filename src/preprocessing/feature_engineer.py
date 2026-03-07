@@ -93,10 +93,20 @@ class GPURollingFeatures:
                     variance = ((windows - mean) ** 2).nanmean(dim=1)
                     result[start:end, col_idx] = torch.sqrt(variance)
                 elif stat == 'min':
-                    mins, _ = torch.nanmin(windows, dim=1)
+                    # Backward-compatible nanmin: replace NaN with inf before min
+                    windows_no_nan = torch.where(torch.isnan(windows), torch.tensor(float('inf'), device=windows.device), windows)
+                    mins, _ = torch.min(windows_no_nan, dim=1)
+                    # Restore NaN for all-NaN windows
+                    all_nan_mask = torch.isnan(windows).all(dim=1)
+                    mins = torch.where(all_nan_mask, torch.tensor(float('nan'), device=mins.device), mins)
                     result[start:end, col_idx] = mins
                 elif stat == 'max':
-                    maxs, _ = torch.nanmax(windows, dim=1)
+                    # Backward-compatible nanmax: replace NaN with -inf before max
+                    windows_no_nan = torch.where(torch.isnan(windows), torch.tensor(float('-inf'), device=windows.device), windows)
+                    maxs, _ = torch.max(windows_no_nan, dim=1)
+                    # Restore NaN for all-NaN windows
+                    all_nan_mask = torch.isnan(windows).all(dim=1)
+                    maxs = torch.where(all_nan_mask, torch.tensor(float('nan'), device=maxs.device), maxs)
                     result[start:end, col_idx] = maxs
                 col_idx += 1
         
