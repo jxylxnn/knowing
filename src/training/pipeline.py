@@ -8,6 +8,7 @@ This module provides a clean, efficient training pipeline with:
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -331,40 +332,60 @@ class TrainingPipeline:
     ) -> Dict[str, TrainResult]:
         """Train CatBoost models in parallel across targets."""
         cat_config = self.model_config['catboost']
-        
+        cpu_count = os.cpu_count() or 1
+        requested_workers = self.max_workers if self.parallel else 1
+        max_workers = max(1, requested_workers)
+
+        if self.use_gpu and max_workers > 1:
+            logger.info(
+                f"GPU CatBoost detected; reducing max_workers from {max_workers} to 1 to avoid GPU contention"
+            )
+            max_workers = 1
+
+        thread_count_per_model = max(1, cpu_count // max_workers)
+        logger.info(
+            f"CatBoost training setup: cores={cpu_count}, max_workers={max_workers}, "
+            f"thread_count_per_model={thread_count_per_model}"
+        )
+
         if self.parallel and len(self.TARGETS) > 1:
             # Parallel training
-            logger.info(f"Training {len(self.TARGETS)} CatBoost targets in parallel "
-                       f"(workers={self.max_workers})")
-            
-            results_list = Parallel(n_jobs=self.max_workers, prefer='threads')(
+            logger.info(
+                f"Training {len(self.TARGETS)} CatBoost targets in parallel "
+                f"(workers={max_workers}, thread_count_per_model={thread_count_per_model})"
+            )
+
+            results_list = Parallel(n_jobs=max_workers, prefer='threads')(
                 delayed(train_catboost_target)(
                     target=target,
                     X_train=X_fit,
                     y_train=fit_df[target],
                     X_val=X_val,
                     y_val=val_df[target],
-                    config=cat_config,
+                    config={**cat_config, 'thread_count': thread_count_per_model},
                     cat_features=self.cat_features,
                     sample_weight=None,
                     use_gpu=self.use_gpu,
                 )
                 for target in self.TARGETS
             )
-            
+
             results = dict(results_list)
         else:
             # Sequential training
             results = {}
             for target in self.TARGETS:
-                logger.info(f"Training CatBoost for {target}")
+                logger.info(
+                    f"Training CatBoost for {target} "
+                    f"(workers={max_workers}, thread_count={thread_count_per_model})"
+                )
                 _, result = train_catboost_target(
                     target=target,
                     X_train=X_fit,
                     y_train=fit_df[target],
                     X_val=X_val,
                     y_val=val_df[target],
-                    config=cat_config,
+                    config={**cat_config, 'thread_count': thread_count_per_model},
                     cat_features=self.cat_features,
                     sample_weight=None,
                     use_gpu=self.use_gpu,
