@@ -149,6 +149,7 @@ class CatBoostTrainer(BaseTrainer):
             'learning_rate': self.config.get('learning_rate', 0.02),
             'depth': self.config.get('depth', 8),
             'l2_leaf_reg': self.config.get('l2_leaf_reg', 5.0),
+            'thread_count': self.config.get('thread_count', -1),
             'border_count': self.config.get('border_count', 254),
             'random_strength': self.config.get('random_strength', 1.0),
             'bagging_temperature': self.config.get('bagging_temperature', 0.5),

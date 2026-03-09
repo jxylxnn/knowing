@@ -205,6 +205,14 @@ python simulate_season.py --today
 python query_prob.py
 ```
 
+### CatBoost Parallelism Recommendations
+
+For reproducible CatBoost training throughput, tune worker and thread settings together:
+
+- **CPU-only runs**: keep target-level parallelism enabled and size workers to your machine (for example `max_workers=4`). The pipeline now sets `thread_count_per_model = cpu_count // max_workers`, which helps avoid over-subscribing cores.
+- **GPU runs**: prefer a single CatBoost worker (`max_workers=1`). Running many parallel CatBoost GPU jobs can cause CUDA context contention and unstable throughput.
+- You can still override CatBoost `thread_count` in config when needed; otherwise it is auto-assigned per target by the training pipeline.
+
 ### GPU Setup (Optional)
 
 For GPU acceleration, ensure you have:
