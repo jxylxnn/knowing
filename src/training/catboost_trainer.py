@@ -45,9 +45,13 @@ class CatBoostProgressCallback:
             time_per_iter = 0
             eta_seconds = 0
         
-        # Get metrics from info
-        train_loss = info.learn_error[-1] if info.learn_error else 0
-        val_loss = info.test_error[-1] if info.test_error else 0
+        # Get metrics from info - use getattr for defensive access
+        # CatBoost info object attributes vary by version and context
+        learn_error = getattr(info, 'learn_error', None)
+        test_error = getattr(info, 'test_error', None)
+        
+        train_loss = learn_error[-1] if learn_error and len(learn_error) > 0 else 0
+        val_loss = test_error[-1] if test_error and len(test_error) > 0 else 0
         
         # Track best
         if val_loss < self.best_val_loss:
@@ -296,23 +300,31 @@ class CatBoostTrainer(BaseTrainer):
             model_params['task_type'] = 'CPU'
             logger.info(f"Using CPU for {self.target} {model_type} model")
         
-        # Disable verbose since we're using custom callback
-        model_params['verbose'] = False
+        # GPU does not support user-defined callbacks
+        # Use verbose logging for GPU, custom callback for CPU
+        use_callback = task_type == 'CPU'
+        
+        if use_callback:
+            model_params['verbose'] = False
+        else:
+            model_params['verbose'] = 200  # Built-in progress every 200 iterations
         
         model = CatBoostRegressor(**model_params)
-        
-        # Create progress callback
-        callback = CatBoostProgressCallback(
-            target=self.target,
-            total_iterations=params['iterations'],
-            log_every=50
-        )
         
         fit_kwargs = {
             'eval_set': (X_val, y_val),
             'use_best_model': True,
-            'callbacks': [callback]
         }
+        
+        # Only add callback for CPU training
+        if use_callback:
+            callback = CatBoostProgressCallback(
+                target=self.target,
+                total_iterations=params['iterations'],
+                log_every=50
+            )
+            fit_kwargs['callbacks'] = [callback]
+        
         if sample_weight is not None:
             fit_kwargs['sample_weight'] = sample_weight
         
@@ -323,8 +335,26 @@ class CatBoostTrainer(BaseTrainer):
                 logger.warning(f"GPU training failed ({e}), falling back to CPU")
                 model_params['task_type'] = 'CPU'
                 del model_params['devices']
+                
+                # Rebuild fit_kwargs for CPU fallback with callback
+                fallback_fit_kwargs = {
+                    'eval_set': (X_val, y_val),
+                    'use_best_model': True,
+                    'verbose': False,
+                }
+                
+                callback = CatBoostProgressCallback(
+                    target=self.target,
+                    total_iterations=params['iterations'],
+                    log_every=50
+                )
+                fallback_fit_kwargs['callbacks'] = [callback]
+                
+                if sample_weight is not None:
+                    fallback_fit_kwargs['sample_weight'] = sample_weight
+                
                 model = CatBoostRegressor(**model_params)
-                model.fit(X_train, y_train, **fit_kwargs)
+                model.fit(X_train, y_train, **fallback_fit_kwargs)
             else:
                 raise
         
