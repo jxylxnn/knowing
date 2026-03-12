@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class BaseTrainer(ABC):
         model_name: str,
         config: Dict[str, Any],
         use_gpu: bool = False,
-        device: Optional[str] = None,
+        device: Optional[Union[str, torch.device]] = None,
         random_state: int = 42,
     ):
         """Initialize the trainer.
@@ -49,17 +50,27 @@ class BaseTrainer(ABC):
             model_name: Name identifier for this model
             config: Model-specific configuration dictionary
             use_gpu: Whether to use GPU acceleration
-            device: Specific device to use (e.g., 'cuda:0')
+            device: Specific device to use (e.g., 'cuda:0' or torch.device('cuda'))
             random_state: Random seed for reproducibility
         """
         self.model_name = model_name
         self.config = config
         self.use_gpu = use_gpu
-        self.device = device or ('cuda' if use_gpu else 'cpu')
         self.random_state = random_state
         self.model: Optional[Any] = None
         self.is_trained: bool = False
         self.training_history: List[Dict[str, Any]] = []
+        
+        # Convert device to torch.device object (handles both str and torch.device inputs)
+        if device is None:
+            device = 'cuda' if use_gpu else 'cpu'
+        
+        if isinstance(device, str):
+            self.device = torch.device(device)
+        elif isinstance(device, torch.device):
+            self.device = device
+        else:
+            raise TypeError(f"device must be str or torch.device, got {type(device)}")
         
         logger.info(f"Initialized {self.__class__.__name__} for '{model_name}' "
                    f"(GPU={use_gpu}, device={self.device})")

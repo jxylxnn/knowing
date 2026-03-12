@@ -69,7 +69,7 @@ class NeuralNetworkTrainer(BaseTrainer):
         model_class: type,
         model_kwargs: Dict[str, Any],
         use_gpu: bool = False,
-        device: Optional[str] = None,
+        device: Optional[Union[str, torch.device]] = None,
         random_state: int = 42,
         use_amp: bool = True,
         use_compile: bool = False,
@@ -84,7 +84,7 @@ class NeuralNetworkTrainer(BaseTrainer):
             model_class: PyTorch model class to instantiate
             model_kwargs: Arguments to pass to model constructor
             use_gpu: Whether to use GPU acceleration
-            device: Specific device to use (None for auto)
+            device: Specific device to use (str or torch.device, None for auto)
             random_state: Random seed for reproducibility
             use_amp: Whether to use automatic mixed precision
             use_compile: Whether to use torch.compile
