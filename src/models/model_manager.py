@@ -697,25 +697,61 @@ class ModelManager:
     
     def _calibrate_quantile(self, target: str, label: str, predictions: np.ndarray, actuals: np.ndarray) -> None:
         """
-        Calibrate quantile predictions using isotonic regression for better accuracy.
-        This ensures quantile predictions are properly calibrated.
+        Calibrate quantile predictions using proper quantile calibration.
+        
+        For a well-calibrated quantile model:
+        - P10 predictions should have ~10% of actuals below them
+        - P90 predictions should have ~90% of actuals below them
+        
+        This method computes and stores calibration corrections.
         """
         try:
-            from sklearn.isotonic import IsotonicRegression
+            # Check actual coverage - for quantile predictions, we expect:
+            # - P10 (low): ~10% of actuals should be below the prediction
+            # - P90 (high): ~90% of actuals should be below the prediction
             
-            # Simple calibration: adjust predictions to match expected quantile levels
-            # on validation set
+            if label == 'low':
+                # Expected: 10% of actuals below prediction
+                expected_coverage = 0.10
+                actual_below = np.mean(actuals < predictions)
+                coverage_error = expected_coverage - actual_below
+            elif label == 'high':
+                # Expected: 90% of actuals below prediction
+                expected_coverage = 0.90
+                actual_below = np.mean(actuals < predictions)
+                coverage_error = expected_coverage - actual_below
+            else:
+                return
+            
+            # Compute calibration shift based on coverage error
+            # If too few actuals are below, we need to shift predictions down
+            # If too many actuals are below, we need to shift predictions up
             residuals = actuals - predictions
-            # Compute calibration factor
-            calibration_factor = np.median(residuals)
             
-            # Store calibration info for later use
+            # Use quantile of residuals to calibrate
+            if label == 'low':
+                # For P10: shift so that 10% of residuals are negative
+                shift = np.percentile(residuals, 90)  # 90th percentile of (actual - pred)
+            else:
+                # For P90: shift so that 90% of residuals are negative
+                shift = np.percentile(residuals, 10)  # 10th percentile of (actual - pred)
+            
+            # Store calibration info
             if not hasattr(self, '_quantile_calibrations'):
                 self._quantile_calibrations = {}
-            self._quantile_calibrations[(target, label)] = calibration_factor
+            self._quantile_calibrations[(target, label)] = {
+                'shift': shift,
+                'coverage_error': coverage_error,
+                'expected_coverage': expected_coverage,
+                'actual_coverage': actual_below
+            }
             
-        except ImportError:
-            logger.debug("sklearn not available for quantile calibration")
+            logger.debug(f"Quantile calibration for {target} {label}: "
+                        f"expected={expected_coverage:.2%}, actual={actual_below:.2%}, "
+                        f"shift={shift:.3f}")
+            
+        except Exception as e:
+            logger.debug(f"Quantile calibration failed: {e}")
 
     def _predict_catboost_blended(
         self, target: str, X: pd.DataFrame

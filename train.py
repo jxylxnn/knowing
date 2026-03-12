@@ -7,6 +7,8 @@ This script provides an efficient, modular training pipeline with:
 - Experiment tracking
 - Multiple training modes (quick/standard/full)
 - Detailed GPU-accelerated training logs
+- TF32/BF16 optimizations for Ampere+ GPUs
+- torch.compile support for PyTorch 2.0+
 """
 
 import argparse
@@ -26,7 +28,12 @@ from src.training.pipeline import TrainingPipeline, create_pipeline
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
 from src.training.training_logger import get_training_logger, RichTrainingLogger
-from src.models.gpu_utils import check_gpu_compatibility, get_gpu_memory_usage
+from src.models.gpu_utils import (
+    check_gpu_compatibility, 
+    get_gpu_memory_usage,
+    initialize_gpu_optimizations,
+    print_gpu_summary,
+)
 from src.utils.logging_config import setup_logging
 
 setup_logging()

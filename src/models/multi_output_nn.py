@@ -1,3 +1,18 @@
+"""
+Multi-Output Neural Network for NBA Stats Prediction.
+
+This model uses a Wide ResNet architecture with Squeeze-and-Excitation blocks
+for predicting multiple player statistics simultaneously (PTS, REB, AST).
+
+Optimizations included:
+- Gradient checkpointing for memory efficiency
+- BF16/FP16 mixed precision training on supported GPUs
+- torch.compile support for PyTorch 2.0+
+- TF32 acceleration on Ampere+ GPUs
+- Optimal DataLoader worker configuration
+- Non-blocking tensor transfers
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,10 +25,21 @@ from typing import List, Dict, Any, Tuple, Optional
 import torch.backends.cudnn
 from copy import deepcopy
 
-from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
+from src.models.gpu_utils import (
+    get_device, 
+    WarmupCosineScheduler, 
+    apply_compile, 
+    get_compile_status,
+    get_optimal_dataloader_workers,
+    is_bf16_supported,
+    get_autocast_dtype,
+    initialize_gpu_optimizations,
+    GPUMemoryContext,
+)
 
 logger = logging.getLogger(__name__)
 
+# Enable cuDNN benchmark for optimal convolution algorithms
 torch.backends.cudnn.benchmark = True
 
 
@@ -269,7 +295,10 @@ class MultiOutputWrapper:
             vars_scaled = torch.exp(logvars_scaled).cpu().numpy()
             
         means = self.scaler_y.inverse_transform(means_scaled)
-        stds = np.sqrt(vars_scaled) * np.sqrt(self.scaler_y.var_)
+        # FIX: Use scale_ (std) instead of var_ for proper uncertainty propagation
+        # The variance in scaled space needs to be scaled by the square of the std
+        # If y_scaled = (y - mean) / std, then Var(y) = Var(y_scaled) * std^2
+        stds = np.sqrt(vars_scaled) * self.scaler_y.scale_
         
         return means, stds
 

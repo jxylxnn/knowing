@@ -287,8 +287,12 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'early_stop_patience': _clamp(15 + int(scale / 2), 15, 40),
             'label_smoothing': 0.05 if score > 20 else 0,
             'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+ on capable hardware
+            'compile_mode': 'max-autotune' if score > 30 else 'reduce-overhead',  # Better optimization for powerful GPUs
             'amp': True,  # Always use mixed precision
+            'use_bf16': score > 16,  # Use BF16 on Ampere+ GPUs (compute 8.0+)
             'gradient_accumulation_steps': 1 if score > 10 else 2,
+            'tf32_enabled': True,  # Enable TF32 for faster matmul on Ampere+
+            'dataloader_workers': min(8, os.cpu_count() or 4),  # Optimal workers
         },
         
         # ===== METADATA =====

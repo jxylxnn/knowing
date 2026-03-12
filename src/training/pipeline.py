@@ -5,6 +5,7 @@ This module provides a clean, efficient training pipeline with:
 - Smart caching of expensive computations
 - Experiment tracking and comparison
 - Multiple training modes (quick, standard, full)
+- GPU optimizations (TF32, BF16, torch.compile)
 """
 
 import logging
@@ -24,7 +25,15 @@ from src.training.nn_trainer import NeuralNetworkTrainer
 from src.training.feature_cache import FeatureCache, DataSplitCache
 from src.training.experiment import ExperimentTracker
 from src.training.training_logger import get_training_logger, RichTrainingLogger
-from src.models.gpu_utils import check_gpu_compatibility, clear_gpu_memory, get_gpu_memory_usage
+from src.models.gpu_utils import (
+    check_gpu_compatibility, 
+    clear_gpu_memory, 
+    get_gpu_memory_usage,
+    initialize_gpu_optimizations,
+    get_optimal_dataloader_workers,
+    is_bf16_supported,
+    print_gpu_summary,
+)
 from src.config.model_config import get_model_config
 
 logger = logging.getLogger(__name__)

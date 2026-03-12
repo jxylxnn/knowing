@@ -1,3 +1,19 @@
+"""
+Transformer Model for NBA Player Stats Prediction.
+
+Uses self-attention mechanism to capture long-term dependencies in
+player performance trajectories. Supports Flash Attention for
+significant speedup on Ampere+ GPUs.
+
+Optimizations included:
+- Flash Attention / scaled_dot_product_attention for faster inference
+- Gradient checkpointing for memory efficiency
+- BF16/FP16 mixed precision training
+- torch.compile support for PyTorch 2.0+
+- TF32 acceleration on Ampere+ GPUs
+- Optimal DataLoader worker configuration
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,12 +26,24 @@ from typing import List, Tuple, Dict, Any, Optional
 import math
 import torch.backends.cudnn as cudnn
 
-from src.models.gpu_utils import get_device, WarmupCosineScheduler, apply_compile, get_compile_status
+from src.models.gpu_utils import (
+    get_device, 
+    WarmupCosineScheduler, 
+    apply_compile, 
+    get_compile_status,
+    get_optimal_dataloader_workers,
+    is_bf16_supported,
+    check_flash_attention_available,
+)
 from src.models.lstm_model import PlayerSequenceDataset
 
 logger = logging.getLogger(__name__)
 
+# Enable cuDNN benchmark for optimal convolution algorithms
 cudnn.benchmark = True
+
+# Check if Flash Attention is available
+_FLASH_ATTENTION_AVAILABLE = check_flash_attention_available()
 
 
 class PositionalEncoding(nn.Module):

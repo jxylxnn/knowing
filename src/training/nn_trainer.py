@@ -1,7 +1,18 @@
-"""Unified neural network trainer for all PyTorch-based models."""
+"""Unified neural network trainer for all PyTorch-based models.
+
+This trainer provides a unified interface for training PyTorch models with:
+- Automatic mixed precision (AMP) with BF16/FP16 auto-selection
+- GPU optimizations (TF32, cuDNN benchmark)
+- Gradient accumulation for large batch training
+- Optimal DataLoader worker configuration
+- torch.compile support with max-autotune
+- Gradient checkpointing support
+- Memory-efficient training
+"""
 
 import logging
 import time
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -13,7 +24,18 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.training.trainer import BaseTrainer, TrainResult
-from src.models.gpu_utils import get_device, clear_gpu_memory, get_gpu_memory_usage
+from src.models.gpu_utils import (
+    get_device, 
+    clear_gpu_memory, 
+    get_gpu_memory_usage,
+    get_optimal_dataloader_workers,
+    initialize_gpu_optimizations,
+    is_bf16_supported,
+    get_autocast_dtype,
+    create_grad_scaler,
+    autocast_context,
+    GPUMemoryContext,
+)
 from src.training.training_logger import get_training_logger
 
 logger = logging.getLogger(__name__)
@@ -30,8 +52,14 @@ except ImportError:
 class NeuralNetworkTrainer(BaseTrainer):
     """Unified trainer for PyTorch neural networks.
     
-    Supports LSTM, Transformer, GNN, and Joint NN models with
-    automatic mixed precision, gradient checkpointing, and early stopping.
+    Supports LSTM, Transformer, GNN, and Joint NN models with:
+    - Automatic mixed precision (AMP) with BF16/FP16 auto-selection
+    - Gradient accumulation for large effective batch sizes
+    - Optimal DataLoader worker configuration
+    - torch.compile support with mode selection
+    - Gradient checkpointing support
+    - TF32 optimization on Ampere+ GPUs
+    - Memory-efficient training
     """
     
     def __init__(
@@ -45,20 +73,59 @@ class NeuralNetworkTrainer(BaseTrainer):
         random_state: int = 42,
         use_amp: bool = True,
         use_compile: bool = False,
+        compile_mode: str = 'reduce-overhead',
+        gradient_accumulation_steps: int = 1,
     ):
-        """Initialize NN trainer."""
+        """Initialize NN trainer with performance optimizations.
+        
+        Args:
+            model_name: Name identifier for this model
+            config: Model configuration dictionary
+            model_class: PyTorch model class to instantiate
+            model_kwargs: Arguments to pass to model constructor
+            use_gpu: Whether to use GPU acceleration
+            device: Specific device to use (None for auto)
+            random_state: Random seed for reproducibility
+            use_amp: Whether to use automatic mixed precision
+            use_compile: Whether to use torch.compile
+            compile_mode: torch.compile mode ('reduce-overhead' or 'max-autotune')
+            gradient_accumulation_steps: Steps to accumulate gradients (for large batches)
+        """
         super().__init__(model_name, config, use_gpu, device, random_state)
         
         self.model_class = model_class
         self.model_kwargs = model_kwargs
         self.use_amp = use_amp and use_gpu  # AMP only on GPU
         self.use_compile = use_compile
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.compile_mode = compile_mode
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        
+        # Determine optimal dtype for mixed precision
+        self._amp_dtype = None
+        self._grad_scaler = None
+        
+        if self.use_gpu:
+            self._setup_amp()
         
         # Training state
         self.history: List[Dict[str, float]] = []
         self.best_val_loss = float('inf')
         self.patience_counter = 0
+        self._optimal_workers = get_optimal_dataloader_workers()
+    
+    def _setup_amp(self):
+        """Set up automatic mixed precision with optimal dtype."""
+        # Use BF16 on Ampere+ GPUs, FP16 otherwise
+        if is_bf16_supported():
+            self._amp_dtype = torch.bfloat16
+            # BF16 doesn't need gradient scaling
+            self._grad_scaler = None
+            logger.info(f"Using BF16 mixed precision for {self.model_name}")
+        else:
+            self._amp_dtype = torch.float16
+            # FP16 needs gradient scaling
+            self._grad_scaler = torch.amp.GradScaler('cuda', enabled=True)
+            logger.info(f"Using FP16 mixed precision for {self.model_name}")
     
     def fit(
         self,
@@ -212,17 +279,24 @@ class NeuralNetworkTrainer(BaseTrainer):
         return X_t, y_t
     
     def _build_model(self, input_shape: Tuple[int, ...]) -> None:
-        """Build the PyTorch model."""
+        """Build the PyTorch model with optional torch.compile.
+        
+        Uses the configured compile_mode for optimization level:
+        - 'reduce-overhead': Good for small models, reduces Python overhead
+        - 'max-autotune': Best performance but longer compile time
+        """
         self.model = self.model_class(**self.model_kwargs).to(self.device)
         
         if self.use_compile and hasattr(torch, 'compile'):
             try:
-                self.model = torch.compile(self.model, mode='reduce-overhead')
-                logger.info(f"Compiled {self.model_name} with torch.compile")
+                # Use the configured compile mode
+                self.model = torch.compile(self.model, mode=self.compile_mode)
+                logger.info(f"Compiled {self.model_name} with torch.compile(mode='{self.compile_mode}')")
             except Exception as e:
                 logger.warning(f"torch.compile failed: {e}")
         
-        logger.info(f"Built {self.model_name}: {sum(p.numel() for p in self.model.parameters())} params")
+        param_count = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"Built {self.model_name}: {param_count:,} params")
     
     def _create_loader(
         self,
@@ -231,45 +305,112 @@ class NeuralNetworkTrainer(BaseTrainer):
         batch_size: int,
         shuffle: bool,
     ) -> DataLoader:
-        """Create DataLoader."""
+        """Create DataLoader with optimal configuration.
+        
+        Uses:
+        - Optimal number of workers (8 for GPU, CPU count for CPU)
+        - Pinned memory for faster GPU transfers
+        - Non-blocking data transfer
+        - Persistent workers to reduce overhead
+        """
         dataset = TensorDataset(X, y)
-        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=shuffle)
+        
+        # Use optimal workers determined at initialization
+        num_workers = self._optimal_workers
+        
+        # Pin memory for faster GPU transfers (only on CUDA)
+        pin_memory = self.use_gpu and self.device.type == 'cuda'
+        
+        # Persistent workers reduce overhead between epochs
+        persistent_workers = num_workers > 0
+        
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
+        )
     
     def _train_epoch(self, loader: DataLoader, optimizer: torch.optim.Optimizer) -> float:
-        """Train for one epoch."""
+        """Train for one epoch with gradient accumulation support.
+        
+        Implements:
+        - Proper AMP with BF16/FP16 auto-selection
+        - Gradient accumulation for large effective batch sizes
+        - Non-blocking tensor transfers
+        """
         self.model.train()
         total_loss = 0.0
+        accumulation_steps = self.gradient_accumulation_steps
         
-        for X_batch, y_batch in loader:
-            optimizer.zero_grad()
+        # Clear gradients at the start
+        optimizer.zero_grad()
+        
+        for batch_idx, (X_batch, y_batch) in enumerate(loader):
+            # Move to device (non-blocking for GPU)
+            if self.use_gpu:
+                X_batch = X_batch.to(self.device, non_blocking=True)
+                y_batch = y_batch.to(self.device, non_blocking=True)
             
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
+            # Forward pass with proper AMP context
+            if self.use_amp and self._amp_dtype is not None:
+                with torch.amp.autocast(device_type='cuda', dtype=self._amp_dtype):
                     y_pred = self.model(X_batch)
                     loss = nn.MSELoss()(y_pred, y_batch)
+                    # Scale loss for gradient accumulation
+                    loss = loss / accumulation_steps
                 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                # Backward pass with gradient scaling for FP16
+                if self._grad_scaler is not None:
+                    self._grad_scaler.scale(loss).backward()
+                else:
+                    # BF16 doesn't need scaling
+                    loss.backward()
             else:
                 y_pred = self.model(X_batch)
                 loss = nn.MSELoss()(y_pred, y_batch)
+                loss = loss / accumulation_steps
                 loss.backward()
-                optimizer.step()
             
-            total_loss += loss.item()
+            # Accumulate gradients and update weights
+            if (batch_idx + 1) % accumulation_steps == 0:
+                if self._grad_scaler is not None:
+                    self._grad_scaler.step(optimizer)
+                    self._grad_scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
+            
+            total_loss += loss.item() * accumulation_steps  # Unscale for logging
+        
+        # Handle any remaining gradients
+        if (batch_idx + 1) % accumulation_steps != 0:
+            if self._grad_scaler is not None:
+                self._grad_scaler.step(optimizer)
+                self._grad_scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
         
         return total_loss / len(loader)
     
     def _validate_epoch(self, loader: DataLoader) -> float:
-        """Validate for one epoch."""
+        """Validate for one epoch with proper AMP context."""
         self.model.eval()
         total_loss = 0.0
         
         with torch.no_grad():
             for X_batch, y_batch in loader:
-                if self.use_amp:
-                    with torch.cuda.amp.autocast():
+                # Move to device (non-blocking for GPU)
+                if self.use_gpu:
+                    X_batch = X_batch.to(self.device, non_blocking=True)
+                    y_batch = y_batch.to(self.device, non_blocking=True)
+                
+                if self.use_amp and self._amp_dtype is not None:
+                    with torch.amp.autocast(device_type='cuda', dtype=self._amp_dtype):
                         y_pred = self.model(X_batch)
                         loss = nn.MSELoss()(y_pred, y_batch)
                 else:
@@ -278,7 +419,7 @@ class NeuralNetworkTrainer(BaseTrainer):
                 
                 total_loss += loss.item()
         
-        return total_loss / len(loader)
+        return total_loss / len(loader) if len(loader) > 0 else 0.0
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], **kwargs) -> np.ndarray:
         """Make predictions."""

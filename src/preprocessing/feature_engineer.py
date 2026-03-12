@@ -1004,71 +1004,124 @@ class FeatureEngineer:
         """
         Advanced features specifically tuned for PTS and REB prediction.
         Adds Usage Rate, Opportunity Metrics, and Shot Profiles.
+        
+        CRITICAL: All features use shift(1) to prevent data leakage.
+        Only historical data available BEFORE the current game is used.
         """
         new_cols = {}
+        EPS = 1e-7  # Consistent epsilon for numerical stability
         
         # --- 1. USAGE RATE (The Alpha Feature for PTS) ---
-        # Formula: 100 * ((FGA + 0.44 * FTA + TOV) * (Team_Mins / (5 * Mins))) / (Team_FGA + 0.44 * Team_FTA + Team_TOV)
-        player_poss = df['FGA'] + 0.44 * df['FTA'] + df['TOV']
+        # CRITICAL FIX: Shift all current game stats before computing usage
+        # At prediction time, we only have historical data, not current game stats
         
-        team_poss = df.get('FGA_TEAM', 0) + 0.44 * df.get('FTA_TEAM', 0) + df.get('TOV_TEAM', 0)
-        team_poss = team_poss.replace(0, 100) # Baseline if missing
+        # Shift player stats to use only historical data
+        shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
+        shifted_fta = df.groupby('PLAYER_ID')['FTA'].shift(1)
+        shifted_tov = df.groupby('PLAYER_ID')['TOV'].shift(1)
+        shifted_min = df.groupby('PLAYER_ID')['MIN'].shift(1)
         
-        mins_factor = (df['MIN'] / 48.0).replace(0, 1) # Standard 48 min game
+        # Player possessions from historical data
+        player_poss = shifted_fga + 0.44 * shifted_fta + shifted_tov
         
-        # Store temporary column for transform
-        df['_tmp_usage'] = (player_poss / team_poss) * (1 / mins_factor)
-        df['_tmp_usage'] = df['_tmp_usage'].clip(0, 0.50).fillna(0)
+        # Team possessions - use historical average if available, else league average
+        if 'FGA_TEAM' in df.columns and 'FTA_TEAM' in df.columns and 'TOV_TEAM' in df.columns:
+            # Shift team stats to prevent leakage
+            shifted_fga_team = df.groupby('TEAM_ID')['FGA_TEAM'].shift(1)
+            shifted_fta_team = df.groupby('TEAM_ID')['FTA_TEAM'].shift(1)
+            shifted_tov_team = df.groupby('TEAM_ID')['TOV_TEAM'].shift(1)
+            
+            # Rolling average of team possessions (last 10 games)
+            team_poss = (shifted_fga_team + 0.44 * shifted_fta_team + shifted_tov_team)
+            team_poss_rolling = df.groupby('TEAM_ID')['FGA_TEAM'].transform(
+                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
+            ) + 0.44 * df.groupby('TEAM_ID')['FTA_TEAM'].transform(
+                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
+            ) + df.groupby('TEAM_ID')['TOV_TEAM'].transform(
+                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
+            )
+            team_poss = team_poss_rolling.fillna(100)  # League average fallback
+        else:
+            # League average possessions per game as fallback
+            team_poss = pd.Series(100.0, index=df.index)
+        
+        # Minutes factor from historical data
+        mins_factor = (shifted_min / 48.0).fillna(0.7).clip(lower=0.1, upper=1.0)
+        
+        # Usage rate calculation using historical data only
+        # Formula: Usage = (Player Poss / Team Poss) * (Team Min / Player Min)
+        # Simplified: We estimate player's share of team possessions
+        usage_raw = (player_poss / (team_poss + EPS)) * (1 / mins_factor)
+        usage_raw = usage_raw.clip(0, 0.50).fillna(0.15)  # Default to league avg usage
         
         for window in [5, 10]:
-            new_cols[f'ROLL_USG_PCT_{window}'] = df.groupby('PLAYER_ID')['_tmp_usage'].transform(
+            new_cols[f'ROLL_USG_PCT_{window}'] = df.groupby('PLAYER_ID')[usage_raw].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).mean()
             )
 
         # --- 2. OPPONENT MISSES (The Alpha Feature for REB) ---
+        # Use shifted opponent stats to prevent leakage
         if 'OPP_FGA_ALLOWED' in df.columns and 'OPP_FGM_ALLOWED' in df.columns:
-            opp_fg_pct = (df['OPP_FGM_ALLOWED'] / (df['OPP_FGA_ALLOWED'] + 1e-6)).clip(0.3, 0.7)
-            df['_tmp_reb_opp'] = 1.0 - opp_fg_pct
+            shifted_opp_fga = df.groupby('OPPONENT_ID')['OPP_FGA_ALLOWED'].shift(1)
+            shifted_opp_fgm = df.groupby('OPPONENT_ID')['OPP_FGM_ALLOWED'].shift(1)
+            
+            # Rolling opponent FG% against
+            opp_fg_pct = (shifted_opp_fgm / (shifted_opp_fga + EPS)).clip(0.3, 0.7)
+            
+            # Rebounding opportunity: higher when opponent misses more
+            reb_opp = 1.0 - opp_fg_pct
             
             for window in [5, 10]:
-                new_cols[f'ROLL_REB_OPPORTUNITY_{window}'] = df.groupby('PLAYER_ID')['_tmp_reb_opp'].transform(
+                new_cols[f'ROLL_REB_OPPORTUNITY_{window}'] = df.groupby('PLAYER_ID')[reb_opp].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
         # --- 3. SHOT PROFILE (For PTS Variance & Ceiling) ---
+        # CRITICAL FIX: Use shifted values for all shot profile features
         if 'FG3A' in df.columns and 'FGA' in df.columns:
-            df['_tmp_3pt_freq'] = (df['FG3A'] / (df['FGA'] + 1e-6)).clip(0, 1)
+            shifted_fg3a = df.groupby('PLAYER_ID')['FG3A'].shift(1)
+            shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
+            three_pt_freq = (shifted_fg3a / (shifted_fga + EPS)).clip(0, 1)
+            
             for window in [10, 20]:
-                new_cols[f'ROLL_3PT_FREQ_{window}'] = df.groupby('PLAYER_ID')['_tmp_3pt_freq'].transform(
+                new_cols[f'ROLL_3PT_FREQ_{window}'] = df.groupby('PLAYER_ID')[three_pt_freq].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
         
         if 'FTA' in df.columns and 'FGA' in df.columns:
-            df['_tmp_ft_rate'] = (df['FTA'] / (df['FGA'] + 1e-6)).clip(0, 1)
+            shifted_fta = df.groupby('PLAYER_ID')['FTA'].shift(1)
+            shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
+            ft_rate = (shifted_fta / (shifted_fga + EPS)).clip(0, 1)
+            
             for window in [10]:
-                new_cols[f'ROLL_FT_RATE_{window}'] = df.groupby('PLAYER_ID')['_tmp_ft_rate'].transform(
+                new_cols[f'ROLL_FT_RATE_{window}'] = df.groupby('PLAYER_ID')[ft_rate].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
         # --- 4. ROLE / SHARE FEATURES ---
+        # Use shifted PTS and team PTS to prevent leakage
         if 'PTS_TEAM' in df.columns:
-            df['_tmp_pts_share'] = (df['PTS'] / (df['PTS_TEAM'] + 1e-6)).clip(0, 0.6)
+            shifted_pts = df.groupby('PLAYER_ID')['PTS'].shift(1)
+            shifted_pts_team = df.groupby('TEAM_ID')['PTS_TEAM'].shift(1)
+            pts_share = (shifted_pts / (shifted_pts_team + EPS)).clip(0, 0.6)
+            
             for window in [10]:
-                new_cols[f'ROLL_PTS_SHARE_{window}'] = df.groupby('PLAYER_ID')['_tmp_pts_share'].transform(
+                new_cols[f'ROLL_PTS_SHARE_{window}'] = df.groupby('PLAYER_ID')[pts_share].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
         # --- 5. EFFICIENCY MOMENTUM ---
-        ts_fga = df['FGA'] + 0.44 * df['FTA']
-        df['_tmp_ts_pct'] = (df['PTS'] / (2 * ts_fga + 1e-6)).clip(0.3, 0.8)
+        # True Shooting % from historical data only
+        shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
+        shifted_fta = df.groupby('PLAYER_ID')['FTA'].shift(1)
+        shifted_pts = df.groupby('PLAYER_ID')['PTS'].shift(1)
+        
+        ts_fga = shifted_fga + 0.44 * shifted_fta
+        ts_pct = (shifted_pts / (2 * ts_fga + EPS)).clip(0.3, 0.8)
         
         for window in [5, 10]:
-            new_cols[f'ROLL_TS_PCT_MOMENTUM_{window}'] = df.groupby('PLAYER_ID')['_tmp_ts_pct'].transform(
+            new_cols[f'ROLL_TS_PCT_MOMENTUM_{window}'] = df.groupby('PLAYER_ID')[ts_pct].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).mean()
             )
-
-        # Clean up temporary columns
-        tmp_cols = [c for c in df.columns if c.startswith('_tmp_')]
-        df.drop(columns=tmp_cols, inplace=True)
 
         return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)

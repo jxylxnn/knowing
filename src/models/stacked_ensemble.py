@@ -133,16 +133,20 @@ class StackedEnsembleModel:
         
         self.feature_names = X.columns.tolist()
         
-        # Baseline calculation (MUST use expanding with min_periods=1)
+        # Baseline calculation (MUST use expanding mean with shift to prevent leakage)
+        # CRITICAL FIX: The old cumsum approach included current row, causing data leakage
         self.league_avg = y.mean()
-        player_cumsum = df_full.groupby('PLAYER_ID')[self.target_name].cumsum() - df_full[self.target_name]
-        player_cumcount = df_full.groupby('PLAYER_ID').cumcount()
-        player_avg = (player_cumsum / player_cumcount.replace(0, np.nan)).fillna(self.league_avg)
         
-        # Opponent effect (historical only)
-        opp_cumsum = df_full.groupby('OPPONENT_ID')[self.target_name].cumsum() - df_full[self.target_name]
-        opp_cumcount = df_full.groupby('OPPONENT_ID').cumcount()
-        opp_avg = (opp_cumsum / opp_cumcount.replace(0, np.nan)).fillna(self.league_avg)
+        # Player baseline: use expanding mean of SHIFTED values (historical data only)
+        # This ensures we never use current game data to predict current game
+        player_avg = df_full.groupby('PLAYER_ID')[self.target_name].transform(
+            lambda x: x.shift(1).expanding(min_periods=1).mean()
+        ).fillna(self.league_avg)
+        
+        # Opponent effect: same - use expanding mean of SHIFTED values
+        opp_avg = df_full.groupby('OPPONENT_ID')[self.target_name].transform(
+            lambda x: x.shift(1).expanding(min_periods=1).mean()
+        ).fillna(self.league_avg)
         opp_effect = opp_avg - self.league_avg
         
         baseline = player_avg + (opp_effect * 0.3)
@@ -153,21 +157,21 @@ class StackedEnsembleModel:
         meta_features = np.zeros((X.shape[0], len(self.base_models)))
         
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-            # CRITICAL: Ensure chronological separation
+            # CRITICAL: Ensure chronological separation with STRICT less-than comparison
+            # Changed from <= to < to ensure no same-day games leak across splits
             train_max_date = df_full.loc[train_idx, 'GAME_DATE'].max()
             val_min_date = df_full.loc[val_idx, 'GAME_DATE'].min()
-            # Use <= to handle same-day games across split boundaries if necessary, 
-            # but user requested < so we follow strictly for leakage detection.
-            assert train_max_date <= val_min_date, f"TIME LEAKAGE DETECTED in Fold {fold}!"
+            assert train_max_date < val_min_date, f"TIME LEAKAGE DETECTED in Fold {fold}: train_max={train_max_date}, val_min={val_min_date}"
             
             for i, (name, model) in enumerate(self.base_models.items()):
-                # Enforce GPU params per fold
-                if 'xgb' in name and self.use_gpu:
-                    model.set_params(device='cuda', tree_method='hist')
-                elif 'lgbm' in name and self.use_gpu:
-                    model.set_params(device='gpu')
-                elif 'catboost' in name and self.use_gpu:
-                    model.set_params(task_type='GPU')
+                # Enforce GPU params per fold - handle all XGB models including rf_proxy
+                if self.use_gpu:
+                    if 'xgb' in name or name == 'rf_proxy':
+                        model.set_params(device='cuda', tree_method='hist')
+                    elif 'lgbm' in name:
+                        model.set_params(device='gpu')
+                    elif 'catboost' in name and HAS_CATBOOST:
+                        model.set_params(task_type='GPU')
                 
                 fit_kw = {
                     'sample_weight': self._compute_sample_weights(df_full.iloc[train_idx])
