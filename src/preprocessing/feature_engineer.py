@@ -1054,8 +1054,9 @@ class FeatureEngineer:
         usage_raw = (player_poss / (team_poss + EPS)) * (1 / mins_factor)
         usage_raw = usage_raw.clip(0, 0.50).fillna(0.15)  # Default to league avg usage
         
+        df['_tmp_usage_raw'] = usage_raw
         for window in [5, 10]:
-            new_cols[f'ROLL_USG_PCT_{window}'] = df.groupby('PLAYER_ID')[usage_raw].transform(
+            new_cols[f'ROLL_USG_PCT_{window}'] = df.groupby('PLAYER_ID')['_tmp_usage_raw'].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).mean()
             )
 
@@ -1071,8 +1072,9 @@ class FeatureEngineer:
             # Rebounding opportunity: higher when opponent misses more
             reb_opp = 1.0 - opp_fg_pct
             
+            df['_tmp_reb_opp'] = reb_opp
             for window in [5, 10]:
-                new_cols[f'ROLL_REB_OPPORTUNITY_{window}'] = df.groupby('PLAYER_ID')[reb_opp].transform(
+                new_cols[f'ROLL_REB_OPPORTUNITY_{window}'] = df.groupby('PLAYER_ID')['_tmp_reb_opp'].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
@@ -1083,8 +1085,9 @@ class FeatureEngineer:
             shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
             three_pt_freq = (shifted_fg3a / (shifted_fga + EPS)).clip(0, 1)
             
+            df['_tmp_three_pt_freq'] = three_pt_freq
             for window in [10, 20]:
-                new_cols[f'ROLL_3PT_FREQ_{window}'] = df.groupby('PLAYER_ID')[three_pt_freq].transform(
+                new_cols[f'ROLL_3PT_FREQ_{window}'] = df.groupby('PLAYER_ID')['_tmp_three_pt_freq'].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
         
@@ -1093,8 +1096,9 @@ class FeatureEngineer:
             shifted_fga = df.groupby('PLAYER_ID')['FGA'].shift(1)
             ft_rate = (shifted_fta / (shifted_fga + EPS)).clip(0, 1)
             
+            df['_tmp_ft_rate'] = ft_rate
             for window in [10]:
-                new_cols[f'ROLL_FT_RATE_{window}'] = df.groupby('PLAYER_ID')[ft_rate].transform(
+                new_cols[f'ROLL_FT_RATE_{window}'] = df.groupby('PLAYER_ID')['_tmp_ft_rate'].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
@@ -1105,8 +1109,9 @@ class FeatureEngineer:
             shifted_pts_team = df.groupby('TEAM_ID')['PTS_TEAM'].shift(1)
             pts_share = (shifted_pts / (shifted_pts_team + EPS)).clip(0, 0.6)
             
+            df['_tmp_pts_share'] = pts_share
             for window in [10]:
-                new_cols[f'ROLL_PTS_SHARE_{window}'] = df.groupby('PLAYER_ID')[pts_share].transform(
+                new_cols[f'ROLL_PTS_SHARE_{window}'] = df.groupby('PLAYER_ID')['_tmp_pts_share'].transform(
                     lambda x: x.shift(1).rolling(window, min_periods=1).mean()
                 )
 
@@ -1119,8 +1124,9 @@ class FeatureEngineer:
         ts_fga = shifted_fga + 0.44 * shifted_fta
         ts_pct = (shifted_pts / (2 * ts_fga + EPS)).clip(0.3, 0.8)
         
+        df['_tmp_ts_pct'] = ts_pct
         for window in [5, 10]:
-            new_cols[f'ROLL_TS_PCT_MOMENTUM_{window}'] = df.groupby('PLAYER_ID')[ts_pct].transform(
+            new_cols[f'ROLL_TS_PCT_MOMENTUM_{window}'] = df.groupby('PLAYER_ID')['_tmp_ts_pct'].transform(
                 lambda x: x.shift(1).rolling(window, min_periods=1).mean()
             )
 
