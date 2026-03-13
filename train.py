@@ -38,6 +38,9 @@ from src.utils.logging_config import setup_logging
 
 setup_logging()
 
+# Get logger after setup
+logger = logging.getLogger(__name__)
+
 # Rich imports for beautiful output
 try:
     from rich.console import Console
