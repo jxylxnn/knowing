@@ -270,10 +270,19 @@ class NeuralNetworkTrainer(BaseTrainer):
         X: Union[pd.DataFrame, np.ndarray],
         y: Union[pd.Series, np.ndarray],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Convert data to tensors."""
+        """Convert data to CPU tensors for DataLoader compatibility.
+        
+        Tensors must remain on CPU until after DataLoader workers fetch them.
+        This is critical when num_workers > 0, as worker processes cannot
+        access CUDA tensors created in the parent process.
+        
+        Batch transfer to GPU happens in _train_epoch() and _validate_epoch()
+        using non-blocking transfers with pin_memory=True.
+        """
         X_clean, y_clean = self.validate_data(X, y)
-        X_t = torch.FloatTensor(X_clean).to(self.device)
-        y_t = torch.FloatTensor(y_clean).to(self.device)
+        # Keep tensors on CPU - DataLoader workers cannot access GPU tensors
+        X_t = torch.FloatTensor(X_clean)
+        y_t = torch.FloatTensor(y_clean)
         if y_t.ndim == 1:
             y_t = y_t.unsqueeze(1)
         return X_t, y_t
