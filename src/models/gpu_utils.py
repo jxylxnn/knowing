@@ -492,6 +492,10 @@ def enable_tf32(enabled: bool = True) -> bool:
         return False
 
 
+# Keep a stable reference to the helper so later parameter names do not shadow it.
+_ENABLE_TF32_HELPER = enable_tf32
+
+
 def is_bf16_supported() -> bool:
     """
     Check if BFloat16 is supported on this GPU.
@@ -726,11 +730,11 @@ def optimize_for_training(
     if not torch.cuda.is_available():
         logger.info("CUDA not available, skipping GPU optimizations")
         return settings
-    
+
     # TF32 for Ampere+ GPUs
     if enable_tf32:
-        settings['tf32_enabled'] = enable_tf32(enabled=True)
-    
+        settings['tf32_enabled'] = _ENABLE_TF32_HELPER(enabled=True)
+
     # cuDNN benchmark for faster conv operations
     if enable_cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
