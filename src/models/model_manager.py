@@ -1,18 +1,10 @@
 import os
 import logging
-import torch
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
-from src.models.stacked_ensemble import StackedEnsembleModel
-from src.models.multi_output_nn import MultiOutputWrapper
-from src.models.lstm_model import LSTMWrapper
-from src.models.transformer_model import TransformerWrapper
-from src.models.gnn_model import GNNWrapper
-from src.models.temporal_attention import TemporalAttentionWrapper
-from src.models.advanced_trainer import AdvancedTrainer
 from src.models.gpu_utils import check_gpu_compatibility, get_device, clear_gpu_memory, log_gpu_memory
 from src.config.model_config import get_model_config, save_model_config, print_config_summary
 import joblib
@@ -20,6 +12,27 @@ import hashlib
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _load_model_classes():
+    """Import heavyweight model classes only when they are needed."""
+    from src.models.stacked_ensemble import StackedEnsembleModel
+    from src.models.multi_output_nn import MultiOutputWrapper
+    from src.models.lstm_model import LSTMWrapper
+    from src.models.transformer_model import TransformerWrapper
+    from src.models.gnn_model import GNNWrapper
+    from src.models.temporal_attention import TemporalAttentionWrapper
+    from src.models.advanced_trainer import AdvancedTrainer
+
+    return (
+        StackedEnsembleModel,
+        MultiOutputWrapper,
+        LSTMWrapper,
+        TransformerWrapper,
+        GNNWrapper,
+        TemporalAttentionWrapper,
+        AdvancedTrainer,
+    )
 
 
 class ModelManager:
@@ -46,20 +59,20 @@ class ModelManager:
         self.models: Dict[str, Any] = {}
         self.catboost_mae_models: Dict[str, Any] = {}
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
-        self.joint_model: Optional[MultiOutputWrapper] = None
-        self.temporal_model: Optional[LSTMWrapper] = None
-        self.attention_model: Optional[TransformerWrapper] = None
-        self.adv_temporal_model: Optional[TemporalAttentionWrapper] = None
-        self.gnn_model: Optional[GNNWrapper] = None
+        self.joint_model: Optional[Any] = None
+        self.temporal_model: Optional[Any] = None
+        self.attention_model: Optional[Any] = None
+        self.adv_temporal_model: Optional[Any] = None
+        self.gnn_model: Optional[Any] = None
         
         self.blenders: Dict[str, Any] = {}
         self._gpu_blenders: Dict[str, Any] = {}  # GPU-accelerated blenders for inference
         self.feature_cols: Optional[List[str]] = None
-        self.advanced_trainer: Optional[AdvancedTrainer] = None
+        self.advanced_trainer: Optional[Any] = None
         
-        # Check GPU compatibility before initializing feature engineer
-        self.use_gpu = check_gpu_compatibility()
-        self.device = get_device()
+        # Keep initialization CPU-safe; GPU checks are deferred to training
+        self.use_gpu = False
+        self.device = None
         
         # Initialize feature engineer with GPU flag
         self.feature_engineer = FeatureEngineer(use_gpu=self.use_gpu)
@@ -68,7 +81,8 @@ class ModelManager:
             self.model_config = model_config
             self.hw_info = model_config.get('metadata', {})
         else:
-            self.model_config, self.hw_info = get_model_config(force_size=None if model_size == 'auto' else model_size)
+            force_size = 'small' if model_size == 'auto' else model_size
+            self.model_config, self.hw_info = get_model_config(force_size=force_size)
         
         self.training_config = self.model_config.get('training', {})
         
@@ -922,6 +936,15 @@ class ModelManager:
                 df_split[target] = pd.to_numeric(df_split[t_col], errors='coerce').fillna(0)
 
         # 4. Advanced Optimization
+        (
+            _StackedEnsembleModel,
+            MultiOutputWrapper,
+            LSTMWrapper,
+            TransformerWrapper,
+            GNNWrapper,
+            TemporalAttentionWrapper,
+            AdvancedTrainer,
+        ) = _load_model_classes()
         if not self.advanced_trainer:
             self.advanced_trainer = AdvancedTrainer(self.feature_cols, cat_features=cat_cols)
             if self.use_gpu:
@@ -1371,6 +1394,7 @@ class ModelManager:
                 pkl_path = os.path.join(self.models_dir, f'{target.lower()}_ensemble.pkl')
                 if os.path.exists(pkl_path):
                     try:
+                        StackedEnsembleModel = _load_model_classes()[0]
                         loaded_model = StackedEnsembleModel.load(pkl_path)
                         loaded_model.use_gpu = self.use_gpu
                         self.models[target] = loaded_model
@@ -1432,18 +1456,19 @@ class ModelManager:
         
         # Load Wrappers (NN, LSTM, etc.)
         loaders = {
-            'joint_stats_nn.pkl': ('joint_model', MultiOutputWrapper),
-            'temporal_lstm.pkl': ('temporal_model', LSTMWrapper),
-            'attention_transformer.pkl': ('attention_model', TransformerWrapper),
-            'adv_temporal_attention.pkl': ('adv_temporal_model', TemporalAttentionWrapper),
-            'team_chemistry_gnn.pkl': ('gnn_model', GNNWrapper)
+            'joint_stats_nn.pkl': ('joint_model', 'src.models.multi_output_nn', 'MultiOutputWrapper'),
+            'temporal_lstm.pkl': ('temporal_model', 'src.models.lstm_model', 'LSTMWrapper'),
+            'attention_transformer.pkl': ('attention_model', 'src.models.transformer_model', 'TransformerWrapper'),
+            'adv_temporal_attention.pkl': ('adv_temporal_model', 'src.models.temporal_attention', 'TemporalAttentionWrapper'),
+            'team_chemistry_gnn.pkl': ('gnn_model', 'src.models.gnn_model', 'GNNWrapper')
         }
         
         loaded_advanced = 0
-        for file, (attr, cls) in loaders.items():
+        for file, (attr, module_path, class_name) in loaders.items():
             path = os.path.join(self.models_dir, file)
             if os.path.exists(path):
                 try:
+                    cls = getattr(__import__(module_path, fromlist=[class_name]), class_name)
                     loaded_model = cls.load(path)
                     setattr(self, attr, loaded_model)
                     loaded_advanced += 1

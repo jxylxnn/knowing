@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import List, Dict
 import random
 import os
-import torch
 import numpy as np
 
 @dataclass
@@ -30,6 +29,8 @@ class ModelConfig:
 
 def set_global_seed(seed: int = 42):
     """Ensure reproducible results across runs."""
+    import torch
+
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)

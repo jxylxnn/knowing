@@ -4,7 +4,6 @@ import os
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
-import torch
 from scipy import stats as scipy_stats
 from functools import lru_cache
 import hashlib
@@ -62,7 +61,7 @@ class GameSimulator:
         self.betting_scraper = BettingScraper()
         self.schedule_scraper = ScheduleScraper()
         
-        self.device = get_device()
+        self.device = 'cpu'
         logger.info(f"GameSimulator initialized on device: {self.device}")
         
         self._init_simulation_params()
@@ -90,8 +89,8 @@ class GameSimulator:
                 [0.20, 0.10, 0.28, 0.35, 0.12, 1.0],
             ]
         
-        self.CORR_MATRIX = torch.tensor(corr_matrix, dtype=torch.float32, device=self.device)
-        self.COV_CHOLESKY = torch.linalg.cholesky(self.CORR_MATRIX)
+        self.CORR_MATRIX = np.array(corr_matrix, dtype=np.float32)
+        self.COV_CHOLESKY = np.linalg.cholesky(self.CORR_MATRIX)
         self.NUM_STATS = 6
         self.STAT_NAMES = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
         
@@ -109,14 +108,6 @@ class GameSimulator:
             else:
                 return default
         return obj
-        
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._roster_cache = {}
-        self._synergy_cache = {}
-        self._defense_cache = {}
-        self._pace_cache = {}
-        logger.info(f"Cache directory: {self.cache_dir}")
     
     def _get_cache_key(self, *args) -> str:
         """Generate a cache key from arguments."""
@@ -125,7 +116,9 @@ class GameSimulator:
     
     def _serialize_for_cache(self, data: Any) -> Any:
         """Convert data to JSON-serializable format."""
-        if isinstance(data, (np.ndarray, torch.Tensor)):
+        if isinstance(data, np.ndarray) or (
+            hasattr(data, 'detach') and hasattr(data, 'cpu') and hasattr(data, 'numpy')
+        ):
             return {'__type__': 'array', 'data': data.tolist()}
         elif isinstance(data, np.floating):
             return float(data)

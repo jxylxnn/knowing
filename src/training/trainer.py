@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,7 @@ class BaseTrainer(ABC):
         model_name: str,
         config: Dict[str, Any],
         use_gpu: bool = False,
-        device: Optional[Union[str, torch.device]] = None,
+        device: Optional[Union[str, Any]] = None,
         random_state: int = 42,
     ):
         """Initialize the trainer.
@@ -65,6 +64,7 @@ class BaseTrainer(ABC):
         if device is None:
             device = 'cuda' if use_gpu else 'cpu'
         
+        import torch
         if isinstance(device, str):
             self.device = torch.device(device)
         elif isinstance(device, torch.device):

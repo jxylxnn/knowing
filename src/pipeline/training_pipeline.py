@@ -12,15 +12,27 @@ import joblib
 from src.config import Config, TrainingConfig, CatBoostConfig
 from src.models.base import ModelRegistry, ModelMetadata
 from src.models.stacked_ensemble import StackedEnsembleModel
-from src.models.multi_output_nn import MultiOutputWrapper
-from src.models.lstm_model import LSTMWrapper
-from src.models.transformer_model import TransformerWrapper
-from src.models.gnn_model import GNNWrapper
-from src.models.temporal_attention import TemporalAttentionWrapper
 from src.models.advanced_trainer import AdvancedTrainer
 from src.models.gpu_utils import check_gpu_compatibility, get_device
 
 logger = logging.getLogger(__name__)
+
+
+def _load_wrapper_classes():
+    """Import PyTorch-backed wrappers only when they are actually needed."""
+    from src.models.multi_output_nn import MultiOutputWrapper
+    from src.models.lstm_model import LSTMWrapper
+    from src.models.transformer_model import TransformerWrapper
+    from src.models.gnn_model import GNNWrapper
+    from src.models.temporal_attention import TemporalAttentionWrapper
+
+    return (
+        MultiOutputWrapper,
+        LSTMWrapper,
+        TransformerWrapper,
+        GNNWrapper,
+        TemporalAttentionWrapper,
+    )
 
 
 class TrainingPipeline:
@@ -55,20 +67,20 @@ class TrainingPipeline:
         self.models: Dict[str, Any] = {}
         self.catboost_mae_models: Dict[str, Any] = {}
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
-        self.joint_model: Optional[MultiOutputWrapper] = None
-        self.temporal_model: Optional[LSTMWrapper] = None
-        self.attention_model: Optional[TransformerWrapper] = None
-        self.adv_temporal_model: Optional[TemporalAttentionWrapper] = None
-        self.gnn_model: Optional[GNNWrapper] = None
+        self.joint_model: Optional[Any] = None
+        self.temporal_model: Optional[Any] = None
+        self.attention_model: Optional[Any] = None
+        self.adv_temporal_model: Optional[Any] = None
+        self.gnn_model: Optional[Any] = None
         self.blenders: Dict[str, Ridge] = {}
         
         # State
         self.feature_cols: Optional[List[str]] = None
         self.advanced_trainer: Optional[AdvancedTrainer] = None
         
-        # GPU setup
-        self.use_gpu = check_gpu_compatibility()
-        self.device = get_device()
+        # Keep initialization CPU-safe; GPU checks are deferred to training
+        self.use_gpu = False
+        self.device = None
         
         if self.use_gpu:
             logger.info("GPU Training ENABLED for TrainingPipeline")
@@ -382,6 +394,7 @@ class TrainingPipeline:
         logger.info("Training Joint Stats NN...")
         
         core_targets = self.training_config.targets[:3]  # PTS, REB, AST
+        MultiOutputWrapper, _, _, _, _ = _load_wrapper_classes()
         
         self.joint_model = MultiOutputWrapper(
             input_dim=len(nn_features),
@@ -403,6 +416,7 @@ class TrainingPipeline:
         
         core_targets = self.training_config.targets[:3]
         lstm_config = self.config.lstm
+        _, LSTMWrapper, _, _, _ = _load_wrapper_classes()
         
         self.temporal_model = LSTMWrapper(
             input_dim=len(nn_features),
@@ -423,6 +437,7 @@ class TrainingPipeline:
         
         core_targets = self.training_config.targets[:3]
         transformer_config = self.config.transformer
+        _, _, TransformerWrapper, _, _ = _load_wrapper_classes()
         
         self.attention_model = TransformerWrapper(
             input_dim=len(nn_features),
@@ -442,6 +457,7 @@ class TrainingPipeline:
         logger.info("Training GNN model...")
         
         core_targets = self.training_config.targets[:3]
+        _, _, _, GNNWrapper, _ = _load_wrapper_classes()
         
         self.gnn_model = GNNWrapper(
             input_dim=len(nn_features),
@@ -461,6 +477,7 @@ class TrainingPipeline:
         logger.info("Training Temporal Attention model...")
         
         core_targets = self.training_config.targets[:3]
+        _, _, _, _, TemporalAttentionWrapper = _load_wrapper_classes()
         
         self.adv_temporal_model = TemporalAttentionWrapper(
             input_dim=len(nn_features),
@@ -604,18 +621,21 @@ class TrainingPipeline:
                     except Exception as e:
                         logger.debug(f"Failed to load quantile-{label} for {target}: {e}")
         
-        # Load other models
+        # Load other models only when their files exist. Importing the wrapper
+        # classes eagerly can abort on Torch initialization even when no model
+        # artifacts are present.
         model_files = [
-            ('joint_stats_nn.pkl', 'joint_model', MultiOutputWrapper),
-            ('temporal_lstm.pkl', 'temporal_model', LSTMWrapper),
-            ('attention_transformer.pkl', 'attention_model', TransformerWrapper),
-            ('team_chemistry_gnn.pkl', 'gnn_model', GNNWrapper),
+            ('joint_stats_nn.pkl', 'joint_model', 'src.models.multi_output_nn', 'MultiOutputWrapper'),
+            ('temporal_lstm.pkl', 'temporal_model', 'src.models.lstm_model', 'LSTMWrapper'),
+            ('attention_transformer.pkl', 'attention_model', 'src.models.transformer_model', 'TransformerWrapper'),
+            ('team_chemistry_gnn.pkl', 'gnn_model', 'src.models.gnn_model', 'GNNWrapper'),
         ]
         
-        for filename, attr_name, wrapper_class in model_files:
+        for filename, attr_name, module_path, class_name in model_files:
             model_path = self.data_config.models_dir / filename
             if model_path.exists():
                 try:
+                    wrapper_class = getattr(__import__(module_path, fromlist=[class_name]), class_name)
                     model = wrapper_class.load(str(model_path))
                     setattr(self, attr_name, model)
                     logger.info(f"Loaded {attr_name}")

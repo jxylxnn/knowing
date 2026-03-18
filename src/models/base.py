@@ -326,8 +326,9 @@ class ModelRegistry:
         Args:
             models_dir: Directory to store models
         """
-        self.models_dir = Path(models_dir)
-        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.models_dir = str(Path(models_dir))
+        self._models_dir = Path(models_dir)
+        self._models_dir.mkdir(parents=True, exist_ok=True)
         self._models: Dict[str, BaseModel] = {}
         self._metadata: Dict[str, ModelMetadata] = {}
     
@@ -391,8 +392,8 @@ class ModelRegistry:
         Returns:
             Path to saved model
         """
-        model_path = self.models_dir / f"{name}.pkl"
-        metadata_path = self.models_dir / f"{name}_metadata.json"
+        model_path = self._models_dir / f"{name}.pkl"
+        metadata_path = self._models_dir / f"{name}_metadata.json"
         
         # Save model
         model.save(model_path)
@@ -417,8 +418,8 @@ class ModelRegistry:
         Returns:
             Loaded model instance
         """
-        model_path = self.models_dir / f"{name}.pkl"
-        metadata_path = self.models_dir / f"{name}_metadata.json"
+        model_path = self._models_dir / f"{name}.pkl"
+        metadata_path = self._models_dir / f"{name}_metadata.json"
         
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found: {model_path}")

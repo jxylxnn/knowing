@@ -21,7 +21,6 @@ from joblib import Parallel, delayed
 
 from src.training.trainer import TrainResult
 from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
-from src.training.nn_trainer import NeuralNetworkTrainer
 from src.training.feature_cache import FeatureCache, DataSplitCache
 from src.training.experiment import ExperimentTracker
 from src.training.training_logger import get_training_logger, RichTrainingLogger
@@ -123,13 +122,28 @@ class TrainingPipeline:
         self.mode_config = self.TRAINING_MODES[mode]
         
         # Hardware setup
-        self.use_gpu = use_gpu if use_gpu is not None else check_gpu_compatibility()
+        self.use_gpu = bool(use_gpu) if use_gpu is not None else False
         self.parallel = parallel
-        self.max_workers = max_workers or (4 if parallel else 1)
+        if self.use_gpu:
+            self.gpu_settings = initialize_gpu_optimizations(log_summary=False)
+            default_workers = 1
+        else:
+            self.gpu_settings = {
+                'gpu_available': False,
+                'tf32_enabled': False,
+                'bf16_available': False,
+                'flash_attention_available': False,
+                'cudnn_benchmark': False,
+                'optimal_workers': 0,
+            }
+            default_workers = max(1, min(4, os.cpu_count() or 1))
+        self.max_workers = max_workers or (default_workers if parallel else 1)
+        self.dataloader_workers = self.gpu_settings['optimal_workers']
         
         # Get model config
+        force_size = 'small' if model_size == 'auto' else model_size
         self.model_config, self.hw_info = get_model_config(
-            force_size=None if model_size == 'auto' else model_size
+            force_size=force_size
         )
         
         # Apply mode overrides to config
@@ -149,6 +163,11 @@ class TrainingPipeline:
         
         logger.info(f"TrainingPipeline initialized (mode={mode}, gpu={self.use_gpu}, parallel={parallel})")
         logger.info(f"Mode: {self.mode_config['description']}")
+        logger.info(
+            f"GPU settings: tf32={self.gpu_settings['tf32_enabled']}, "
+            f"bf16={self.gpu_settings['bf16_available']}, "
+            f"workers={self.dataloader_workers}, max_workers={self.max_workers}"
+        )
     
     def _apply_mode_config(self) -> None:
         """Apply mode-specific overrides to model config."""
@@ -422,6 +441,7 @@ class TrainingPipeline:
     ) -> TrainResult:
         """Train joint multi-output neural network."""
         from src.models.multi_output_nn import MultiOutputNN
+        from src.training.nn_trainer import NeuralNetworkTrainer
         
         nn_config = self.model_config['nn']
         
