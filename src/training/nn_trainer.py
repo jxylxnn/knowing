@@ -112,6 +112,39 @@ class NeuralNetworkTrainer(BaseTrainer):
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self._optimal_workers = get_optimal_dataloader_workers()
+
+    def _extract_primary_output(self, model_output: Any) -> Any:
+        """Return the tensor used for prediction from a model output.
+
+        Some models, like ``MultiOutputNN``, return auxiliary outputs such as
+        log-variances alongside the primary prediction tensor. Training and
+        inference should use the primary prediction tensor by default.
+        """
+        if isinstance(model_output, (tuple, list)):
+            return model_output[0]
+        return model_output
+
+    def _compute_loss(self, model_output: Any, target: torch.Tensor) -> torch.Tensor:
+        """Compute the appropriate loss for the model output structure."""
+        if isinstance(model_output, (tuple, list)) and len(model_output) == 2:
+            primary, aux = model_output
+
+            # Only treat the second tensor as a log-variance head when it matches
+            # the prediction shape. This avoids misclassifying tuple outputs from
+            # models that return auxiliary metadata.
+            if (
+                hasattr(primary, "shape")
+                and hasattr(aux, "shape")
+                and primary.shape == aux.shape == target.shape
+            ):
+                aux = torch.clamp(aux, min=-10.0, max=10.0)
+                return torch.mean(
+                    0.5 * torch.exp(-aux) * (target - primary) ** 2 + 0.5 * aux
+                )
+
+            model_output = primary
+
+        return nn.MSELoss()(model_output, target)
     
     def _setup_amp(self):
         """Set up automatic mixed precision with optimal dtype."""
@@ -368,7 +401,7 @@ class NeuralNetworkTrainer(BaseTrainer):
             if self.use_amp and self._amp_dtype is not None:
                 with torch.amp.autocast(device_type='cuda', dtype=self._amp_dtype):
                     y_pred = self.model(X_batch)
-                    loss = nn.MSELoss()(y_pred, y_batch)
+                    loss = self._compute_loss(y_pred, y_batch)
                     # Scale loss for gradient accumulation
                     loss = loss / accumulation_steps
                 
@@ -380,7 +413,7 @@ class NeuralNetworkTrainer(BaseTrainer):
                     loss.backward()
             else:
                 y_pred = self.model(X_batch)
-                loss = nn.MSELoss()(y_pred, y_batch)
+                loss = self._compute_loss(y_pred, y_batch)
                 loss = loss / accumulation_steps
                 loss.backward()
             
@@ -421,10 +454,10 @@ class NeuralNetworkTrainer(BaseTrainer):
                 if self.use_amp and self._amp_dtype is not None:
                     with torch.amp.autocast(device_type='cuda', dtype=self._amp_dtype):
                         y_pred = self.model(X_batch)
-                        loss = nn.MSELoss()(y_pred, y_batch)
+                        loss = self._compute_loss(y_pred, y_batch)
                 else:
                     y_pred = self.model(X_batch)
-                    loss = nn.MSELoss()(y_pred, y_batch)
+                    loss = self._compute_loss(y_pred, y_batch)
                 
                 total_loss += loss.item()
         
@@ -442,9 +475,9 @@ class NeuralNetworkTrainer(BaseTrainer):
         with torch.no_grad():
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    y_pred = self.model(X_t)
+                    y_pred = self._extract_primary_output(self.model(X_t))
             else:
-                y_pred = self.model(X_t)
+                y_pred = self._extract_primary_output(self.model(X_t))
         
         return y_pred.cpu().numpy().squeeze()
     
