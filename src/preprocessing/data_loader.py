@@ -15,6 +15,14 @@ class DataLoader:
         self.players_df = None
         self.games_df = None
 
+    def _ensure_columns(self, df: pd.DataFrame, defaults: dict) -> pd.DataFrame:
+        """Ensure a DataFrame has all required columns with sensible defaults."""
+        df = df.copy()
+        for col, default in defaults.items():
+            if col not in df.columns:
+                df[col] = default
+        return df
+
     def _parse_minutes(self, val):
         if pd.isna(val): return np.nan
         if isinstance(val, (int, float, np.integer, np.floating)): return float(val)
@@ -91,6 +99,16 @@ class DataLoader:
         self.games_df = pd.merge(self.games_df, team_def, on=['GAME_ID', 'TEAM_ID'], how='left')
         
         # 2. Merge with Player Stats
+        game_merge_defaults = {
+            'WL': '',
+            'PTS': 0, 'REB': 0, 'AST': 0, 'FGA': 0, 'FTA': 0,
+            'OREB': 0, 'DREB': 0, 'TOV': 0,
+            'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10': 0.0,
+            'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10': 0.0,
+            'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10': 0.0,
+        }
+        self.games_df = self._ensure_columns(self.games_df, game_merge_defaults)
+
         merged_df = pd.merge(
             self.players_df,
             self.games_df[['GAME_ID', 'TEAM_ID', 'WL', 'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
@@ -103,8 +121,13 @@ class DataLoader:
         # 3. Add Opponent Identity (Using the pre-merged_games table is efficient)
         # We need the OPPONENT_ID for the player row
         opp_map = merged_games[['GAME_ID', 'TEAM_ID', 'TEAM_ID_OPP']].drop_duplicates()
-        opp_map.rename(columns={'TEAM_ID_OPP': 'OPPONENT_ID'}, inplace=True)
+        opp_map.rename(columns={'TEAM_ID_OPP': 'OPPONENT_ID_FROM_GAME'}, inplace=True)
         merged_df = pd.merge(merged_df, opp_map, on=['GAME_ID', 'TEAM_ID'], how='left')
+        if 'OPPONENT_ID' in merged_df.columns:
+            merged_df['OPPONENT_ID'] = merged_df['OPPONENT_ID'].fillna(merged_df['OPPONENT_ID_FROM_GAME'])
+            merged_df = merged_df.drop(columns=['OPPONENT_ID_FROM_GAME'])
+        else:
+            merged_df = merged_df.rename(columns={'OPPONENT_ID_FROM_GAME': 'OPPONENT_ID'})
         
         logger.info(f"Merged dataset shape: {merged_df.shape}")
         return merged_df

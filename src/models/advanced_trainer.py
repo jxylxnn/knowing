@@ -14,6 +14,11 @@ warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
 
+try:
+    from src.models.gpu_utils import create_grad_scaler, get_autocast_dtype, get_optimal_dataloader_workers
+except ModuleNotFoundError:
+    from gpu_utils import create_grad_scaler, get_autocast_dtype, get_optimal_dataloader_workers
+
 
 class GPUAdversarialValidator:
     """GPU-accelerated adversarial validation using PyTorch MLP."""
@@ -85,18 +90,29 @@ class GPUAdversarialValidator:
         
         self._init_model()
         
-        X_tensor = torch.tensor(X, dtype=torch.float32)
-        y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1)
+        X_tensor = torch.from_numpy(np.asarray(X, dtype=np.float32))
+        y_tensor = torch.from_numpy(np.asarray(y, dtype=np.float32)).unsqueeze(1)
         
-        if self.device is not None and self.device.type == 'cuda':
-            X_tensor = X_tensor.to(self.device)
-            y_tensor = y_tensor.to(self.device)
-        
+        pin_memory = self.device is not None and self.device.type == 'cuda'
+        num_workers = get_optimal_dataloader_workers() if pin_memory else 0
+        loader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': True,
+            'pin_memory': pin_memory,
+            'num_workers': num_workers,
+        }
+        if num_workers > 0:
+            loader_kwargs['persistent_workers'] = True
+            loader_kwargs['prefetch_factor'] = 2
         dataset = TensorDataset(X_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        loader = DataLoader(dataset, **loader_kwargs)
         
         criterion = nn.BCELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
+        device_type = self.device.type if self.device is not None else 'cpu'
+        use_amp = pin_memory
+        amp_dtype = get_autocast_dtype() if use_amp else None
+        grad_scaler = create_grad_scaler(device_type=device_type, enabled=use_amp)
         
         self.model.train()
         best_loss = float('inf')
@@ -106,11 +122,20 @@ class GPUAdversarialValidator:
         for epoch in range(epochs):
             total_loss = 0.0
             for batch_X, batch_y in loader:
-                optimizer.zero_grad()
-                preds = self.model(batch_X)
-                loss = criterion(preds, batch_y)
-                loss.backward()
-                optimizer.step()
+                if pin_memory:
+                    batch_X = batch_X.to(self.device, non_blocking=True)
+                    batch_y = batch_y.to(self.device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type=device_type, dtype=amp_dtype, enabled=use_amp):
+                    preds = self.model(batch_X)
+                    loss = criterion(preds, batch_y)
+                if grad_scaler is not None:
+                    grad_scaler.scale(loss).backward()
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
                 total_loss += loss.item()
             
             avg_loss = total_loss / len(loader)
@@ -135,7 +160,7 @@ class GPUAdversarialValidator:
             raise RuntimeError("Model not fitted. Call fit() first.")
         
         self.model.eval()
-        X_tensor = torch.tensor(X, dtype=torch.float32)
+        X_tensor = torch.from_numpy(np.asarray(X, dtype=np.float32))
         
         if self.device is not None and self.device.type == 'cuda':
             X_tensor = X_tensor.to(self.device)
@@ -211,8 +236,8 @@ class GPUFeatureSelector:
             logger.info(f"Removed {len(X.columns) - len(non_zero_var_cols)} zero-variance features")
         
         # Convert to tensors
-        X_tensor = torch.tensor(X_clean.values, dtype=torch.float32)
-        y_tensor = torch.tensor(y.values, dtype=torch.float32)
+        X_tensor = torch.from_numpy(np.asarray(X_clean.values, dtype=np.float32))
+        y_tensor = torch.from_numpy(np.asarray(y.values, dtype=np.float32))
         
         if self.device is not None and self.device.type == 'cuda':
             X_tensor = X_tensor.to(self.device)
@@ -427,20 +452,16 @@ class AdvancedTrainer:
         """
         logger.info("Performing Adversarial Validation...")
         
-        # Prepare adversarial dataset
-        train_adv = train_df[self.feature_cols].copy()
-        train_adv['_is_val'] = 0
+        # Prepare adversarial dataset without building an intermediate DataFrame.
+        train_adv = train_df[self.feature_cols].fillna(0).replace([np.inf, -np.inf], 0).to_numpy(dtype=np.float32, copy=False)
+        val_adv = val_df[self.feature_cols].fillna(0).replace([np.inf, -np.inf], 0).to_numpy(dtype=np.float32, copy=False)
+        X_adv = np.vstack([train_adv, val_adv])
+        y_adv = np.concatenate([
+            np.zeros(len(train_adv), dtype=np.float32),
+            np.ones(len(val_adv), dtype=np.float32),
+        ])
         
-        val_adv = val_df[self.feature_cols].copy()
-        val_adv['_is_val'] = 1
-        
-        adv_df = pd.concat([train_adv, val_adv], ignore_index=True)
-        
-        # Handle missing values
-        X_adv = adv_df[self.feature_cols].fillna(0).replace([np.inf, -np.inf], 0).values
-        y_adv = adv_df['_is_val'].values
-        
-        X_train = train_df[self.feature_cols].fillna(0).replace([np.inf, -np.inf], 0).values
+        X_train = train_adv
         
         # Use GPU model if available
         if self.use_gpu and self.device is not None and self.device.type == 'cuda':

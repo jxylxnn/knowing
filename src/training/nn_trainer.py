@@ -23,20 +23,86 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.training.trainer import BaseTrainer, TrainResult
-from src.models.gpu_utils import (
-    get_device, 
-    clear_gpu_memory, 
-    get_gpu_memory_usage,
-    get_optimal_dataloader_workers,
-    initialize_gpu_optimizations,
-    is_bf16_supported,
-    get_autocast_dtype,
-    create_grad_scaler,
-    autocast_context,
-    GPUMemoryContext,
-)
-from src.training.training_logger import get_training_logger
+try:
+    from src.training.trainer import BaseTrainer, TrainResult
+    from src.models.gpu_utils import (
+        get_device,
+        clear_gpu_memory,
+        get_gpu_memory_usage,
+        get_optimal_dataloader_workers,
+        initialize_gpu_optimizations,
+        is_bf16_supported,
+        get_autocast_dtype,
+        create_grad_scaler,
+        autocast_context,
+        GPUMemoryContext,
+    )
+    from src.training.training_logger import get_training_logger
+except ModuleNotFoundError:
+    from dataclasses import dataclass
+
+    @dataclass
+    class TrainResult:
+        model: Any
+        metrics: Dict[str, float]
+        training_time: float
+        best_iteration: Optional[int] = None
+        feature_importance: Optional[Dict[str, float]] = None
+
+    class BaseTrainer:
+        def __init__(self, model_name: str, config: Dict[str, Any], use_gpu: bool = False, device=None, random_state: int = 42):
+            self.model_name = model_name
+            self.config = config or {}
+            self.use_gpu = bool(use_gpu)
+            self.random_state = random_state
+            self.is_trained = False
+            self.device = torch.device(device) if device is not None else torch.device('cuda' if self.use_gpu and torch.cuda.is_available() else 'cpu')
+        def validate_data(self, X, y=None):
+            if isinstance(X, (pd.DataFrame, pd.Series)):
+                X = X.to_numpy()
+            X = np.asarray(X, dtype=np.float32)
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            if y is None:
+                return X, None
+            if isinstance(y, (pd.DataFrame, pd.Series)):
+                y = y.to_numpy()
+            y = np.asarray(y, dtype=np.float32)
+            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+            return X, y
+        def compute_metrics(self, y_true, y_pred):
+            y_true = np.asarray(y_true, dtype=np.float32)
+            y_pred = np.asarray(y_pred, dtype=np.float32)
+            if y_true.shape != y_pred.shape:
+                y_pred = y_pred.reshape(y_true.shape)
+            err = y_pred - y_true
+            metrics = {'mae': float(np.mean(np.abs(err))), 'rmse': float(np.sqrt(np.mean(np.square(err))))}
+            denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
+            if denom > 0:
+                metrics['r2'] = float(1.0 - np.sum(np.square(err)) / denom)
+            return metrics
+
+    class _SimpleLogger:
+        def log_iteration(self, metrics):
+            pass
+    _TRAINING_LOGGER = None
+    def get_training_logger(*args, **kwargs):
+        global _TRAINING_LOGGER
+        if _TRAINING_LOGGER is None:
+            _TRAINING_LOGGER = _SimpleLogger()
+        return _TRAINING_LOGGER
+
+    from gpu_utils import (
+        get_device,
+        clear_gpu_memory,
+        get_gpu_memory_usage,
+        get_optimal_dataloader_workers,
+        initialize_gpu_optimizations,
+        is_bf16_supported,
+        get_autocast_dtype,
+        create_grad_scaler,
+        autocast_context,
+        GPUMemoryContext,
+    )
 
 logger = logging.getLogger(__name__)
 

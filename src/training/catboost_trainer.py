@@ -9,12 +9,95 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import joblib
 import numpy as np
 import pandas as pd
-from catboost import CatBoostRegressor, Pool
+try:
+    from catboost import CatBoostRegressor, Pool
+except Exception:  # pragma: no cover - environment-specific CatBoost import failures
+    CatBoostRegressor = None
+    Pool = None
 
-from src.training.trainer import BaseTrainer, TrainResult
-from src.training.training_logger import TrainingMetrics, get_training_logger
+try:
+    from src.training.trainer import BaseTrainer, TrainResult
+    from src.training.training_logger import TrainingMetrics, get_training_logger
+except ModuleNotFoundError:
+    from dataclasses import dataclass
+
+    @dataclass
+    class TrainResult:
+        model: Any
+        metrics: Dict[str, float]
+        training_time: float
+        best_iteration: Optional[int] = None
+        feature_importance: Optional[Dict[str, float]] = None
+
+    class BaseTrainer:
+        def __init__(self, model_name: str, config: Dict[str, Any], use_gpu: bool = False, device=None, random_state: int = 42):
+            self.model_name = model_name
+            self.config = config or {}
+            self.use_gpu = bool(use_gpu)
+            self.device = device
+            self.random_state = random_state
+            self.is_trained = False
+        def validate_data(self, X, y=None):
+            if isinstance(X, (pd.DataFrame, pd.Series)):
+                X = X.to_numpy()
+            X = np.asarray(X, dtype=np.float32)
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            if y is None:
+                return X, None
+            if isinstance(y, (pd.DataFrame, pd.Series)):
+                y = y.to_numpy()
+            y = np.asarray(y, dtype=np.float32)
+            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+            return X, y
+        def compute_metrics(self, y_true, y_pred):
+            y_true = np.asarray(y_true, dtype=np.float32)
+            y_pred = np.asarray(y_pred, dtype=np.float32)
+            if y_true.shape != y_pred.shape:
+                y_pred = y_pred.reshape(y_true.shape)
+            err = y_pred - y_true
+            metrics = {'mae': float(np.mean(np.abs(err))), 'rmse': float(np.sqrt(np.mean(np.square(err))))}
+            denom = float(np.sum((y_true - np.mean(y_true)) ** 2))
+            if denom > 0:
+                metrics['r2'] = float(1.0 - np.sum(np.square(err)) / denom)
+            return metrics
+
+    @dataclass
+    class TrainingMetrics:
+        target: str
+        model_type: str
+        iteration: int
+        total_iterations: int
+        train_loss: float
+        val_loss: float
+        best_iteration: int
+        best_val_loss: float
+        time_per_iter: float
+        eta_seconds: float
+
+    class _SimpleLogger:
+        def log_iteration(self, metrics: TrainingMetrics):
+            if metrics.iteration in (0, metrics.total_iterations):
+                logger.info('%s %s iter=%s/%s train=%.5f val=%.5f', metrics.target, metrics.model_type, metrics.iteration, metrics.total_iterations, metrics.train_loss, metrics.val_loss)
+
+    _TRAINING_LOGGER = None
+    def get_training_logger(*args, **kwargs):
+        global _TRAINING_LOGGER
+        if _TRAINING_LOGGER is None:
+            _TRAINING_LOGGER = _SimpleLogger()
+        return _TRAINING_LOGGER
 
 logger = logging.getLogger(__name__)
+
+
+class ConstantRegressor:
+    """Simple fallback regressor for constant targets."""
+    def __init__(self, value: float):
+        self.value = float(value)
+    def predict(self, X):
+        n = len(X) if hasattr(X, '__len__') else 1
+        return np.full(n, self.value, dtype=np.float32)
+    def get_best_iteration(self):
+        return 0
 
 
 class CatBoostProgressCallback:
@@ -175,10 +258,10 @@ class CatBoostTrainer(BaseTrainer):
         
         # Adjust for model type
         if model_type == 'mae':
-            params['iterations'] = int(params['iterations'] * 0.65)
+            params['iterations'] = max(1, int(params['iterations'] * 0.65))
             params['early_stopping_rounds'] = max(20, int(params['iterations'] * 0.05))
         elif model_type.startswith('quantile'):
-            params['iterations'] = int(params['iterations'] * 0.5)
+            params['iterations'] = max(1, int(params['iterations'] * 0.5))
             params['early_stopping_rounds'] = max(15, int(params['iterations'] * 0.08))
         
         # Loss function
@@ -225,6 +308,23 @@ class CatBoostTrainer(BaseTrainer):
         X_train_clean, y_train_clean = self.validate_data(X_train, y_train)
         X_val_clean = X_val.values if isinstance(X_val, pd.DataFrame) else X_val
         y_val_clean = y_val.values if isinstance(y_val, pd.Series) else y_val
+
+        if y_train_clean is None or len(y_train_clean) == 0:
+            raise ValueError(f'No training rows available for target {self.target}')
+        if np.allclose(y_train_clean, y_train_clean[0]):
+            constant_value = float(y_train_clean[0])
+            logger.warning(f'Target {self.target} is constant in the training split (value={constant_value}). Using ConstantRegressor fallback.')
+            self.primary_model = ConstantRegressor(constant_value)
+            self.mae_model = ConstantRegressor(constant_value) if self.use_multi_loss else None
+            self.quantile_low_model = ConstantRegressor(constant_value) if self.use_quantile else None
+            self.quantile_high_model = ConstantRegressor(constant_value) if self.use_quantile else None
+            metrics = {}
+            if X_val is not None and y_val is not None:
+                y_pred = self.predict(X_val)
+                metrics = self.compute_metrics(y_val_clean, y_pred)
+            training_time = time.time() - start_time
+            self.is_trained = True
+            return TrainResult(model=self, metrics=metrics, training_time=training_time, best_iteration=0, feature_importance=None)
         
         # Train primary model
         logger.info(f"Training CatBoost for {self.target}: RMSE model")
@@ -412,16 +512,28 @@ class CatBoostTrainer(BaseTrainer):
         path.mkdir(parents=True, exist_ok=True)
         
         if self.primary_model is not None:
-            self.primary_model.save_model(str(path / f"{self.target.lower()}_catboost.cbm"))
+            if isinstance(self.primary_model, ConstantRegressor):
+                joblib.dump(self.primary_model, path / f"{self.target.lower()}_catboost.joblib")
+            else:
+                self.primary_model.save_model(str(path / f"{self.target.lower()}_catboost.cbm"))
         
         if self.mae_model is not None:
-            self.mae_model.save_model(str(path / f"{self.target.lower()}_catboost_mae.cbm"))
+            if isinstance(self.mae_model, ConstantRegressor):
+                joblib.dump(self.mae_model, path / f"{self.target.lower()}_catboost_mae.joblib")
+            else:
+                self.mae_model.save_model(str(path / f"{self.target.lower()}_catboost_mae.cbm"))
         
         if self.quantile_low_model is not None:
-            self.quantile_low_model.save_model(str(path / f"{self.target.lower()}_catboost_qlow.cbm"))
+            if isinstance(self.quantile_low_model, ConstantRegressor):
+                joblib.dump(self.quantile_low_model, path / f"{self.target.lower()}_catboost_qlow.joblib")
+            else:
+                self.quantile_low_model.save_model(str(path / f"{self.target.lower()}_catboost_qlow.cbm"))
         
         if self.quantile_high_model is not None:
-            self.quantile_high_model.save_model(str(path / f"{self.target.lower()}_catboost_qhigh.cbm"))
+            if isinstance(self.quantile_high_model, ConstantRegressor):
+                joblib.dump(self.quantile_high_model, path / f"{self.target.lower()}_catboost_qhigh.joblib")
+            else:
+                self.quantile_high_model.save_model(str(path / f"{self.target.lower()}_catboost_qhigh.cbm"))
         
         metadata = {
             'target': self.target,
@@ -456,25 +568,41 @@ class CatBoostTrainer(BaseTrainer):
         trainer._feature_importance = metadata.get('feature_importance')
         
         # Load models
-        primary_path = path / f"{target.lower()}_catboost.cbm"
-        if primary_path.exists():
-            trainer.primary_model = CatBoostRegressor()
-            trainer.primary_model.load_model(str(primary_path))
+        primary_joblib = path / f"{target.lower()}_catboost.joblib"
+        if primary_joblib.exists():
+            trainer.primary_model = joblib.load(primary_joblib)
+        else:
+            primary_path = path / f"{target.lower()}_catboost.cbm"
+            if primary_path.exists():
+                trainer.primary_model = CatBoostRegressor()
+                trainer.primary_model.load_model(str(primary_path))
         
-        mae_path = path / f"{target.lower()}_catboost_mae.cbm"
-        if mae_path.exists():
-            trainer.mae_model = CatBoostRegressor()
-            trainer.mae_model.load_model(str(mae_path))
+        mae_joblib = path / f"{target.lower()}_catboost_mae.joblib"
+        if mae_joblib.exists():
+            trainer.mae_model = joblib.load(mae_joblib)
+        else:
+            mae_path = path / f"{target.lower()}_catboost_mae.cbm"
+            if mae_path.exists():
+                trainer.mae_model = CatBoostRegressor()
+                trainer.mae_model.load_model(str(mae_path))
         
-        qlow_path = path / f"{target.lower()}_catboost_qlow.cbm"
-        if qlow_path.exists():
-            trainer.quantile_low_model = CatBoostRegressor()
-            trainer.quantile_low_model.load_model(str(qlow_path))
+        qlow_joblib = path / f"{target.lower()}_catboost_qlow.joblib"
+        if qlow_joblib.exists():
+            trainer.quantile_low_model = joblib.load(qlow_joblib)
+        else:
+            qlow_path = path / f"{target.lower()}_catboost_qlow.cbm"
+            if qlow_path.exists():
+                trainer.quantile_low_model = CatBoostRegressor()
+                trainer.quantile_low_model.load_model(str(qlow_path))
         
-        qhigh_path = path / f"{target.lower()}_catboost_qhigh.cbm"
-        if qhigh_path.exists():
-            trainer.quantile_high_model = CatBoostRegressor()
-            trainer.quantile_high_model.load_model(str(qhigh_path))
+        qhigh_joblib = path / f"{target.lower()}_catboost_qhigh.joblib"
+        if qhigh_joblib.exists():
+            trainer.quantile_high_model = joblib.load(qhigh_joblib)
+        else:
+            qhigh_path = path / f"{target.lower()}_catboost_qhigh.cbm"
+            if qhigh_path.exists():
+                trainer.quantile_high_model = CatBoostRegressor()
+                trainer.quantile_high_model.load_model(str(qhigh_path))
         
         trainer.is_trained = True
         logger.info(f"Loaded CatBoost trainer for {target}")
@@ -499,6 +627,8 @@ def train_catboost_target(
         target=target,
         config=config,
         use_gpu=use_gpu,
+        use_multi_loss=config.get('use_multi_loss', True),
+        use_quantile=config.get('use_quantile_models', config.get('use_quantile', True)),
     )
     
     result = trainer.fit(

@@ -589,37 +589,43 @@ class TrainingPipeline:
             logger.info(f"Loaded {len(self.feature_cols)} feature columns")
         
         # Load CatBoost models (primary + MAE + quantile)
-        from catboost import CatBoostRegressor
-        for target in self.training_config.targets:
-            model_path = self.data_config.models_dir / f'{target.lower()}_catboost.cbm'
-            if model_path.exists():
-                model = CatBoostRegressor()
-                model.load_model(str(model_path))
-                self.models[target] = model
-                logger.info(f"Loaded {target} CatBoost model")
+        try:
+            from catboost import CatBoostRegressor
+        except Exception as exc:
+            logger.warning(f"Skipping CatBoost model loading because CatBoost is unavailable: {exc}")
+            CatBoostRegressor = None
 
-            # MAE companion
-            mae_path = self.data_config.models_dir / f'{target.lower()}_catboost_mae.cbm'
-            if mae_path.exists():
-                try:
-                    mae_m = CatBoostRegressor()
-                    mae_m.load_model(str(mae_path))
-                    self.catboost_mae_models[target] = mae_m
-                    logger.info(f"Loaded {target} MAE model")
-                except Exception as e:
-                    logger.debug(f"Failed to load MAE for {target}: {e}")
+        if CatBoostRegressor is not None:
+            for target in self.training_config.targets:
+                model_path = self.data_config.models_dir / f'{target.lower()}_catboost.cbm'
+                if model_path.exists():
+                    model = CatBoostRegressor()
+                    model.load_model(str(model_path))
+                    self.models[target] = model
+                    logger.info(f"Loaded {target} CatBoost model")
 
-            # Quantile models
-            for label in ('low', 'high'):
-                q_path = self.data_config.models_dir / f'{target.lower()}_catboost_q{label}.cbm'
-                if q_path.exists():
+                # MAE companion
+                mae_path = self.data_config.models_dir / f'{target.lower()}_catboost_mae.cbm'
+                if mae_path.exists():
                     try:
-                        q_m = CatBoostRegressor()
-                        q_m.load_model(str(q_path))
-                        self.catboost_quantile_models.setdefault(target, {})[label] = q_m
-                        logger.info(f"Loaded {target} quantile-{label} model")
+                        mae_m = CatBoostRegressor()
+                        mae_m.load_model(str(mae_path))
+                        self.catboost_mae_models[target] = mae_m
+                        logger.info(f"Loaded {target} MAE model")
                     except Exception as e:
-                        logger.debug(f"Failed to load quantile-{label} for {target}: {e}")
+                        logger.debug(f"Failed to load MAE for {target}: {e}")
+
+                # Quantile models
+                for label in ('low', 'high'):
+                    q_path = self.data_config.models_dir / f'{target.lower()}_catboost_q{label}.cbm'
+                    if q_path.exists():
+                        try:
+                            q_m = CatBoostRegressor()
+                            q_m.load_model(str(q_path))
+                            self.catboost_quantile_models.setdefault(target, {})[label] = q_m
+                            logger.info(f"Loaded {target} quantile-{label} model")
+                        except Exception as e:
+                            logger.debug(f"Failed to load quantile-{label} for {target}: {e}")
         
         # Load other models only when their files exist. Importing the wrapper
         # classes eagerly can abort on Torch initialization even when no model

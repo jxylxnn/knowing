@@ -19,21 +19,99 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 
-from src.training.trainer import TrainResult
-from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
-from src.training.feature_cache import FeatureCache, DataSplitCache
-from src.training.experiment import ExperimentTracker
-from src.training.training_logger import get_training_logger, RichTrainingLogger
-from src.models.gpu_utils import (
-    check_gpu_compatibility, 
-    clear_gpu_memory, 
-    get_gpu_memory_usage,
-    initialize_gpu_optimizations,
-    get_optimal_dataloader_workers,
-    is_bf16_supported,
-    print_gpu_summary,
-)
-from src.config.model_config import get_model_config
+try:
+    from src.training.trainer import TrainResult
+    from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
+    from src.training.feature_cache import FeatureCache, DataSplitCache
+    from src.training.experiment import ExperimentTracker
+    from src.training.training_logger import get_training_logger, RichTrainingLogger
+    from src.models.gpu_utils import (
+        check_gpu_compatibility,
+        clear_gpu_memory,
+        get_gpu_memory_usage,
+        initialize_gpu_optimizations,
+        get_optimal_dataloader_workers,
+        is_bf16_supported,
+        print_gpu_summary,
+    )
+    from src.config.model_config import get_model_config
+except ModuleNotFoundError:
+    import json
+    from dataclasses import dataclass
+
+    @dataclass
+    class TrainResult:
+        model: Any
+        metrics: Dict[str, float]
+        training_time: float
+        best_iteration: Optional[int] = None
+        feature_importance: Optional[Dict[str, float]] = None
+
+    class FeatureCache:
+        def __init__(self, cache_dir):
+            self.cache_dir = Path(cache_dir)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    class DataSplitCache(FeatureCache):
+        pass
+
+    class ExperimentTracker:
+        def __init__(self, experiments_dir='experiments', experiment_name=None):
+            self.experiments_dir = Path(experiments_dir)
+            self.experiments_dir.mkdir(parents=True, exist_ok=True)
+            self.experiment_name = experiment_name or f'run_{int(time.time())}'
+            self.params = {}
+            self.model_metrics = {}
+            self.status = 'initialized'
+        def start_run(self, config=None, notes=None):
+            self.status = 'running'
+            if config is not None:
+                self.params['config'] = config
+            if notes is not None:
+                self.params['notes'] = notes
+        def log_model_metrics(self, model_name: str, metrics: Dict[str, Any], target: Optional[str] = None):
+            key = f'{model_name}:{target}' if target else model_name
+            self.model_metrics[key] = metrics
+        def log_params(self, params: Dict[str, Any]):
+            self.params.update(params)
+        def end_run(self, status='completed'):
+            self.status = status
+            out = self.experiments_dir / f'{self.experiment_name}.json'
+            out.write_text(json.dumps(self.get_summary(), indent=2, default=str))
+        def get_summary(self):
+            return {
+                'experiment_name': self.experiment_name,
+                'status': self.status,
+                'params': self.params,
+                'model_metrics': self.model_metrics,
+            }
+
+    class RichTrainingLogger:
+        def __init__(self, use_rich: bool = False, log_gpu: bool = False):
+            self.use_rich = use_rich
+            self.log_gpu = log_gpu
+        def log_iteration(self, metrics):
+            if getattr(metrics, 'iteration', None) in (0, getattr(metrics, 'total_iterations', None)):
+                logger.info('%s %s iter=%s/%s train=%.5f val=%.5f', metrics.target, metrics.model_type, metrics.iteration, metrics.total_iterations, metrics.train_loss, metrics.val_loss)
+
+    _TRAINING_LOGGER = None
+    def get_training_logger(use_rich: bool = False, log_gpu: bool = False):
+        global _TRAINING_LOGGER
+        if _TRAINING_LOGGER is None:
+            _TRAINING_LOGGER = RichTrainingLogger(use_rich=use_rich, log_gpu=log_gpu)
+        return _TRAINING_LOGGER
+
+    from catboost_trainer import CatBoostTrainer, train_catboost_target
+    from gpu_utils import (
+        check_gpu_compatibility,
+        clear_gpu_memory,
+        get_gpu_memory_usage,
+        initialize_gpu_optimizations,
+        get_optimal_dataloader_workers,
+        is_bf16_supported,
+        print_gpu_summary,
+    )
+    from model_config import get_model_config
 
 logger = logging.getLogger(__name__)
 
@@ -440,8 +518,16 @@ class TrainingPipeline:
         val_df: pd.DataFrame,
     ) -> TrainResult:
         """Train joint multi-output neural network."""
-        from src.models.multi_output_nn import MultiOutputNN
-        from src.training.nn_trainer import NeuralNetworkTrainer
+        try:
+            from src.models.multi_output_nn import MultiOutputNN
+            from src.training.nn_trainer import NeuralNetworkTrainer
+        except ModuleNotFoundError:
+            try:
+                from multi_output_nn import MultiOutputNN
+                from nn_trainer import NeuralNetworkTrainer
+            except ModuleNotFoundError as exc:
+                logger.warning(f'Skipping joint NN training because required model code is unavailable: {exc}')
+                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
         
         nn_config = self.model_config['nn']
         
@@ -487,7 +573,14 @@ class TrainingPipeline:
     ) -> TrainResult:
         """Train LSTM temporal model."""
         # LSTM requires sequential data - use existing wrapper
-        from src.models.lstm_model import LSTMWrapper
+        try:
+            from src.models.lstm_model import LSTMWrapper
+        except ModuleNotFoundError:
+            try:
+                from lstm_model import LSTMWrapper
+            except ModuleNotFoundError as exc:
+                logger.warning(f'Skipping LSTM training because required model code is unavailable: {exc}')
+                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
         
         lstm_config = self.model_config['lstm']
         numeric_features = [c for c in self.feature_cols if c not in self.cat_features]
@@ -512,7 +605,14 @@ class TrainingPipeline:
         val_df: pd.DataFrame,
     ) -> TrainResult:
         """Train Transformer attention model."""
-        from src.models.transformer_model import TransformerWrapper
+        try:
+            from src.models.transformer_model import TransformerWrapper
+        except ModuleNotFoundError:
+            try:
+                from transformer_model import TransformerWrapper
+            except ModuleNotFoundError as exc:
+                logger.warning(f'Skipping Transformer training because required model code is unavailable: {exc}')
+                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
         
         tx_config = self.model_config['transformer']
         numeric_features = [c for c in self.feature_cols if c not in self.cat_features]

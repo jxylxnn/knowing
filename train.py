@@ -21,20 +21,46 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-# Add src to path
+# Add local directory to path so standalone uploaded files can import each other.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.training.pipeline import TrainingPipeline, create_pipeline
-from src.preprocessing.data_loader import DataLoader
-from src.preprocessing.feature_engineer import FeatureEngineer
-from src.training.training_logger import get_training_logger, RichTrainingLogger
-from src.models.gpu_utils import (
-    check_gpu_compatibility, 
-    get_gpu_memory_usage,
-    initialize_gpu_optimizations,
-    print_gpu_summary,
-)
-from src.utils.logging_config import setup_logging
+try:
+    from src.training.pipeline import TrainingPipeline, create_pipeline
+    from src.preprocessing.data_loader import DataLoader
+    from src.preprocessing.feature_engineer import FeatureEngineer
+    from src.training.training_logger import get_training_logger, RichTrainingLogger
+    from src.models.gpu_utils import (
+        check_gpu_compatibility,
+        get_gpu_memory_usage,
+        initialize_gpu_optimizations,
+        print_gpu_summary,
+    )
+    from src.utils.logging_config import setup_logging
+except ModuleNotFoundError:
+    from pipeline import TrainingPipeline, create_pipeline
+    from data_loader import DataLoader
+    from feature_engineer import FeatureEngineer
+    from gpu_utils import (
+        check_gpu_compatibility,
+        get_gpu_memory_usage,
+        initialize_gpu_optimizations,
+        print_gpu_summary,
+    )
+
+    class RichTrainingLogger:
+        def __init__(self, use_rich: bool = False, log_gpu: bool = False):
+            self.use_rich = use_rich
+            self.log_gpu = log_gpu
+
+    _TRAINING_LOGGER = None
+    def get_training_logger(use_rich: bool = False, log_gpu: bool = False):
+        global _TRAINING_LOGGER
+        if _TRAINING_LOGGER is None:
+            _TRAINING_LOGGER = RichTrainingLogger(use_rich=use_rich, log_gpu=log_gpu)
+        return _TRAINING_LOGGER
+
+    def setup_logging():
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 setup_logging()
 

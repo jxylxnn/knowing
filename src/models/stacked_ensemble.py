@@ -3,6 +3,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 import joblib
 import logging
+import os
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge, ElasticNet
@@ -12,7 +13,7 @@ from lightgbm import LGBMRegressor
 try:
     from catboost import CatBoostRegressor
     HAS_CATBOOST = True
-except ImportError:
+except Exception:
     HAS_CATBOOST = False
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error, r2_score
@@ -33,6 +34,7 @@ class StackedEnsembleModel:
         self.target_name = target_name
         # Use centralized GPU check that detects unsupported architectures
         self.use_gpu = use_gpu and check_gpu_compatibility()
+        self.cpu_threads = self._resolve_cpu_threads()
         
         if self.use_gpu:
             logger.info(f"Initializing {target_name} Ensemble for GPU (RTX 5070 Ti Mode)...")
@@ -62,7 +64,7 @@ class StackedEnsembleModel:
                 max_depth=7, 
                 subsample=0.8, 
                 colsample_bytree=0.8, 
-                n_jobs=-1, 
+                n_jobs=self.cpu_threads,
                 **gpu_params
             ),
             
@@ -72,6 +74,7 @@ class StackedEnsembleModel:
                 learning_rate=0.04, 
                 num_leaves=63, 
                 feature_fraction=0.8, 
+                n_jobs=self.cpu_threads,
                 **lgbm_gpu
             ),
             
@@ -82,6 +85,7 @@ class StackedEnsembleModel:
                 max_depth=12, # RF usually deeper
                 subsample=0.7, 
                 colsample_bytree=0.7, 
+                n_jobs=self.cpu_threads,
                 **gpu_params
             ),
             
@@ -103,6 +107,7 @@ class StackedEnsembleModel:
                 score_function='Cosine',
                 verbose=False,
                 early_stopping_rounds=100,
+                thread_count=self.cpu_threads,
                 **cb_gpu
             )
         
@@ -121,6 +126,13 @@ class StackedEnsembleModel:
         max_date = df['GAME_DATE'].max()
         days_ago = (max_date - df['GAME_DATE']).dt.days
         return np.exp(-days_ago / 180)
+
+    def _resolve_cpu_threads(self) -> int:
+        """Avoid CPU oversubscription, especially when GPU is active."""
+        cpu_count = os.cpu_count() or 4
+        if self.use_gpu:
+            return max(1, min(8, cpu_count // 2))
+        return max(1, cpu_count - 1)
 
     def fit(self, X: pd.DataFrame, y: pd.Series, df_full: pd.DataFrame):
         """Trains on residuals with STRICT time-series validation (no leakage)."""
@@ -151,6 +163,11 @@ class StackedEnsembleModel:
         
         baseline = player_avg + (opp_effect * 0.3)
         residuals = y - baseline
+
+        # Precompute to avoid repeated conversions inside folds
+        X_np = X.to_numpy()
+        residuals_np = residuals.to_numpy()
+        sample_weights_full = self._compute_sample_weights(df_full)
         
         # Time-series cross-validation (NO SHUFFLING)
         tscv = TimeSeriesSplit(n_splits=5)
@@ -174,22 +191,22 @@ class StackedEnsembleModel:
                         model.set_params(task_type='GPU')
                 
                 fit_kw = {
-                    'sample_weight': self._compute_sample_weights(df_full.iloc[train_idx])
+                    'sample_weight': sample_weights_full[train_idx]
                 }
                 # CatBoost benefits from eval_set for early stopping
                 if 'catboost' in name and HAS_CATBOOST:
-                    fit_kw['eval_set'] = (X.iloc[val_idx], residuals.iloc[val_idx])
+                    fit_kw['eval_set'] = (X_np[val_idx], residuals_np[val_idx])
                     fit_kw['use_best_model'] = True
-                
-                model.fit(X.iloc[train_idx], residuals.iloc[train_idx], **fit_kw)
-                meta_features[val_idx, i] = model.predict(X.iloc[val_idx])
+
+                model.fit(X_np[train_idx], residuals_np[train_idx], **fit_kw)
+                meta_features[val_idx, i] = model.predict(X_np[val_idx])
         
         # Train meta-learner ONLY on non-zero predictions (where OOF predictions exist)
         valid_mask = np.any(meta_features != 0, axis=1)
         self.meta_learner.fit(
             meta_features[valid_mask], 
-            residuals.iloc[valid_mask],
-            sample_weight=self._compute_sample_weights(df_full[valid_mask])
+            residuals_np[valid_mask],
+            sample_weight=sample_weights_full[valid_mask]
         )
         
         # Final refit on FULL dataset (for production predictions)
@@ -200,7 +217,7 @@ class StackedEnsembleModel:
             elif 'lgbm' in name and self.use_gpu:
                 model.set_params(device='gpu')
             
-            model.fit(X, residuals, sample_weight=self._compute_sample_weights(df_full))
+            model.fit(X_np, residuals_np, sample_weight=sample_weights_full)
         
         # Update dictionaries for inference
         self.player_avgs = df_full.groupby('PLAYER_ID')[self.target_name].mean().to_dict()
@@ -210,7 +227,7 @@ class StackedEnsembleModel:
         # Optional: Train fallback on full Y
         self.fallback_model = LGBMRegressor(n_estimators=100, learning_rate=0.05, num_leaves=31, verbose=-1)
         if self.use_gpu: self.fallback_model.set_params(device='gpu')
-        self.fallback_model.fit(X, y, sample_weight=self._compute_sample_weights(df_full))
+        self.fallback_model.fit(X_np, y.to_numpy(), sample_weight=sample_weights_full)
         
         self.is_trained = True
         logger.info(f"Successfully trained {self.target_name} ensemble with strict TS validation.")
@@ -221,6 +238,7 @@ class StackedEnsembleModel:
         
         X = X.reindex(columns=self.feature_names, fill_value=0)
         X = X.apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+        X_np = X.to_numpy()
         
         n_samples = len(X)
         predictions = np.zeros(n_samples)
@@ -231,24 +249,23 @@ class StackedEnsembleModel:
         # --- KNOWN PLAYERS ---
         if known_mask.any():
             known_idx = np.where(known_mask)[0]
-            X_known = X.iloc[known_idx]
+            X_known_np = X_np[known_idx]
             
             player_base = np.array([self.player_avgs.get(pid, self.league_avg) for pid in player_ids[known_idx]])
             opp_ids = df_meta.iloc[known_idx]['OPPONENT_ID'].values
             opp_adj = np.array([self.opp_effects.get(oid, 0) for oid in opp_ids])
             baseline = player_base + (opp_adj * 0.3)
             
-            meta_features = np.zeros((len(X_known), len(self.base_models)))
-            X_numpy = X_known.values
+            meta_features = np.zeros((len(X_known_np), len(self.base_models)))
             
             for i, (name, model) in enumerate(self.base_models.items()):
                 try:
                     if name in ['xgb', 'rf_proxy', 'lgbm']:
-                         meta_features[:, i] = model.predict(X_numpy)
+                         meta_features[:, i] = model.predict(X_known_np)
                     elif name == 'catboost' and HAS_CATBOOST:
-                        meta_features[:, i] = model.predict(X_numpy)
+                        meta_features[:, i] = model.predict(X_known_np)
                     else:
-                        meta_features[:, i] = model.predict(X_known)
+                        meta_features[:, i] = model.predict(X_known_np)
                 except Exception as e:
                     logger.debug(f"Base model {name} prediction failed: {e}")
                     meta_features[:, i] = 0
