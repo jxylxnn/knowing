@@ -422,6 +422,11 @@ class NeuralNetworkTrainer(BaseTrainer):
         - Persistent workers to reduce overhead
         """
         dataset = TensorDataset(X, y)
+        if len(dataset) == 0:
+            raise ValueError(
+                f"{self.model_name} received an empty dataset. "
+                "Check the temporal split or input filtering before training."
+            )
         
         # Use optimal workers determined at initialization
         num_workers = self._optimal_workers
@@ -431,12 +436,13 @@ class NeuralNetworkTrainer(BaseTrainer):
         
         # Persistent workers reduce overhead between epochs
         persistent_workers = num_workers > 0
+        drop_last = shuffle and len(dataset) > batch_size
         
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            drop_last=shuffle,
+            drop_last=drop_last,
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers if num_workers > 0 else False,
@@ -451,6 +457,12 @@ class NeuralNetworkTrainer(BaseTrainer):
         - Non-blocking tensor transfers
         """
         self.model.train()
+        num_batches = len(loader)
+        if num_batches == 0:
+            raise ValueError(
+                f"{self.model_name} training loader is empty. "
+                "Reduce the batch size or provide more training rows."
+            )
         total_loss = 0.0
         accumulation_steps = self.gradient_accumulation_steps
         
@@ -503,11 +515,17 @@ class NeuralNetworkTrainer(BaseTrainer):
                 optimizer.step()
             optimizer.zero_grad()
         
-        return total_loss / len(loader)
+        return total_loss / num_batches
     
     def _validate_epoch(self, loader: DataLoader) -> float:
         """Validate for one epoch with proper AMP context."""
         self.model.eval()
+        num_batches = len(loader)
+        if num_batches == 0:
+            raise ValueError(
+                f"{self.model_name} validation loader is empty. "
+                "Reduce the batch size or provide more validation rows."
+            )
         total_loss = 0.0
         
         with torch.no_grad():
@@ -527,7 +545,7 @@ class NeuralNetworkTrainer(BaseTrainer):
                 
                 total_loss += loss.item()
         
-        return total_loss / len(loader) if len(loader) > 0 else 0.0
+        return total_loss / num_batches
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], **kwargs) -> np.ndarray:
         """Make predictions."""

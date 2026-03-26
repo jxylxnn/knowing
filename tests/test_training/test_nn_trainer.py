@@ -68,11 +68,28 @@ def _install_fake_torch(monkeypatch):
     class TensorDataset:
         def __init__(self, *args, **kwargs):
             self.args = args
+        def __len__(self):
+            if not self.args:
+                return 0
+            return len(self.args[0])
 
     class DataLoader:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
+        def __len__(self):
+            if not self.args:
+                return 0
+            dataset = self.args[0]
+            batch_size = self.kwargs.get("batch_size", 1)
+            if batch_size <= 0:
+                return 0
+            dataset_len = len(dataset)
+            if dataset_len == 0:
+                return 0
+            if self.kwargs.get("drop_last"):
+                return dataset_len // batch_size
+            return (dataset_len + batch_size - 1) // batch_size
 
     data_mod.TensorDataset = TensorDataset
     data_mod.DataLoader = DataLoader
@@ -125,3 +142,40 @@ def test_nn_trainer_handles_tuple_outputs(monkeypatch):
 
     assert trainer._extract_primary_output((means, logvars)) is means
     assert np.isclose(trainer._compute_loss((means, logvars), target), 0.5)
+
+
+def test_nn_trainer_keeps_small_datasets_in_loader(monkeypatch):
+    _install_fake_torch(monkeypatch)
+
+    src_pkg = types.ModuleType("src")
+    src_pkg.__path__ = [str(ROOT / "src")]
+    training_pkg = types.ModuleType("src.training")
+    training_pkg.__path__ = [str(ROOT / "src" / "training")]
+    models_pkg = types.ModuleType("src.models")
+    models_pkg.__path__ = [str(ROOT / "src" / "models")]
+    monkeypatch.setitem(sys.modules, "src", src_pkg)
+    monkeypatch.setitem(sys.modules, "src.training", training_pkg)
+    monkeypatch.setitem(sys.modules, "src.models", models_pkg)
+
+    _load_module("src.models.gpu_utils", ROOT / "src" / "models" / "gpu_utils.py", monkeypatch)
+    _load_module("src.training.trainer", ROOT / "src" / "training" / "trainer.py", monkeypatch)
+    nn_trainer = _load_module(
+        "src.training.nn_trainer",
+        ROOT / "src" / "training" / "nn_trainer.py",
+        monkeypatch,
+    )
+
+    trainer = nn_trainer.NeuralNetworkTrainer.__new__(nn_trainer.NeuralNetworkTrainer)
+    trainer.model_name = "joint_nn"
+    trainer.use_gpu = False
+    trainer.device = nn_trainer.torch.device("cpu")
+    trainer._optimal_workers = 0
+
+    loader = trainer._create_loader(
+        np.zeros((4, 2), dtype=np.float32),
+        np.zeros((4, 1), dtype=np.float32),
+        batch_size=32,
+        shuffle=True,
+    )
+
+    assert loader.kwargs["drop_last"] is False

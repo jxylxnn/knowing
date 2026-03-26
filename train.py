@@ -79,6 +79,23 @@ except ImportError:
     RICH_AVAILABLE = False
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_runtime_path(path_value: str, default_name: str) -> Path:
+    """Resolve default relative paths against the project root.
+
+    This keeps notebook and `python /abs/path/train.py` execution aligned with
+    the repository layout while still honoring explicit custom paths.
+    """
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    if path_value == default_name:
+        return PROJECT_ROOT / path
+    return path
+
+
 def print_banner(console=None):
     """Print the training banner with rich formatting."""
     banner_text = """
@@ -206,6 +223,10 @@ Examples:
     )
     
     args = parser.parse_args()
+
+    data_dir = resolve_runtime_path(args.data_dir, 'data')
+    models_dir = resolve_runtime_path(args.models_dir, 'models')
+    cache_dir = resolve_runtime_path(args.cache_dir, 'cache/training')
     
     # Initialize rich console and training logger
     console = Console() if RICH_AVAILABLE else None
@@ -224,9 +245,12 @@ Examples:
             logger.info(f"GPU detected: {gpu_name} ({vram:.1f}GB VRAM)")
         except:
             pass
+    elif not args.no_gpu:
+        logger.info("CUDA is unavailable or incompatible. Training will run on CPU.")
+        if console and RICH_AVAILABLE:
+            console.print("[yellow]GPU unavailable or incompatible; falling back to CPU training.[/yellow]")
     
     # Check for data files
-    data_dir = Path(args.data_dir)
     players_file = data_dir / 'nba_players.csv'
     games_file = data_dir / 'nba_games.csv'
     
@@ -276,13 +300,13 @@ Examples:
         
         pipeline = create_pipeline(
             mode=args.mode,
-            data_dir=args.data_dir,
-            models_dir=args.models_dir,
-            cache_dir=args.cache_dir,
+            data_dir=data_dir,
+            models_dir=models_dir,
+            cache_dir=cache_dir,
             model_size=args.model_size,
             parallel=args.parallel,
             max_workers=args.max_workers,
-            use_gpu=not args.no_gpu,
+            use_gpu=gpu_available,
             experiment_name=args.experiment_name,
         )
         
@@ -349,7 +373,7 @@ Examples:
                 
                 console.print(cb_table)
             
-            console.print(f"\n[bold]Models saved to:[/bold] {args.models_dir}")
+            console.print(f"\n[bold]Models saved to:[/bold] {models_dir}")
             console.print(f"[bold]Experiment logs:[/bold] experiments/{summary['experiment_name']}")
             console.print()
         else:
@@ -372,7 +396,7 @@ Examples:
                         rmse = result.metrics.get('rmse', 0)
                         print(f"  {target}: MAE={mae:.3f}, RMSE={rmse:.3f} ({result.training_time:.1f}s)")
             
-            print(f"\nModels saved to: {args.models_dir}")
+            print(f"\nModels saved to: {models_dir}")
             print(f"Experiment logs: experiments/{summary['experiment_name']}")
             print("=" * 70 + "\n")
         

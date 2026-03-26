@@ -54,26 +54,38 @@ class BaseTrainer(ABC):
         """
         self.model_name = model_name
         self.config = config
-        self.use_gpu = use_gpu
         self.random_state = random_state
         self.model: Optional[Any] = None
         self.is_trained: bool = False
         self.training_history: List[Dict[str, Any]] = []
-        
+
+        import torch
+        requested_gpu = bool(use_gpu) or (device is not None and str(device).startswith('cuda'))
+
         # Convert device to torch.device object (handles both str and torch.device inputs)
         if device is None:
-            device = 'cuda' if use_gpu else 'cpu'
-        
-        import torch
+            device = 'cuda' if requested_gpu and torch.cuda.is_available() else 'cpu'
+
         if isinstance(device, str):
-            self.device = torch.device(device)
+            resolved_device = torch.device(device)
         elif isinstance(device, torch.device):
-            self.device = device
+            resolved_device = device
         else:
             raise TypeError(f"device must be str or torch.device, got {type(device)}")
+
+        if resolved_device.type == 'cuda' and not torch.cuda.is_available():
+            logger.warning(
+                "CUDA device requested for '%s' but no compatible CUDA runtime is available. "
+                "Falling back to CPU.",
+                model_name,
+            )
+            resolved_device = torch.device('cpu')
+
+        self.device = resolved_device
+        self.use_gpu = self.device.type == 'cuda'
         
         logger.info(f"Initialized {self.__class__.__name__} for '{model_name}' "
-                   f"(GPU={use_gpu}, device={self.device})")
+                   f"(GPU={self.use_gpu}, device={self.device})")
     
     @abstractmethod
     def fit(

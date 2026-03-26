@@ -200,7 +200,11 @@ class TrainingPipeline:
         self.mode_config = self.TRAINING_MODES[mode]
         
         # Hardware setup
-        self.use_gpu = bool(use_gpu) if use_gpu is not None else False
+        gpu_requested = True if use_gpu is None else bool(use_gpu)
+        gpu_available = check_gpu_compatibility() if gpu_requested else False
+        if gpu_requested and not gpu_available:
+            logger.info("GPU requested but unavailable or incompatible. Falling back to CPU training.")
+        self.use_gpu = gpu_requested and gpu_available
         self.parallel = parallel
         if self.use_gpu:
             self.gpu_settings = initialize_gpu_optimizations(log_summary=False)
@@ -263,7 +267,7 @@ class TrainingPipeline:
     def prepare_data(
         self,
         train_df: pd.DataFrame,
-        test_date: str = '2024-03-01',
+        test_date: Optional[str] = None,
         val_ratio: float = 0.15,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Prepare and split data for training.
@@ -276,24 +280,70 @@ class TrainingPipeline:
         Returns:
             Tuple of (fit_df, val_df, test_df)
         """
-        # Sort by date
-        df = train_df.sort_values('GAME_DATE').reset_index(drop=True)
-        
+        if 'GAME_DATE' not in train_df.columns:
+            raise ValueError("Training data must include a GAME_DATE column")
+        if not 0 < val_ratio < 1:
+            raise ValueError(f"val_ratio must be between 0 and 1, got {val_ratio}")
+
+        df = train_df.copy()
+        df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
+        df = df.dropna(subset=['GAME_DATE']).sort_values('GAME_DATE').reset_index(drop=True)
+
+        if len(df) < 3:
+            raise ValueError(
+                f"Need at least 3 dated rows to build train/validation/test splits, got {len(df)}"
+            )
+
+        split_date_str = test_date or self.model_config.get('training', {}).get('test_split_date', '2024-03-01')
+        split_date = pd.to_datetime(split_date_str)
+
         # Temporal split for test
-        test_df = df[df['GAME_DATE'] >= test_date].copy()
-        train_before = df[df['GAME_DATE'] < test_date].copy()
-        
+        test_df = df[df['GAME_DATE'] >= split_date].copy()
+        train_before = df[df['GAME_DATE'] < split_date].copy()
+
+        if train_before.empty or test_df.empty:
+            fallback_test_size = min(max(1, int(len(df) * 0.15)), len(df) - 2)
+            if fallback_test_size < 1:
+                raise ValueError(
+                    "Unable to create a non-empty temporal holdout split. "
+                    "Add more historical rows before training."
+                )
+
+            logger.warning(
+                "Configured test split date %s produced an empty train or test partition. "
+                "Falling back to a chronological 85/15 split for this run.",
+                split_date.strftime('%Y-%m-%d'),
+            )
+            train_before = df.iloc[:-fallback_test_size].copy()
+            test_df = df.iloc[-fallback_test_size:].copy()
+
         # Split train into fit/val
+        if len(train_before) < 2:
+            raise ValueError(
+                "Need at least 2 rows before the test split date to create fit/validation sets. "
+                "Fetch more historical data or choose an earlier split."
+            )
+
         split_idx = int(len(train_before) * (1 - val_ratio))
+        split_idx = min(max(split_idx, 1), len(train_before) - 1)
         fit_df = train_before.iloc[:split_idx].copy()
         val_df = train_before.iloc[split_idx:].copy()
+
+        if fit_df.empty or val_df.empty or test_df.empty:
+            raise ValueError(
+                "Temporal split produced an empty fit, validation, or test partition. "
+                "Adjust the split date or fetch more data."
+            )
         
         # Select features
         self.feature_cols = self._select_features(fit_df)
         self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] 
                            if c in self.feature_cols]
         
-        logger.info(f"Data prepared: fit={len(fit_df)}, val={len(val_df)}, test={len(test_df)}")
+        logger.info(
+            f"Data prepared: fit={len(fit_df)}, val={len(val_df)}, test={len(test_df)} "
+            f"(split_date={split_date.strftime('%Y-%m-%d')})"
+        )
         logger.info(f"Features: {len(self.feature_cols)} (categorical: {len(self.cat_features)})")
         
         return fit_df, val_df, test_df
