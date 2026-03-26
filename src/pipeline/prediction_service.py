@@ -8,7 +8,7 @@ import numpy as np
 
 from src.config import Config
 from src.models.base import PredictionResult, ModelRegistry
-from src.pipeline.training_pipeline import TrainingPipeline
+from src.training.pipeline import TrainingPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class PredictionService:
         
         # Get feature columns
         self.feature_cols = self.pipeline.feature_cols
+        self.blend_weights = getattr(self.pipeline, 'blend_weights', {})
         
         # Fallback values
         self._fallback_values = {
@@ -135,7 +136,20 @@ class PredictionService:
             logger.error(f"Error preparing features: {e}")
             return self._fallback_prediction(player_context_df)
         
-        # 1. Base predictions from CatBoost models (blended RMSE+MAE)
+        transformer_model = getattr(self.pipeline, 'transformer_model', None) or getattr(self.pipeline, 'attention_model', None)
+        transformer_preds = None
+        seq_features = None
+        if transformer_model is not None and history_df is not None and self.feature_cols:
+            seq_len = int(getattr(transformer_model, 'seq_len', 0) or 0)
+            if seq_len > 0 and len(history_df) >= seq_len:
+                seq_features = history_df[self.feature_cols].tail(seq_len).apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+                try:
+                    transformer_preds = transformer_model.predict(seq_features)[0]
+                except Exception as e:
+                    logger.debug(f"Transformer prediction failed: {e}")
+                    transformer_preds = None
+
+        # 1. Base predictions from CatBoost models
         for target in self.config.training.targets:
             if target not in self.pipeline.models:
                 pred = self._get_fallback_value(player_context_df, target)
@@ -146,18 +160,10 @@ class PredictionService:
             model = self.pipeline.models[target]
             
             try:
-                # Use blended RMSE+MAE when MAE companion exists
-                mae_models = getattr(self.pipeline, 'catboost_mae_models', {})
-                if 'CatBoost' in str(type(model)) and target in mae_models:
-                    rmse_pred = model.predict(X)
-                    mae_pred = mae_models[target].predict(X)
-                    w = self.config.catboost.multi_loss_rmse_weight
-                    blended = rmse_pred * w + mae_pred * (1 - w)
-                    pred = blended[0]
-                elif hasattr(model, 'predict'):
+                if hasattr(model, 'predict'):
                     pred = model.predict(X)[0]
                 else:
-                    pred = model.predict(X, df_meta=player_context_df)[0]
+                    pred = self._get_fallback_value(player_context_df, target)
                 
                 if pd.isna(pred) or pred < 0:
                     pred = self._get_fallback_value(player_context_df, target)
@@ -173,53 +179,25 @@ class PredictionService:
                         ci_low = float(q['low'].predict(X)[0])
                         ci_high = float(q['high'].predict(X)[0])
                         predictions[f'{target}_STD'] = (ci_high - ci_low) / 2.56
+                if transformer_preds is not None and target in self.config.training.targets:
+                    blend_cfg = self.blend_weights.get(target, {})
+                    cb_weight = float(blend_cfg.get('catboost', 1.0))
+                    tx_weight = float(blend_cfg.get('transformer', 0.0))
+                    tx_idx = self.config.training.targets.index(target)
+                    tx_pred = float(transformer_preds[tx_idx])
+                    predictions[target] = float(predictions[target] * cb_weight + tx_pred * tx_weight)
+                    base_predictions[target] = predictions[target]
+                    if f'{target}_STD' in predictions:
+                        tx_uncertainty = float(blend_cfg.get('transformer_mae', predictions[f'{target}_STD']))
+                        predictions[f'{target}_STD'] = float(
+                            max(0.0, predictions[f'{target}_STD'] * cb_weight + tx_uncertainty * tx_weight)
+                        )
                 
             except Exception as e:
                 logger.warning(f"Prediction failed for {target}: {e}")
                 pred = self._get_fallback_value(player_context_df, target)
                 predictions[target] = pred
                 base_predictions[target] = pred
-        
-        # 2. Joint NN refinement
-        if self.pipeline.joint_model is not None:
-            try:
-                if hasattr(self.pipeline.joint_model, 'is_trained'):
-                    if self.pipeline.joint_model.is_trained:
-                        joint_means, joint_stds = self.pipeline.joint_model.predict(X)
-                        joint_means = joint_means[0]
-                        joint_stds = joint_stds[0]
-                        
-                        core_targets = self.config.training.targets[:3]
-                        for i, target in enumerate(core_targets):
-                            base_val = base_predictions[target]
-                            joint_val = joint_means[i]
-                            
-                            if (0.1 < joint_val / (base_val + 1e-6) < 10):
-                                predictions[target] = base_val * 0.7 + joint_val * 0.3
-                                predictions[f'{target}_STD'] = joint_stds[i]
-            except Exception as e:
-                logger.debug(f"Joint NN prediction failed: {e}")
-        
-        # 3. Temporal model refinement
-        if self.pipeline.temporal_model is not None and history_df is not None:
-            try:
-                if hasattr(self.pipeline.temporal_model, 'seq_len'):
-                    if len(history_df) >= self.pipeline.temporal_model.seq_len:
-                        seq_features = history_df[self.feature_cols].tail(
-                            self.pipeline.temporal_model.seq_len
-                        ).apply(pd.to_numeric, errors='coerce').fillna(0).values
-                        
-                        temp_preds = self.pipeline.temporal_model.predict(seq_features)[0]
-                        core_targets = self.config.training.targets[:3]
-                        
-                        for i, target in enumerate(core_targets):
-                            base_val = base_predictions[target]
-                            temp_val = temp_preds[i]
-                            
-                            if 0.1 < temp_val / (base_val + 1e-6) < 10:
-                                predictions[target] = base_val * 0.85 + temp_val * 0.15
-            except Exception as e:
-                logger.debug(f"Temporal prediction failed: {e}")
         
         return predictions
     
