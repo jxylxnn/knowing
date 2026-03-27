@@ -100,3 +100,28 @@ class TestFallbackPredictor:
         
         result = manager._get_fallback_value(df, 'REB')
         assert result == 4.5
+
+    def test_transformer_prediction_uses_all_targets(self):
+        """Test transformer predictions map to all six output targets."""
+        from src.models.model_manager import ModelManager
+
+        import numpy as np
+        import pandas as pd
+
+        class DummyTransformer:
+            seq_len = 2
+
+            def predict(self, seq):
+                assert seq.shape == (2, 2)
+                return np.array([[1, 2, 3, 4, 5, 6]], dtype=np.float32)
+
+        manager = ModelManager.__new__(ModelManager)
+        manager.targets = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
+        manager.feature_cols = ['f1', 'f2']
+        manager.transformer_model = DummyTransformer()
+
+        history_df = pd.DataFrame({'f1': [10, 20], 'f2': [30, 40]})
+
+        assert manager._predict_transformer_target('PTS', history_df) == 1.0
+        assert manager._predict_transformer_target('STL', history_df) == 4.0
+        assert manager._predict_transformer_target('TOV', history_df) == 6.0

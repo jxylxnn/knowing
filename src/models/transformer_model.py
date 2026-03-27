@@ -79,7 +79,7 @@ class PositionalEncoding(nn.Module):
 class TransformerModel(nn.Module):
     """Transformer for processing long player stat trajectories with Self-Attention."""
     def __init__(self, input_dim: int, d_model: int = 128, nhead: int = 8, 
-                 num_layers: int = 4, output_dim: int = 3, dropout: float = 0.1,
+                 num_layers: int = 4, output_dim: int = 6, dropout: float = 0.1,
                  dim_feedforward: int = 512, grad_checkpoint: bool = False):
         super(TransformerModel, self).__init__()
         
@@ -134,17 +134,26 @@ class TransformerWrapper:
         'use_compile': False,
     }
     
-    def __init__(self, input_dim: int, seq_len: int = 50, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        input_dim: int,
+        seq_len: int = 50,
+        config: Optional[Dict[str, Any]] = None,
+        output_dim: Optional[int] = None,
+    ):
         self.seq_len = seq_len
         self.device = get_device()
         
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
+        self.output_dim = int(output_dim if output_dim is not None else self.config.get('output_dim', 6))
+        self.config['output_dim'] = self.output_dim
         
         self.model = TransformerModel(
             input_dim=input_dim,
             d_model=self.config['d_model'],
             nhead=self.config['nhead'],
             num_layers=self.config['num_layers'],
+            output_dim=self.output_dim,
             dim_feedforward=self.config['dim_feedforward'],
             dropout=self.config['dropout'],
             grad_checkpoint=self.config['grad_checkpoint']
@@ -313,6 +322,7 @@ class TransformerWrapper:
             'feat_std': self.feat_std,
             'input_dim': self.input_dim,
             'seq_len': self.seq_len,
+            'output_dim': self.output_dim,
             'config': self.config,
         }
         joblib.dump(state, path)
@@ -324,10 +334,19 @@ class TransformerWrapper:
         state = joblib.load(path)
         
         config = state.get('config', {})
+        output_dim = state.get('output_dim')
+        if output_dim is None:
+            model_state = state.get('model_state', {})
+            fc_weight = model_state.get('fc.weight')
+            if fc_weight is not None:
+                output_dim = int(fc_weight.shape[0])
+            else:
+                output_dim = int(config.get('output_dim', 6))
         instance = cls(
             input_dim=state['input_dim'], 
             seq_len=state['seq_len'],
-            config=config
+            config=config,
+            output_dim=output_dim,
         )
         instance.model.load_state_dict(state['model_state'])
         instance.feat_mean = state['feat_mean']

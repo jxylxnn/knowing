@@ -326,7 +326,7 @@ class ModelManager:
         if preds.ndim == 2:
             preds = preds[0]
 
-        target_idx = self.CORE_TARGETS.index(target) if target in self.CORE_TARGETS else None
+        target_idx = self.targets.index(target) if target in self.targets else None
         if target_idx is None or target_idx >= len(preds):
             return None
         return float(preds[target_idx])

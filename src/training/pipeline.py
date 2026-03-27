@@ -466,6 +466,7 @@ class TrainingPipeline:
             input_dim=len(nn_features),
             seq_len=seq_len,
             config=transformer_cfg,
+            output_dim=len(self.TARGETS),
         )
 
         model.fit(fit_df, nn_features, self.TARGETS)
