@@ -73,69 +73,6 @@ class BaseModel(Protocol):
             or None if not supported by the model
         """
         ...
-
-
-class EnsembleModel(ABC):
-    """Abstract base class for ensemble methods.
-    
-    Provides common functionality for combining multiple models.
-    """
-    
-    def __init__(
-        self, 
-        models: List[BaseModel], 
-        weights: Optional[np.ndarray] = None
-    ):
-        """Initialize ensemble.
-        
-        Args:
-            models: List of base models
-            weights: Optional weights for each model (uniform if None)
-        """
-        self.models = models
-        self.weights = weights or np.ones(len(models)) / len(models)
-    
-    @abstractmethod
-    def fit_weights(
-        self, 
-        X_val: pd.DataFrame, 
-        y_val: np.ndarray
-    ) -> None:
-        """Optimize ensemble weights on validation data.
-        
-        Args:
-            X_val: Validation features
-            y_val: Validation targets
-        """
-        ...
-    
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Weighted average of model predictions.
-        
-        Args:
-            X: Feature matrix
-            
-        Returns:
-            Ensemble predictions
-        """
-        predictions = np.array([model.predict(X) for model in self.models])
-        return np.average(predictions, axis=0, weights=self.weights)
-    
-    def predict_with_uncertainty(self, X: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Predict with uncertainty estimation.
-        
-        Args:
-            X: Feature matrix
-            
-        Returns:
-            Tuple of (predictions, standard deviations)
-        """
-        predictions = np.array([model.predict(X) for model in self.models])
-        mean = np.average(predictions, axis=0, weights=self.weights)
-        std = np.std(predictions, axis=0)
-        return mean, std
-
-
 class ModelMetadata:
     """Metadata for a trained model.
     

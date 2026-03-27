@@ -33,9 +33,10 @@ from src.models.gpu_utils import (
     get_compile_status,
     get_optimal_dataloader_workers,
     is_bf16_supported,
+    get_autocast_dtype,
+    create_grad_scaler,
     check_flash_attention_available,
 )
-from src.models.lstm_model import PlayerSequenceDataset
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,20 @@ cudnn.benchmark = True
 
 # Check if Flash Attention is available
 _FLASH_ATTENTION_AVAILABLE = check_flash_attention_available()
+
+
+class PlayerSequenceDataset(Dataset):
+    """Dataset for sequence-based player stat prediction."""
+
+    def __init__(self, sequences: np.ndarray, targets: np.ndarray):
+        self.sequences = torch.from_numpy(np.asarray(sequences, dtype=np.float32))
+        self.targets = torch.from_numpy(np.asarray(targets, dtype=np.float32))
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int):
+        return self.sequences[idx], self.targets[idx]
 
 
 class PositionalEncoding(nn.Module):
@@ -204,11 +219,20 @@ class TransformerWrapper:
         self.feat_std = X.std(axis=(0, 1)) + 1e-6
         X = (X - self.feat_mean) / self.feat_std
         
-        from src.models.lstm_model import PlayerSequenceDataset
         dataset = PlayerSequenceDataset(X, y)
-        num_workers = 4 if self.device.type == 'cuda' else 2
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True,
-                            num_workers=num_workers, persistent_workers=(num_workers > 0))
+        pin_memory = self.device.type == 'cuda'
+        num_workers = get_optimal_dataloader_workers() if pin_memory else 0
+        loader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': True,
+            'pin_memory': pin_memory,
+            'num_workers': num_workers,
+            'drop_last': True,
+        }
+        if num_workers > 0:
+            loader_kwargs['persistent_workers'] = True
+            loader_kwargs['prefetch_factor'] = 2
+        loader = DataLoader(dataset, **loader_kwargs)
         
         optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
         total_steps = epochs * len(loader)
@@ -217,7 +241,9 @@ class TransformerWrapper:
         criterion = nn.MSELoss()
         
         device_str = self.device.type
-        grad_scaler = torch.amp.GradScaler(device_str, enabled=(device_str == 'cuda'))
+        use_amp = device_str == 'cuda'
+        amp_dtype = get_autocast_dtype() if use_amp else None
+        grad_scaler = create_grad_scaler(device_str, enabled=use_amp)
         
         best_loss = float('inf')
         patience_counter = 0
@@ -231,14 +257,19 @@ class TransformerWrapper:
                 batch_y = batch_y.to(self.device, non_blocking=True)
                 
                 optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast(device_str, enabled=(device_str == 'cuda')):
+                with torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
                     preds = self.model(batch_X)
                     loss = criterion(preds, batch_y)
-                grad_scaler.scale(loss).backward()
-                grad_scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+                if grad_scaler is not None:
+                    grad_scaler.scale(loss).backward()
+                    grad_scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
             
@@ -265,9 +296,12 @@ class TransformerWrapper:
             return None
         self.model.eval()
         sequence = (sequence - self.feat_mean) / self.feat_std
-        seq_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0).to(self.device)
+        seq_tensor = torch.from_numpy(np.asarray(sequence, dtype=np.float32)).unsqueeze(0).to(self.device)
         
-        with torch.no_grad():
+        device_str = self.device.type
+        use_amp = device_str == 'cuda'
+        amp_dtype = get_autocast_dtype() if use_amp else None
+        with torch.no_grad(), torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
             preds = self.model(seq_tensor).cpu().numpy()
         return preds
 

@@ -59,18 +59,10 @@ Multi-model ensemble architecture:
 | File | Purpose | Architecture |
 |------|---------|--------------|
 | `model_manager.py` | Orchestrates training/prediction | Meta-coordinator |
-| `stacked_ensemble.py` | Ensemble blending | Ridge regression meta-learner |
-| `advanced_trainer.py` | Training utilities | Training loops, early stopping |
 | `gpu_utils.py` | GPU handling | CUDA detection, tensor operations |
-| `lstm_model.py` | Temporal patterns | Bidirectional LSTM |
 | `transformer_model.py` | Attention mechanism | Transformer encoder |
-| `gnn_model.py` | Team chemistry | Graph Neural Network |
-| `multi_output_nn.py` | Multi-stat correlation | Joint neural network |
-| `temporal_attention.py` | Advanced temporal | Custom attention layers |
 | `minutes_predictor.py` | Minutes allocation | Regression model |
-| `model_loader.py` | Model persistence | Save/load utilities |
 | `base.py` | Base model classes | Abstract interfaces |
-| `torch_sklearn.py` | Sklearn-compatible PyTorch | Wrapper classes |
 | `error_calibration.py` | Uncertainty calibration | Error distribution modeling |
 
 **Ensemble Weights**:
@@ -90,10 +82,8 @@ GPU-accelerated Monte Carlo game simulation:
 |------|---------|
 | `game_simulator.py` | Main game simulation |
 | `season_simulator.py` | Full season simulation |
-| `enhanced_game_simulator.py` | Advanced simulation features |
 | `four_factors_engine.py` | Four factors model |
 | `game_context_engine.py` | Game context adjustments |
-| `lineup_predictor.py` | Lineup probability modeling |
 | `player_correlation_engine.py` | Stat correlation handling |
 | `possession_simulator.py` | Possession-level simulation |
 | `report_generator.py` | Output formatting |
@@ -275,10 +265,7 @@ models/
 ├── stl_catboost.cbm         # Steals model
 ├── blk_catboost.cbm         # Blocks model
 ├── tov_catboost.cbm         # Turnovers model
-├── joint_stats_nn.pt        # Multi-output NN
-├── temporal_lstm.pkl        # LSTM model
 ├── attention_transformer.pkl # Transformer
-├── team_chemistry_gnn.pkl   # GNN model
 ├── blenders.pkl             # Ensemble weights
 └── feature_cols.pkl         # Feature names
 ```

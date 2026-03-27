@@ -66,12 +66,8 @@ Searching the codebase for `.device.type` reveals 25 occurrences across multiple
 |------|------|--------------|
 | `src/training/nn_trainer.py` | 322 | `self.device.type == 'cuda'` |
 | `src/simulation/season_simulator.py` | 63 | `self.game_simulator.device.type == 'cuda'` |
-| `src/models/advanced_trainer.py` | 58, 91, 139, 216, 224, 303, 320, 348, 446, 552 | `self.device.type == 'cuda'` |
-| `src/models/gnn_model.py` | 187-188 | `self.device.type` |
-| `src/models/lstm_model.py` | 193, 203-204 | `self.device.type == 'cuda'` |
-| `src/models/temporal_attention.py` | 179, 189-190 | `self.device.type == 'cuda'` |
+| Legacy model modules | various | `self.device.type == 'cuda'` |
 | `src/models/transformer_model.py` | 209, 219-220 | `self.device.type == 'cuda'` |
-| `src/models/multi_output_nn.py` | 201, 222-223, 239, 258, 292 | `self.device.type == 'cuda'` |
 | `src/models/gpu_utils.py` | 651 | `device.type == 'cuda'` |
 
 ## Fix Strategy

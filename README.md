@@ -17,6 +17,7 @@ A production-grade machine learning system for predicting NBA player statistics 
 - [Key Features](#key-features)
 - [Tech Stack](#tech-stack)
 - [Installation](#installation)
+- [Cache Cleanup](#cache-cleanup)
 - [Pipeline Deep Dive](#pipeline-deep-dive)
   - [Data Collection](#1-data-collection)
   - [Feature Engineering](#2-feature-engineering)
@@ -58,11 +59,11 @@ The system is designed for sports analytics, fantasy sports optimization, and be
 |  |   ----------     |    | -----------------   |    |    ---------       |        |
 |  |                  |    |                     |    |                    |        |
 |  |  * NBA.com API   |--->| * Rolling Averages  |--->| * CatBoost (x6)    |        |
-|  |  * Injury Report |    | * Efficiency Stats  |    | * LSTM Temporal    |        |
-|  |  * Betting Lines |    | * Bayesian Est.     |    | * Transformer      |        |
-|  |  * Starting 5    |    | * Matchup History   |    | * GNN Chemistry    |        |
-|  |  * Defense Data  |    | * Pace Adjustment   |    | * Joint Multi-NN   |        |
-|  |  * Schedule      |    | * 15-Phase Pipeline |    | * Stacked Ensemble |        |
+|  |  * Injury Report |    | * Efficiency Stats  |    | * Transformer      |        |
+|  |  * Betting Lines |    | * Bayesian Est.     |    | * CatBoost blend   |        |
+|  |  * Starting 5    |    | * Matchup History   |    | * Quantiles/CI     |        |
+|  |  * Defense Data  |    | * Pace Adjustment   |    | * Active stack     |        |
+|  |  * Schedule      |    | * 15-Phase Pipeline |    | * Simulation CLI   |        |
 |  |                  |    |                     |    |                    |        |
 |  +------------------+    +--------------------+    +--------------------+        |
 |           |                                                 |                     |
@@ -100,11 +101,7 @@ The system is designed for sports analytics, fantasy sports optimization, and be
 | Model | Purpose | Key Strength |
 |-------|---------|--------------|
 | **CatBoost** | Primary predictor | Handles categorical features, GPU-accelerated |
-| **LSTM** | Temporal patterns | Captures sequence dependencies in recent games |
 | **Transformer** | Attention mechanism | Long-range dependencies, game context |
-| **Graph Neural Network** | Team chemistry | Player synergy and lineup interactions |
-| **Joint Neural Network** | Multi-output | Correlation between PTS/REB/AST |
-| **Stacked Ensemble** | Meta-learner | Optimal blending of all models |
 
 ### Advanced Feature Engineering (150+ Features)
 
@@ -203,7 +200,34 @@ python simulate_season.py --today
 
 # Query player probabilities (interactive)
 python query_prob.py
+
+# Remove generated cache and model artifacts
+python clear_cache.py --all --yes
 ```
+
+## Cache Cleanup
+
+Use `clear_cache.py` when you want a full reset of generated artifacts without deleting the raw NBA CSV data.
+
+```bash
+# Preview what will be deleted
+python clear_cache.py --all --dry-run
+
+# Remove generated caches, simulation outputs, model artifacts, and Python caches
+python clear_cache.py --all --yes
+```
+
+This removes the generated directories below when they exist:
+
+- `cache/`
+- `data/cache/`
+- `data/sim_cache/`
+- `data/sim_results/`
+- `models/`
+- `experiments/`
+- any `__pycache__/` folders under the repository
+
+It keeps the source data files in `data/` intact, so you can clear caches and rerun training or simulation without re-downloading the raw dataset.
 
 ### CatBoost Parallelism Recommendations
 
@@ -924,10 +948,7 @@ knowing/
 |   +-- stl_catboost.cbm          # Steals model
 |   +-- blk_catboost.cbm          # Blocks model
 |   +-- tov_catboost.cbm          # Turnovers model
-|   +-- joint_stats_nn.pt         # Multi-output NN
-|   +-- temporal_lstm.pkl         # LSTM model
 |   +-- attention_transformer.pkl # Transformer model
-|   +-- team_chemistry_gnn.pkl    # GNN model
 |   +-- blenders.pkl              # Ensemble weights
 |   +-- feature_cols.pkl          # Feature column names
 |
@@ -942,14 +963,8 @@ knowing/
 |   |   +-- schedule_scraper.py
 |   |
 |   +-- models/                   # ML models
-|   |   +-- model_manager.py      # Training orchestrator
-|   |   +-- stacked_ensemble.py   # Ensemble model
-|   |   +-- lstm_model.py         # LSTM temporal
-|   |   +-- transformer_model.py  # Attention model
-|   |   +-- gnn_model.py          # Graph neural network
-|   |   +-- multi_output_nn.py    # Joint NN
-|   |   +-- temporal_attention.py # Advanced temporal
-|   |   +-- advanced_trainer.py   # Training utilities
+|   |   +-- model_manager.py      # Live model bridge
+|   |   +-- transformer_model.py  # Sequence model
 |   |   +-- gpu_utils.py          # GPU handling
 |   |
 |   +-- pipeline/                 # Training & prediction
@@ -974,10 +989,8 @@ knowing/
 |   |   +-- game_simulator.py
 |   |   +-- season_simulator.py
 |   |   +-- report_generator.py
-|   |   +-- enhanced_game_simulator.py
 |   |   +-- four_factors_engine.py
 |   |   +-- game_context_engine.py
-|   |   +-- lineup_predictor.py
 |   |   +-- player_correlation_engine.py
 |   |   +-- possession_simulator.py
 |   |

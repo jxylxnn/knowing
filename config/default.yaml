@@ -76,7 +76,7 @@ features_ext:
 
 # Simulation configuration
 simulation:
-  default_num_sims: 2500
+  default_num_sims: 5000
   max_workers: 4
   use_gpu: true
   cache_rosters: true
@@ -84,6 +84,15 @@ simulation:
   minutes_distribution: "dirichlet"
   correlation_injection: true
   clutch_adjustment: true
+  seed: 42
+  use_context_engine: true
+  use_player_correlations: true
+  use_betting_calibration: true
+  use_minutes_model: true
+  use_error_calibration: true
+  four_factors_weight: 0.25
+  detailed_path_threshold: 250
+  fast_path_threshold: 1000
 
 # Detailed simulation parameters
 simulation_params:
@@ -257,20 +266,20 @@ league_averages:
 catboost:
   enabled: true
   # Core hyperparameters (tuned for NBA stat prediction)
-  iterations: 5000
-  learning_rate: 0.015
-  depth: 9
-  l2_leaf_reg: 4.0
+  iterations: 1500
+  learning_rate: 0.02
+  depth: 6
+  l2_leaf_reg: 5.0
   random_strength: 1.0
   bagging_temperature: 0.5
   border_count: 254
   thread_count: -1
   random_seed: 42
-  early_stopping_rounds: 200
+  early_stopping_rounds: 80
 
   # Advanced tree structure
   grow_policy: "Depthwise"
-  min_data_in_leaf: 8
+  min_data_in_leaf: 10
   score_function: "Cosine"
   rsm: 0.8                       # Random subspace method (column sampling per split)
 
@@ -278,8 +287,8 @@ catboost:
   langevin: true
   diffusion_temperature: 10000.0
 
-  # Multi-loss training: trains RMSE + MAE models and blends for robustness
-  use_multi_loss: true
+  # Simplified active path: primary CatBoost + quantiles; no extra MAE branch.
+  use_multi_loss: false
   multi_loss_rmse_weight: 0.6
   multi_loss_mae_weight: 0.4
 
@@ -293,7 +302,7 @@ catboost:
   use_per_target_tuning: true
 
 lstm:
-  enabled: true
+  enabled: false
   hidden_size: 192
   num_layers: 3
   dropout: 0.15
@@ -307,22 +316,22 @@ lstm:
 
 transformer:
   enabled: true
-  d_model: 192
+  d_model: 128
   nhead: 8
-  num_encoder_layers: 6
-  dim_feedforward: 768
-  max_seq_length: 50
-  hidden_size: 192
-  num_layers: 6
+  num_encoder_layers: 3
+  dim_feedforward: 512
+  max_seq_length: 10
+  hidden_size: 128
+  num_layers: 3
   dropout: 0.15
   learning_rate: 0.0008
-  batch_size: 512
-  epochs: 120
-  patience: 15
+  batch_size: 256
+  epochs: 60
+  patience: 12
   random_seed: 42
 
 gnn:
-  enabled: true
+  enabled: false
   num_node_features: 64
   num_edge_features: 16
   num_graph_layers: 3
@@ -342,4 +351,4 @@ ensemble:
   method: "ridge"
   cv_folds: 5
   use_temporal_refinement: true
-  use_advanced_temporal: true
+  use_advanced_temporal: false

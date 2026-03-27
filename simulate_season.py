@@ -83,11 +83,7 @@ def main() -> None:
         
         manager._load_models()
             
-        game_sim = GameSimulator(
-            manager, 
-            gnn_model=manager.gnn_model, 
-            transformer_model=manager.attention_model
-        )
+        game_sim = GameSimulator(manager)
         schedule_scraper = ScheduleScraper()
         season_sim = SeasonSimulator(game_sim, schedule_scraper)
         report_gen = ReportGenerator(output_dir=output_dir)

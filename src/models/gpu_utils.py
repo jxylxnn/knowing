@@ -765,21 +765,36 @@ def get_optimal_dataloader_workers() -> int:
         Recommended number of workers (typically 8 for GPU training)
     """
     cpu_count = os.cpu_count() or 4
+
+    # Respect explicit thread caps first. These are often set by job
+    # schedulers or the user to prevent oversubscription.
+    env_limits = []
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        value = os.environ.get(var)
+        if value and value.isdigit():
+            env_limits.append(int(value))
+
+    if env_limits:
+        cpu_count = min(cpu_count, min(env_limits))
+
+    # If the process is affinity-limited, use the available cores only.
+    try:
+        if hasattr(os, 'sched_getaffinity'):
+            cpu_count = min(cpu_count, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        pass
     
-    # For GPU training, use more workers to keep GPU fed
-    # For CPU training, use fewer to avoid oversubscription
+    # For GPU training, use enough workers to keep the device fed without
+    # flooding the machine with loader processes.
     try:
         import torch
         if torch.cuda.is_available():
-            # GPU training: 8 workers is typically optimal
-            # More workers don't help much and increase memory overhead
-            return min(8, cpu_count)
+            return max(1, min(8, cpu_count))
     except ImportError:
         pass
     
-    # CPU training: use number of physical cores
-    # Leave 2 cores for system/other work
-    return max(2, cpu_count - 2)
+    # CPU training: leave room for the OS and non-training work.
+    return max(1, cpu_count - 2)
 
 
 def estimate_model_memory(

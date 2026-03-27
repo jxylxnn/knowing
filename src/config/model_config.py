@@ -30,6 +30,216 @@ GPU_REGISTRY = {
     'K80':  {'mult': 0.8, 'vram_default': 12},
 }
 
+SIZE_TIER_ALIASES = {
+    'small': 'S',
+    'medium': 'M',
+    'large': 'L',
+    'pro': 'XL',
+    'ultra': 'XL',
+}
+
+SIZE_TIER_ORDER = ['S', 'M', 'L', 'XL']
+
+SIZE_TIER_SPECS = {
+    'S': {
+        'catboost': {
+            'iterations': 200,
+            'depth': 4,
+            'learning_rate': 0.05,
+            'l2_leaf_reg': 8.0,
+            'min_data_in_leaf': 20,
+            'early_stopping_rounds': 25,
+            'rsm': 1.0,
+            'langevin': False,
+            'use_multi_loss': False,
+            'use_quantile_models': True,
+        },
+        'transformer': {
+            'd_model': 64,
+            'nhead': 4,
+            'num_encoder_layers': 1,
+            'dim_feedforward': 256,
+            'dropout': 0.12,
+            'batch_size': 256,
+            'epochs': 25,
+            'lr': 1e-3,
+            'seq_len': 5,
+            'max_seq_length': 5,
+        },
+        'training': {
+            'warmup_steps': 0,
+            'early_stop_patience': 8,
+            'use_compile': False,
+            'compile_mode': 'reduce-overhead',
+            'amp': False,
+            'use_bf16': False,
+            'gradient_accumulation_steps': 2,
+            'tf32_enabled': False,
+        },
+        'simulation': {
+            'default_num_sims': 1000,
+            'fast_path_threshold': 250,
+            'detailed_path_threshold': 100,
+        },
+    },
+    'M': {
+        'catboost': {
+            'iterations': 1500,
+            'depth': 6,
+            'learning_rate': 0.02,
+            'l2_leaf_reg': 5.0,
+            'min_data_in_leaf': 10,
+            'early_stopping_rounds': 80,
+            'rsm': 0.8,
+            'langevin': True,
+            'use_multi_loss': False,
+            'use_quantile_models': True,
+        },
+        'transformer': {
+            'd_model': 128,
+            'nhead': 8,
+            'num_encoder_layers': 3,
+            'dim_feedforward': 512,
+            'dropout': 0.15,
+            'batch_size': 256,
+            'epochs': 60,
+            'lr': 8e-4,
+            'seq_len': 10,
+            'max_seq_length': 10,
+        },
+        'training': {
+            'warmup_steps': 10,
+            'early_stop_patience': 12,
+            'use_compile': True,
+            'compile_mode': 'reduce-overhead',
+            'amp': True,
+            'use_bf16': False,
+            'gradient_accumulation_steps': 1,
+            'tf32_enabled': True,
+        },
+        'simulation': {
+            'default_num_sims': 5000,
+            'fast_path_threshold': 500,
+            'detailed_path_threshold': 250,
+        },
+    },
+    'L': {
+        'catboost': {
+            'iterations': 5000,
+            'depth': 8,
+            'learning_rate': 0.015,
+            'l2_leaf_reg': 4.5,
+            'min_data_in_leaf': 8,
+            'early_stopping_rounds': 120,
+            'rsm': 0.7,
+            'langevin': True,
+            'use_multi_loss': False,
+            'use_quantile_models': True,
+        },
+        'transformer': {
+            'd_model': 256,
+            'nhead': 8,
+            'num_encoder_layers': 6,
+            'dim_feedforward': 1024,
+            'dropout': 0.15,
+            'batch_size': 192,
+            'epochs': 100,
+            'lr': 5e-4,
+            'seq_len': 20,
+            'max_seq_length': 20,
+        },
+        'training': {
+            'warmup_steps': 20,
+            'early_stop_patience': 16,
+            'use_compile': True,
+            'compile_mode': 'reduce-overhead',
+            'amp': True,
+            'use_bf16': True,
+            'gradient_accumulation_steps': 1,
+            'tf32_enabled': True,
+        },
+        'simulation': {
+            'default_num_sims': 10000,
+            'fast_path_threshold': 1000,
+            'detailed_path_threshold': 500,
+        },
+    },
+    'XL': {
+        'catboost': {
+            'iterations': 10000,
+            'depth': 10,
+            'learning_rate': 0.01,
+            'l2_leaf_reg': 4.0,
+            'min_data_in_leaf': 6,
+            'early_stopping_rounds': 160,
+            'rsm': 0.65,
+            'langevin': True,
+            'use_multi_loss': False,
+            'use_quantile_models': True,
+        },
+        'transformer': {
+            'd_model': 512,
+            'nhead': 16,
+            'num_encoder_layers': 12,
+            'dim_feedforward': 2048,
+            'dropout': 0.18,
+            'batch_size': 128,
+            'epochs': 150,
+            'lr': 3e-4,
+            'seq_len': 50,
+            'max_seq_length': 50,
+        },
+        'training': {
+            'warmup_steps': 40,
+            'early_stop_patience': 20,
+            'use_compile': True,
+            'compile_mode': 'max-autotune',
+            'amp': True,
+            'use_bf16': True,
+            'gradient_accumulation_steps': 1,
+            'tf32_enabled': True,
+        },
+        'simulation': {
+            'default_num_sims': 25000,
+            'fast_path_threshold': 2000,
+            'detailed_path_threshold': 1000,
+        },
+    },
+}
+
+
+def normalize_model_size(force_size: Optional[str]) -> Optional[str]:
+    """Normalize a requested model size to one of S/M/L/XL or ``auto``."""
+    if force_size is None:
+        return None
+
+    raw = str(force_size).strip()
+    if not raw:
+        return None
+    if raw.lower() == 'auto':
+        return 'auto'
+
+    alias = SIZE_TIER_ALIASES.get(raw.lower())
+    if alias is not None:
+        return alias
+
+    tier = raw.upper()
+    if tier in SIZE_TIER_ORDER:
+        return tier
+
+    raise ValueError(f"Unsupported model size '{force_size}'. Expected auto or one of {SIZE_TIER_ORDER}.")
+
+
+def _tier_from_score(score: float) -> str:
+    """Map a hardware score to a default size tier."""
+    if score < 8:
+        return 'S'
+    if score < 24:
+        return 'M'
+    if score < 80:
+        return 'L'
+    return 'XL'
+
 
 def detect_hardware() -> Dict[str, Any]:
     """
@@ -125,189 +335,172 @@ def detect_hardware() -> Dict[str, Any]:
 
 
 def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
-    """
-    Generate optimal model configuration based on compute score.
-    
-    Args:
-        score: Compute score from detect_hardware()
-        vram: GPU memory in GB (0 for CPU)
-    
-    Returns:
-        Dict with model configurations for all models
-    """
-    # Scale factor normalized to T4 baseline (score=16)
-    scale = max(1.0, score / 16.0)
-    
-    # Pre-calculate values that need divisibility checks
-    _tx_nhead = _clamp(4 + int(scale / 4), 4, 16)
-    _tx_d_model = _clamp(int(128 * (scale ** 0.5)), 64, 768)
-    _tx_d_model = (_tx_d_model // _tx_nhead) * _tx_nhead
-    _tx_d_model = max(64, _tx_d_model)
-    
-    _temp_num_heads = _clamp(4 + int(scale / 5), 4, 12)
-    _temp_hidden = _clamp(int(128 * (scale ** 0.5)), 64, 512)
-    _temp_hidden = (_temp_hidden // _temp_num_heads) * _temp_num_heads
-    _temp_hidden = max(64, _temp_hidden)
-    
+    """Generate a size-tiered model config from a hardware score."""
+    tier = _tier_from_score(score)
+    spec = SIZE_TIER_SPECS[tier]
+
+    # Keep the legacy shape of the config object, but make the active path
+    # explicit: CatBoost + Transformer.
+    transformer_cfg = {
+        'enabled': True,
+        'd_model': spec['transformer']['d_model'],
+        'nhead': spec['transformer']['nhead'],
+        'num_layers': spec['transformer']['num_encoder_layers'],
+        'num_encoder_layers': spec['transformer']['num_encoder_layers'],
+        'dim_feedforward': spec['transformer']['dim_feedforward'],
+        'dropout': spec['transformer']['dropout'],
+        'batch_size': spec['transformer']['batch_size'],
+        'epochs': spec['transformer']['epochs'],
+        'lr': spec['transformer']['lr'],
+        'warmup_ratio': 0.1,
+        'grad_checkpoint': tier in {'L', 'XL'},
+        'use_compile': spec['training']['use_compile'],
+        'seq_len': spec['transformer']['seq_len'],
+        'max_seq_length': spec['transformer']['max_seq_length'],
+    }
+
     config = {
-        # ===== LSTM CONFIG =====
         'lstm': {
-            'hidden_dim': _clamp(int(128 * (scale ** 0.6)), 64, 1024),
-            'num_layers': _clamp(2 + int(scale / 5), 2, 6),
-            'bidirectional': score >= 16,
-            'dropout': min(0.4, 0.2 + scale * 0.01),
-            'batch_size': _clamp(int(32 * scale), 32, 2048),
-            'epochs': _clamp(50 + int(scale * 2), 50, 200),
-            'lr': max(1e-5, 1e-3 / (scale ** 0.1)),
-            'warmup_ratio': 0.1,
-            'seq_len': 10,
-            'grad_checkpoint': score > 20,  # Enable gradient checkpointing for larger models
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
-        },
-        
-        # ===== TRANSFORMER CONFIG =====
-        'transformer': {
-            'd_model': _tx_d_model,
-            'nhead': _tx_nhead,
-            'num_layers': _clamp(4 + int(scale / 6), 2, 12),
-            'dim_feedforward': _clamp(int(512 * (scale ** 0.4)), 256, 2048),
-            'dropout': min(0.25, 0.1 + scale * 0.005),
-            'batch_size': _clamp(int(32 * scale), 32, 1024),
-            'epochs': _clamp(50 + int(scale * 2), 50, 200),
-            'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
-            'warmup_ratio': 0.1,
-            'grad_checkpoint': score > 30,
-            'seq_len': 50,
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
-        },
-        
-        # ===== MULTI-OUTPUT NN CONFIG =====
-        'nn': {
-            'hidden_dim': _clamp(int(512 * (scale ** 0.5)), 256, 2048),
-            'num_blocks': _clamp(6 + int(scale / 4), 4, 16),
-            'dropout': min(0.4, 0.2 + scale * 0.01),
-            'batch_size': _clamp(int(512 * scale), 256, 8192),
-            'epochs': _clamp(100 + int(scale * 3), 100, 300),
-            'lr': max(5e-5, 1e-3 / (scale ** 0.15)),
-            'warmup_ratio': 0.05,
-            'label_smoothing': 0.05 if score > 20 else 0,
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
-        },
-        
-        # ===== GNN CONFIG =====
-        'gnn': {
-            'hidden_dim': _clamp(int(64 * (scale ** 0.5)), 32, 256),
-            'num_layers': _clamp(2 + int(scale / 10), 2, 4),
+            'enabled': False,
+            'hidden_dim': 64 if tier == 'S' else 128,
+            'num_layers': 1 if tier == 'S' else 2,
+            'bidirectional': tier != 'S',
             'dropout': 0.2,
-            'batch_size': _clamp(int(64 * scale), 32, 512),
-            'epochs': _clamp(50 + int(scale), 50, 100),
-            'lr': max(5e-4, 1e-2 / (scale ** 0.1)),
-            'use_attention': True,
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
-        },
-        
-        # ===== TEMPORAL ATTENTION CONFIG =====
-        'temporal': {
-            'hidden_dim': _temp_hidden,
-            'num_heads': _temp_num_heads,
-            'dropout': min(0.25, 0.1 + scale * 0.005),
-            'batch_size': _clamp(int(32 * scale), 32, 256),
-            'epochs': _clamp(50 + int(scale * 1.5), 50, 150),
-            'lr': max(2e-5, 5e-4 / (scale ** 0.1)),
+            'batch_size': 128,
+            'epochs': 10,
+            'lr': 1e-3,
             'warmup_ratio': 0.1,
-            'seq_len': 20,
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+
+            'seq_len': spec['transformer']['seq_len'],
+            'grad_checkpoint': False,
+            'use_compile': False,
         },
-        
-        # ===== CATBOOST CONFIG =====
+        'transformer': transformer_cfg,
+        'temporal': {
+            'hidden_dim': transformer_cfg['d_model'],
+            'num_heads': transformer_cfg['nhead'],
+            'dropout': transformer_cfg['dropout'],
+            'batch_size': transformer_cfg['batch_size'],
+            'epochs': transformer_cfg['epochs'],
+            'lr': transformer_cfg['lr'],
+            'warmup_ratio': transformer_cfg['warmup_ratio'],
+            'seq_len': transformer_cfg['seq_len'],
+            'use_compile': transformer_cfg['use_compile'],
+        },
+        'nn': {
+            'enabled': False,
+            'hidden_dim': 128,
+            'num_blocks': 2,
+            'dropout': 0.2,
+            'batch_size': 256,
+            'epochs': 20,
+            'lr': 1e-3,
+            'warmup_ratio': 0.05,
+            'label_smoothing': 0.0,
+            'use_compile': False,
+        },
+        'gnn': {
+            'enabled': False,
+            'hidden_dim': 64,
+            'num_layers': 2,
+            'dropout': 0.2,
+            'batch_size': 64,
+            'epochs': 20,
+            'lr': 1e-3,
+            'use_attention': False,
+            'use_compile': False,
+        },
         'catboost': {
-            'iterations': _clamp(int(5000 * (scale ** 0.4)), 3000, 10000),
-            'depth': _clamp(9 + int(scale / 8), 6, 12),
-            'learning_rate': max(0.005, 0.02 / (scale ** 0.15)),
-            'l2_leaf_reg': 4.0 + scale * 0.3,
+            'enabled': True,
+            'iterations': spec['catboost']['iterations'],
+            'learning_rate': spec['catboost']['learning_rate'],
+            'depth': spec['catboost']['depth'],
+            'l2_leaf_reg': spec['catboost']['l2_leaf_reg'],
             'random_strength': 1.0,
             'bagging_temperature': 0.5,
             'border_count': 254,
+            'thread_count': -1,
+            'random_seed': 42,
+            'early_stopping_rounds': spec['catboost']['early_stopping_rounds'],
             'grow_policy': 'Depthwise',
-            'min_data_in_leaf': max(5, 10 - int(scale / 5)),
+            'min_data_in_leaf': spec['catboost']['min_data_in_leaf'],
             'score_function': 'Cosine',
-            'rsm': max(0.6, 0.8 - scale * 0.005),
-            'langevin': score >= 10,
+            'rsm': spec['catboost']['rsm'],
+            'langevin': spec['catboost']['langevin'],
             'diffusion_temperature': 10000.0,
-            'early_stopping_rounds': _clamp(30 + int(scale * 2), 20, 100),  # Reduced from 100-300 for faster training
-            'use_multi_loss': True,
+            'use_multi_loss': spec['catboost']['use_multi_loss'],
             'multi_loss_rmse_weight': 0.6,
             'multi_loss_mae_weight': 0.4,
-            'use_quantile_models': True,  # Always train quantile models for uncertainty
-            'n_temporal_folds': _clamp(3 + int(scale / 10), 2, 5),
+            'use_quantile_models': spec['catboost']['use_quantile_models'],
+            'quantile_alpha_low': 0.1,
+            'quantile_alpha_high': 0.9,
+            'n_temporal_folds': 3 if tier in {'S', 'M'} else 5,
             'use_per_target_tuning': True,
         },
-        
-        # ===== XGBOOST CONFIG =====
         'xgboost': {
-            'n_estimators': _clamp(int(1000 * (scale ** 0.5)), 500, 3000),
-            'max_depth': _clamp(6 + int(scale / 10), 4, 12),
-            'learning_rate': max(0.005, 0.03 / (scale ** 0.15)),
-            'subsample': max(0.6, 0.8 - scale * 0.01),
-            'colsample_bytree': max(0.6, 0.8 - scale * 0.01),
-            'colsample_bylevel': max(0.6, 0.8 - scale * 0.01),
-            'reg_alpha': max(0.1, scale * 0.05),
-            'reg_lambda': max(1.0, 2.0 + scale * 0.2),
-            'min_child_weight': max(1, int(5 - scale * 0.2)),
-            'gamma': max(0, scale * 0.01),
-            'early_stopping_rounds': _clamp(50 + int(scale * 5), 30, 150),
+            'enabled': False,
+            'n_estimators': 500,
+            'max_depth': 4,
+            'learning_rate': 0.03,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'colsample_bylevel': 0.8,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
+            'min_child_weight': 1,
+            'gamma': 0.0,
+            'early_stopping_rounds': 50,
             'random_state': 42,
             'n_jobs': -1,
-            'use_gpu': score >= 10,
+            'use_gpu': False,
         },
-        
-        # ===== LIGHTGBM CONFIG =====
         'lightgbm': {
-            'n_estimators': _clamp(int(1500 * (scale ** 0.6)), 500, 5000),
-            'max_depth': _clamp(6 + int(scale / 12), -1, 15),
-            'learning_rate': max(0.005, 0.05 / (scale ** 0.2)),
-            'num_leaves': _clamp(31 + int(scale * 3), 16, 128),
-            'feature_fraction': max(0.6, 0.8 - scale * 0.01),
-            'bagging_fraction': max(0.6, 0.8 - scale * 0.01),
+            'enabled': False,
+            'n_estimators': 500,
+            'max_depth': -1,
+            'learning_rate': 0.05,
+            'num_leaves': 31,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
             'bagging_freq': 1,
-            'min_child_samples': max(5, int(20 - scale * 0.5)),
-            'reg_alpha': max(0.1, scale * 0.05),
-            'reg_lambda': max(0.1, scale * 0.1),
-            'early_stopping_rounds': _clamp(50 + int(scale * 5), 30, 150),
+            'min_child_samples': 20,
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.1,
+            'early_stopping_rounds': 50,
             'random_state': 42,
             'n_jobs': -1,
-            'use_gpu': score >= 10,
+            'use_gpu': False,
             'verbose': -1,
         },
-        
-        # ===== TRAINING CONFIG =====
         'training': {
             'test_split_date': '2024-03-01',
-            'warmup_steps': _clamp(int(scale * 20), 0, 1000),
-            'early_stop_patience': _clamp(15 + int(scale / 2), 15, 40),
-            'label_smoothing': 0.05 if score > 20 else 0,
-            'use_compile': score > 10,  # Enable torch.compile for PyTorch 2.0+ on capable hardware
-            'compile_mode': 'max-autotune' if score > 30 else 'reduce-overhead',  # Better optimization for powerful GPUs
-            'amp': True,  # Always use mixed precision
-            'use_bf16': score > 16,  # Use BF16 on Ampere+ GPUs (compute 8.0+)
-            'gradient_accumulation_steps': 1 if score > 10 else 2,
-            'tf32_enabled': True,  # Enable TF32 for faster matmul on Ampere+
-            'dataloader_workers': min(8, os.cpu_count() or 4),  # Optimal workers
+            'warmup_steps': spec['training']['warmup_steps'],
+            'early_stop_patience': spec['training']['early_stop_patience'],
+            'label_smoothing': 0.0,
+            'use_compile': spec['training']['use_compile'],
+            'compile_mode': spec['training']['compile_mode'],
+            'amp': spec['training']['amp'],
+            'use_bf16': spec['training']['use_bf16'],
+            'gradient_accumulation_steps': spec['training']['gradient_accumulation_steps'],
+            'tf32_enabled': spec['training']['tf32_enabled'],
+            'dataloader_workers': min(8, os.cpu_count() or 4),
         },
-        
-        # ===== METADATA =====
+        'simulation': {
+            'default_num_sims': spec['simulation']['default_num_sims'],
+            'fast_path_threshold': spec['simulation']['fast_path_threshold'],
+            'detailed_path_threshold': spec['simulation']['detailed_path_threshold'],
+        },
         'metadata': {
             'score': round(score, 2),
             'vram_gb': round(vram, 2),
-            'scale_factor': round(scale, 2),
+            'scale_factor': round(max(1.0, score / 16.0), 2),
+            'tier': tier,
             'generated_at': datetime.now().isoformat(),
-        }
+        },
     }
-    
-    # Memory safety check for GPU
+
     if vram > 0:
         config = _validate_memory(config, vram)
-    
+
     return config
 
 
@@ -363,17 +556,20 @@ def _validate_memory(config: Dict[str, Any], vram_gb: float) -> Dict[str, Any]:
             f"scaling hidden dims by {scale_down:.2f}"
         )
         
-        # Scale down hidden dimensions
-        config['lstm']['hidden_dim'] = int(config['lstm']['hidden_dim'] * scale_down)
-        # Ensure d_model remains divisible by nhead
-        _scaled_d_model = int(config['transformer']['d_model'] * scale_down)
-        config['transformer']['d_model'] = (_scaled_d_model // config['transformer']['nhead']) * config['transformer']['nhead']
-        config['transformer']['dim_feedforward'] = int(config['transformer']['dim_feedforward'] * scale_down)
-        config['nn']['hidden_dim'] = int(config['nn']['hidden_dim'] * scale_down)
-        config['gnn']['hidden_dim'] = int(config['gnn']['hidden_dim'] * scale_down)
-        # Ensure temporal hidden_dim remains divisible by num_heads
-        _scaled_temp_hidden = int(config['temporal']['hidden_dim'] * scale_down)
-        config['temporal']['hidden_dim'] = (_scaled_temp_hidden // config['temporal']['num_heads']) * config['temporal']['num_heads']
+        # Scale down hidden dimensions.
+        config['lstm']['hidden_dim'] = max(32, int(config['lstm']['hidden_dim'] * scale_down))
+
+        _scaled_d_model = max(32, int(config['transformer']['d_model'] * scale_down))
+        nhead = max(1, int(config['transformer']['nhead']))
+        config['transformer']['d_model'] = max(nhead, (_scaled_d_model // nhead) * nhead)
+        config['transformer']['hidden_dim'] = config['transformer']['d_model']
+        config['transformer']['dim_feedforward'] = max(64, int(config['transformer']['dim_feedforward'] * scale_down))
+        config['transformer']['nhead'] = nhead
+        config['transformer']['num_encoder_layers'] = config['transformer']['num_layers']
+
+        # Keep the legacy temporal alias synchronized with the transformer.
+        config['temporal']['hidden_dim'] = config['transformer']['d_model']
+        config['temporal']['num_heads'] = nhead
         
         # Scale batch sizes
         config['lstm']['batch_size'] = int(config['lstm']['batch_size'] * scale_down)
@@ -405,37 +601,41 @@ def get_model_config(
     Returns:
         Tuple of (model_config, hardware_info)
     """
-    # Hardcoded size presets
+    normalized_size = normalize_model_size(force_size) if force_size is not None else None
+
+    # Hardware presets used when the user explicitly requests a tier.
     SIZE_PRESETS = {
-        'small': (5.0, 0.0),    # CPU-like
-        'medium': (16.0, 16.0),  # T4-like
-        'large': (50.0, 40.0),   # A100-40GB-like
-        'pro': (140.0, 80.0),    # A100-80GB-like
-        'ultra': (240.0, 80.0),  # H100-like
+        'S': (5.0, 0.0),
+        'M': (16.0, 16.0),
+        'L': (50.0, 40.0),
+        'XL': (140.0, 80.0),
     }
-    
-    if force_size and force_size.lower() in SIZE_PRESETS:
-        score, vram = SIZE_PRESETS[force_size.lower()]
+
+    if normalized_size and normalized_size != 'auto':
+        score, vram = SIZE_PRESETS[normalized_size]
         hw_info = {
             'type': 'preset',
-            'name': f"preset:{force_size}",
+            'name': f"preset:{normalized_size}",
             'score': score,
             'vram': vram,
+            'tier': normalized_size,
         }
     else:
         # Auto-detect
         hw_info = detect_hardware()
         score = hw_info['score']
         vram = hw_info['vram']
+        hw_info['tier'] = _tier_from_score(score)
         
         # Override if specified
         if custom_score is not None:
             score = custom_score
             hw_info['score'] = score
+            hw_info['tier'] = _tier_from_score(score)
         if custom_vram is not None:
             vram = custom_vram
             hw_info['vram'] = vram
-    
+
     config = generate_model_config(score, vram)
     
     return config, hw_info

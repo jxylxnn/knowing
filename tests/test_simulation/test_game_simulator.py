@@ -232,3 +232,237 @@ class TestGameSimulatorIntegration:
         teams = simulator.get_available_teams()
         assert isinstance(teams, list)
         assert 'LAL' in teams or 'BOS' in teams
+
+
+class TestGameSimulatorUpgrade:
+    """Tests for the upgraded high-fidelity simulation flow."""
+
+    @pytest.fixture
+    def simulator(self, temp_data_dir):
+        from src.simulation.game_simulator import GameSimulator
+
+        mock_manager = Mock()
+        mock_manager.data_dir = str(temp_data_dir['data_dir'])
+        mock_manager.feature_engineer = Mock()
+
+        with patch('src.simulation.game_simulator.InjuryScraper'), \
+             patch('src.simulation.game_simulator.LineupScraper'), \
+             patch('src.simulation.game_simulator.NBADefenseScraper'), \
+             patch('src.simulation.game_simulator.MinutesPredictor'), \
+             patch('src.simulation.game_simulator.ErrorCalibrator'), \
+             patch('src.simulation.game_simulator.BettingScraper'), \
+             patch('src.simulation.game_simulator.ScheduleScraper'), \
+             patch('src.simulation.game_simulator.get_device', return_value='cpu'):
+            simulator = GameSimulator(mock_manager, cache_dir=str(temp_data_dir['root'] / 'cache'))
+
+        return simulator
+
+    def _build_mock_roster(self, team: str, start_id: int) -> tuple[pd.DataFrame, dict, list]:
+        rows = []
+        histories = {}
+        roster_info = []
+
+        for i in range(5):
+            pid = start_id + i
+            pname = f"{team}_Player_{i}"
+            rows.append({
+                'PLAYER_ID': pid,
+                'PLAYER_NAME': pname,
+                'TEAM_ABBREVIATION': team,
+                'GAME_DATE': pd.Timestamp('2024-01-01'),
+                'MIN': 28 + i,
+                'USAGE_PROXY_10': 0.18 + i * 0.01,
+                'ROLL_MIN_AVG_10': 26 + i,
+                'ROLL_REB_AVG_10': 4 + i * 0.5,
+                'ROLL_AST_AVG_10': 3 + i * 0.4,
+                'ROLL_BLK_AVG_10': 0.6 + i * 0.1,
+            })
+            histories[pid] = pd.DataFrame({
+                'GAME_DATE': pd.date_range('2023-12-01', periods=5, freq='D'),
+                'PTS': [18 + i] * 5,
+                'REB': [4 + i] * 5,
+                'AST': [3 + i] * 5,
+                'MIN': [26 + i] * 5,
+            })
+            roster_info.append({
+                'id': pid,
+                'name': pname,
+                'usage': 0.18 + i * 0.01,
+                'exp_min': 26 + i,
+                'play_probability': 1.0,
+                'position': 'SG',
+                'min_std': 3.0,
+                'is_starter': i < 5,
+            })
+
+        return pd.DataFrame(rows), histories, roster_info
+
+    def _build_prediction_frame(self, count: int) -> pd.DataFrame:
+        data = []
+        for i in range(count):
+            data.append({
+                'PTS': 18.0 + i,
+                'REB': 5.0 + i * 0.2,
+                'AST': 4.0 + i * 0.3,
+                'STL': 1.0 + i * 0.05,
+                'BLK': 0.5 + i * 0.03,
+                'TOV': 2.0 + i * 0.1,
+                'PTS_STD': 4.5,
+                'REB_STD': 2.0,
+                'AST_STD': 1.8,
+                'STL_STD': 0.6,
+                'BLK_STD': 0.5,
+                'TOV_STD': 0.7,
+            })
+        return pd.DataFrame(data)
+
+    def test_device_and_seed_are_stable(self, simulator):
+        """Device should be torch-compatible and matchup seeding should be deterministic."""
+        assert hasattr(simulator.device, 'type')
+        assert simulator.device.type in {'cpu', 'cuda'}
+
+        seed_a = simulator._get_matchup_seed('LAL', 'BOS', 100)
+        seed_b = simulator._get_matchup_seed('LAL', 'BOS', 100)
+        seed_c = simulator._get_matchup_seed('BOS', 'LAL', 100)
+
+        assert seed_a == seed_b
+        assert seed_a != seed_c
+
+    def test_safe_fetch_helpers_fallback(self, simulator):
+        """External fetch helpers should fall back cleanly on errors."""
+        simulator.betting_scraper.get_game_lines = Mock(side_effect=RuntimeError("boom"))
+        simulator.lineup_scraper.get_starting_lineup = Mock(side_effect=RuntimeError("boom"))
+        simulator.injury_scraper.get_player_availability = Mock(side_effect=RuntimeError("boom"))
+
+        lines = simulator._safe_get_game_lines('LAL', 'BOS', '2024-01-01')
+        lineup = simulator._safe_get_lineup('LAL', '2024-01-01')
+        injuries = simulator._safe_get_injury_probs('LAL')
+
+        assert lines['total'] is None
+        assert lines['source'] == 'fallback'
+        assert lineup == {}
+        assert injuries == {}
+
+    def test_team_target_means_use_four_factors_prior(self, simulator):
+        """Team target means should blend the model baseline with four-factors priors."""
+        roster_a = [
+            {'mean_pts': 20.0, 'mean_reb': 5.0, 'mean_ast': 4.0},
+            {'mean_pts': 18.0, 'mean_reb': 4.0, 'mean_ast': 3.0},
+        ]
+        roster_b = [
+            {'mean_pts': 16.0, 'mean_reb': 6.0, 'mean_ast': 5.0},
+            {'mean_pts': 14.0, 'mean_reb': 5.0, 'mean_ast': 4.0},
+        ]
+
+        team_eff_a = {
+            'team': 'LAL',
+            'pace': 100.0,
+            'offensive_rating': 114.0,
+            'defensive_rating': 112.0,
+            'efg_pct': 0.54,
+            'tov_pct': 0.135,
+            'orb_pct': 0.25,
+            'ft_rate': 0.23,
+        }
+        team_eff_b = {
+            'team': 'BOS',
+            'pace': 99.0,
+            'offensive_rating': 113.0,
+            'defensive_rating': 111.0,
+            'efg_pct': 0.53,
+            'tov_pct': 0.134,
+            'orb_pct': 0.24,
+            'ft_rate': 0.22,
+        }
+
+        with patch.object(simulator.four_factors_engine, 'predict_matchup', return_value={
+            'home_pts_mean': 120.0,
+            'away_pts_mean': 110.0,
+        }):
+            targets = simulator._build_team_target_means(
+                'LAL',
+                'BOS',
+                roster_a,
+                roster_b,
+                {'total': None},
+                team_eff_a,
+                team_eff_b,
+            )
+
+        assert targets['LAL']['pts'] == pytest.approx(58.5)
+        assert targets['BOS']['pts'] == pytest.approx(50.0)
+        assert targets['LAL']['reb'] == pytest.approx(9.0)
+        assert targets['BOS']['ast'] == pytest.approx(9.0)
+
+    def test_simulate_matchup_is_deterministic_and_schema_stable(self, simulator):
+        """Simulation should remain deterministic and preserve the public output shape."""
+        ctx_a, hist_a, info_a = self._build_mock_roster('LAL', 100)
+        ctx_b, hist_b, info_b = self._build_mock_roster('BOS', 200)
+        pred_a = self._build_prediction_frame(len(info_a))
+        pred_b = self._build_prediction_frame(len(info_b))
+
+        lineup_a = {'starters': [row['PLAYER_NAME'] for _, row in ctx_a.iterrows()]}
+        lineup_b = {'starters': [row['PLAYER_NAME'] for _, row in ctx_b.iterrows()]}
+
+        def build_roster_context(team, opponent, is_home, injury_probs, lineup_data=None, game_date=None, rest_info=None):
+            if team == 'LAL':
+                return ctx_a, hist_a, info_a
+            return ctx_b, hist_b, info_b
+
+        def predict_batch(context_df, histories_map):
+            team = context_df.iloc[0]['TEAM_ABBREVIATION']
+            return pred_a if team == 'LAL' else pred_b
+
+        team_eff_map = {
+            'LAL': {
+                'team': 'LAL',
+                'pace': 100.0,
+                'offensive_rating': 114.0,
+                'defensive_rating': 112.0,
+                'efg_pct': 0.54,
+                'tov_pct': 0.135,
+                'orb_pct': 0.25,
+                'ft_rate': 0.23,
+            },
+            'BOS': {
+                'team': 'BOS',
+                'pace': 99.0,
+                'offensive_rating': 113.0,
+                'defensive_rating': 111.0,
+                'efg_pct': 0.53,
+                'tov_pct': 0.134,
+                'orb_pct': 0.24,
+                'ft_rate': 0.22,
+            },
+        }
+
+        with patch.object(simulator, 'prepare_simulation_context'), \
+             patch.object(simulator, '_build_roster_context', side_effect=build_roster_context), \
+             patch.object(simulator, '_get_defensive_adjustments', return_value={}), \
+             patch.object(simulator, '_safe_get_game_lines', return_value={'total': 225.0, 'spread': -2.5, 'home_implied_pts': 113.8, 'away_implied_pts': 111.2, 'source': 'test'}), \
+             patch.object(simulator, '_safe_get_lineup', side_effect=lambda team, game_date=None: lineup_a if team == 'LAL' else lineup_b), \
+             patch.object(simulator, '_safe_get_injury_probs', return_value={}), \
+             patch.object(simulator, '_get_team_rest_days', return_value={'rest_days': 2, 'is_b2b': False, 'is_3_in_4': False, 'games_last_7': 3, 'games_last_14': 6}), \
+             patch.object(simulator, '_get_team_pace', side_effect=lambda team: 100.0 if team == 'LAL' else 99.0), \
+             patch.object(simulator, '_get_team_efficiency_snapshot', side_effect=lambda team: team_eff_map[team]), \
+             patch.object(simulator, '_build_team_target_means', return_value={
+                 'LAL': {'pts': 114.0, 'reb': 44.0, 'ast': 26.0},
+                 'BOS': {'pts': 111.0, 'reb': 43.0, 'ast': 25.0},
+             }), \
+             patch.object(simulator, '_apply_error_calibration', side_effect=lambda roster: roster), \
+             patch.object(simulator, '_apply_context_adjustments', side_effect=lambda roster, *args, **kwargs: roster), \
+             patch.object(simulator.manager, 'predict_player_stats_batch', side_effect=predict_batch):
+
+            result1 = simulator.simulate_matchup('LAL', 'BOS', num_sims=20, seed=123)
+            result2 = simulator.simulate_matchup('LAL', 'BOS', num_sims=20, seed=123)
+
+        assert result1['team_a'] == 'LAL'
+        assert result1['team_b'] == 'BOS'
+        assert result1['metadata']['simulation_mode'] == 'high_fidelity'
+        assert result1['metadata']['seed'] == result2['metadata']['seed']
+        assert result1['win_prob_a'] == pytest.approx(result2['win_prob_a'])
+        assert result1['team_summaries']['LAL']['pts']['mean'] == pytest.approx(result2['team_summaries']['LAL']['pts']['mean'])
+        assert len(result1['simulations']) == 20
+        assert len(result1['player_averages']) == 10
+        assert 'context' in result1 and 'metadata' in result1
+        assert 'team_targets' in result1['context']

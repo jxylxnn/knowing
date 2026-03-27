@@ -1,12 +1,13 @@
-"""Main training pipeline orchestrator for NBA prediction models.
+"""Main training pipeline orchestrator for the simplified NBA model stack.
 
-This module provides a clean, efficient training pipeline with:
-- Parallel model training across targets
-- Smart caching of expensive computations
-- Experiment tracking and comparison
-- Multiple training modes (quick, standard, full)
-- GPU optimizations (TF32, BF16, torch.compile)
+The active path is:
+- per-target CatBoost regressors
+- one Transformer sequence model
+- inverse-MAE blending between the two
+- quantile models for uncertainty
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -20,266 +21,170 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 try:
-    from src.training.trainer import TrainResult
-    from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
-    from src.training.feature_cache import FeatureCache, DataSplitCache
-    from src.training.experiment import ExperimentTracker
-    from src.training.training_logger import get_training_logger, RichTrainingLogger
-    from src.models.gpu_utils import (
-        check_gpu_compatibility,
-        clear_gpu_memory,
-        get_gpu_memory_usage,
-        initialize_gpu_optimizations,
-        get_optimal_dataloader_workers,
-        is_bf16_supported,
-        print_gpu_summary,
-    )
-    from src.config.model_config import get_model_config
-except ModuleNotFoundError:
-    import json
-    from dataclasses import dataclass
+    import torch
+except Exception:  # pragma: no cover - torch is available in the project env
+    torch = None
 
-    @dataclass
-    class TrainResult:
-        model: Any
-        metrics: Dict[str, float]
-        training_time: float
-        best_iteration: Optional[int] = None
-        feature_importance: Optional[Dict[str, float]] = None
-
-    class FeatureCache:
-        def __init__(self, cache_dir):
-            self.cache_dir = Path(cache_dir)
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    class DataSplitCache(FeatureCache):
-        pass
-
-    class ExperimentTracker:
-        def __init__(self, experiments_dir='experiments', experiment_name=None):
-            self.experiments_dir = Path(experiments_dir)
-            self.experiments_dir.mkdir(parents=True, exist_ok=True)
-            self.experiment_name = experiment_name or f'run_{int(time.time())}'
-            self.params = {}
-            self.model_metrics = {}
-            self.status = 'initialized'
-        def start_run(self, config=None, notes=None):
-            self.status = 'running'
-            if config is not None:
-                self.params['config'] = config
-            if notes is not None:
-                self.params['notes'] = notes
-        def log_model_metrics(self, model_name: str, metrics: Dict[str, Any], target: Optional[str] = None):
-            key = f'{model_name}:{target}' if target else model_name
-            self.model_metrics[key] = metrics
-        def log_params(self, params: Dict[str, Any]):
-            self.params.update(params)
-        def end_run(self, status='completed'):
-            self.status = status
-            out = self.experiments_dir / f'{self.experiment_name}.json'
-            out.write_text(json.dumps(self.get_summary(), indent=2, default=str))
-        def get_summary(self):
-            return {
-                'experiment_name': self.experiment_name,
-                'status': self.status,
-                'params': self.params,
-                'model_metrics': self.model_metrics,
-            }
-
-    class RichTrainingLogger:
-        def __init__(self, use_rich: bool = False, log_gpu: bool = False):
-            self.use_rich = use_rich
-            self.log_gpu = log_gpu
-        def log_iteration(self, metrics):
-            if getattr(metrics, 'iteration', None) in (0, getattr(metrics, 'total_iterations', None)):
-                logger.info('%s %s iter=%s/%s train=%.5f val=%.5f', metrics.target, metrics.model_type, metrics.iteration, metrics.total_iterations, metrics.train_loss, metrics.val_loss)
-
-    _TRAINING_LOGGER = None
-    def get_training_logger(use_rich: bool = False, log_gpu: bool = False):
-        global _TRAINING_LOGGER
-        if _TRAINING_LOGGER is None:
-            _TRAINING_LOGGER = RichTrainingLogger(use_rich=use_rich, log_gpu=log_gpu)
-        return _TRAINING_LOGGER
-
-    from catboost_trainer import CatBoostTrainer, train_catboost_target
-    from gpu_utils import (
-        check_gpu_compatibility,
-        clear_gpu_memory,
-        get_gpu_memory_usage,
-        initialize_gpu_optimizations,
-        get_optimal_dataloader_workers,
-        is_bf16_supported,
-        print_gpu_summary,
-    )
-    from model_config import get_model_config
+from src.config import Config
+from src.config.model_config import get_model_config, normalize_model_size
+from src.models.base import ModelRegistry, ModelMetadata
+from src.models.gpu_utils import (
+    check_gpu_compatibility,
+    clear_gpu_memory,
+    initialize_gpu_optimizations,
+)
+from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
+from src.training.experiment import ExperimentTracker
+from src.training.trainer import TrainResult
 
 logger = logging.getLogger(__name__)
 
 
+def _load_transformer_wrapper():
+    """Import the Transformer wrapper lazily to avoid pytest shim issues."""
+    from src.models.transformer_model import TransformerWrapper
+
+    return TransformerWrapper
+
+
 class TrainingPipeline:
-    """Orchestrates efficient training of all NBA prediction models."""
-    
-    # Training modes with their configurations
+    """Orchestrates training for the active CatBoost + Transformer stack."""
+
     TRAINING_MODES = {
         'quick': {
             'catboost_iterations': 500,
-            'catboost_depth': 6,
-            'nn_epochs': 20,
-            'feature_selection': False,
-            'adversarial_validation': False,
-            'quantile_models': False,
-            'multi_loss': False,
-            'train_nn_models': False,
+            'transformer_epochs': 20,
             'description': 'Fast training for development/testing',
         },
         'standard': {
-            'catboost_iterations': 3000,
-            'catboost_depth': 8,
-            'nn_epochs': 100,
-            'feature_selection': True,
-            'adversarial_validation': True,
-            'quantile_models': True,
-            'multi_loss': True,
-            'train_nn_models': True,
-            'description': 'Full training with all optimizations',
+            'catboost_iterations': 1500,
+            'transformer_epochs': 60,
+            'description': 'Default training with the HTML M-tier stack',
         },
         'full': {
             'catboost_iterations': 5000,
-            'catboost_depth': 10,
-            'nn_epochs': 200,
-            'feature_selection': True,
-            'adversarial_validation': True,
-            'quantile_models': True,
-            'multi_loss': True,
-            'train_nn_models': True,
+            'transformer_epochs': 120,
             'description': 'Extended training for maximum accuracy',
         },
     }
-    
+
     TARGETS = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
-    CORE_TARGETS = ['PTS', 'REB', 'AST']
-    
+
     def __init__(
         self,
-        data_dir: Union[str, Path] = 'data',
-        models_dir: Union[str, Path] = 'models',
+        data_dir: Union[str, Path, Config] = 'data',
+        models_dir: Union[str, Path, ModelRegistry] = 'models',
         cache_dir: Union[str, Path] = 'cache/training',
         experiments_dir: Union[str, Path] = 'experiments',
         mode: str = 'standard',
-        model_size: str = 'auto',
+        model_size: str = 'M',
         parallel: bool = True,
         max_workers: Optional[int] = None,
         use_gpu: Optional[bool] = None,
         experiment_name: Optional[str] = None,
+        registry: Optional[ModelRegistry] = None,
     ):
-        """Initialize training pipeline.
-        
-        Args:
-            data_dir: Directory containing training data
-            models_dir: Directory to save trained models
-            cache_dir: Directory for feature caching
-            experiments_dir: Directory for experiment tracking
-            mode: Training mode ('quick', 'standard', 'full')
-            model_size: Model size preset ('auto', 'small', 'medium', 'large')
-            parallel: Whether to train targets in parallel
-            max_workers: Max parallel workers (None = auto)
-            use_gpu: Whether to use GPU (None = auto-detect)
-            experiment_name: Name for this experiment
-        """
+        legacy_config: Optional[Config] = data_dir if isinstance(data_dir, Config) else None
+        if legacy_config is not None:
+            self.config = legacy_config
+            self.training_config = legacy_config.training
+            self.data_config = legacy_config.data
+            data_dir = legacy_config.data.data_dir
+
+            if isinstance(models_dir, ModelRegistry) and registry is None:
+                registry = models_dir
+                models_dir = legacy_config.data.models_dir
+            elif models_dir == 'models':
+                models_dir = legacy_config.data.models_dir
+
+            if cache_dir == 'cache/training':
+                cache_dir = legacy_config.data.cache_dir
+        else:
+            self.config = None
+            self.training_config = None
+            self.data_config = None
+
         self.data_dir = Path(data_dir)
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Convert cache_dir to Path immediately to avoid string division errors
-        cache_dir = Path(cache_dir)
-        
-        # Training mode
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         if mode not in self.TRAINING_MODES:
-            raise ValueError(f"Invalid mode: {mode}. Choose from {list(self.TRAINING_MODES.keys())}")
+            raise ValueError(f"Invalid mode: {mode}. Choose from {list(self.TRAINING_MODES)}")
         self.mode = mode
         self.mode_config = self.TRAINING_MODES[mode]
-        
-        # Hardware setup
-        gpu_requested = True if use_gpu is None else bool(use_gpu)
-        gpu_available = check_gpu_compatibility() if gpu_requested else False
-        if gpu_requested and not gpu_available:
-            logger.info("GPU requested but unavailable or incompatible. Falling back to CPU training.")
-        self.use_gpu = gpu_requested and gpu_available
+
+        requested_gpu = True if use_gpu is None else bool(use_gpu)
+        gpu_available = check_gpu_compatibility() if requested_gpu else False
+        if requested_gpu and not gpu_available:
+            logger.info("GPU requested but unavailable; falling back to CPU training.")
+        self.use_gpu = requested_gpu and gpu_available
+        self.gpu_settings = initialize_gpu_optimizations(log_summary=False) if self.use_gpu else {
+            'gpu_available': False,
+            'tf32_enabled': False,
+            'bf16_available': False,
+            'flash_attention_available': False,
+            'cudnn_benchmark': False,
+            'optimal_workers': 0,
+        }
+
+        default_workers = 1 if self.use_gpu else max(1, min(4, os.cpu_count() or 1))
         self.parallel = parallel
-        if self.use_gpu:
-            self.gpu_settings = initialize_gpu_optimizations(log_summary=False)
-            default_workers = 1
+        self.max_workers = max_workers or (1 if self.use_gpu else default_workers)
+
+        normalized_size = normalize_model_size(model_size)
+        if normalized_size is None:
+            normalized_size = 'M'
+        if normalized_size == 'auto':
+            self.model_config, self.hw_info = get_model_config(force_size=None)
         else:
-            self.gpu_settings = {
-                'gpu_available': False,
-                'tf32_enabled': False,
-                'bf16_available': False,
-                'flash_attention_available': False,
-                'cudnn_benchmark': False,
-                'optimal_workers': 0,
-            }
-            default_workers = max(1, min(4, os.cpu_count() or 1))
-        self.max_workers = max_workers or (default_workers if parallel else 1)
-        self.dataloader_workers = self.gpu_settings['optimal_workers']
-        
-        # Get model config
-        force_size = 'small' if model_size == 'auto' else model_size
-        self.model_config, self.hw_info = get_model_config(
-            force_size=force_size
-        )
-        
-        # Apply mode overrides to config
+            self.model_config, self.hw_info = get_model_config(force_size=normalized_size)
+
         self._apply_mode_config()
-        
-        # Caching
-        self.feature_cache = FeatureCache(cache_dir)
-        self.split_cache = DataSplitCache(cache_dir / 'splits')
-        
-        # Experiment tracking
+
+        self.registry = registry or ModelRegistry(self.models_dir)
         self.experiment = ExperimentTracker(experiments_dir, experiment_name)
-        
-        # State
+
         self.feature_cols: Optional[List[str]] = None
-        self.cat_features: Optional[List[str]] = None
+        self.cat_features: List[str] = []
+        self.models: Dict[str, Any] = {}
+        self.catboost_mae_models: Dict[str, Any] = {}
+        self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
+        self.transformer_model: Optional[TransformerWrapper] = None
+        self.attention_model: Optional[TransformerWrapper] = None
+        self.temporal_model: Optional[TransformerWrapper] = None
+        self.blend_weights: Dict[str, Dict[str, float]] = {}
         self.trainers: Dict[str, Any] = {}
-        
-        logger.info(f"TrainingPipeline initialized (mode={mode}, gpu={self.use_gpu}, parallel={parallel})")
-        logger.info(f"Mode: {self.mode_config['description']}")
+
         logger.info(
-            f"GPU settings: tf32={self.gpu_settings['tf32_enabled']}, "
-            f"bf16={self.gpu_settings['bf16_available']}, "
-            f"workers={self.dataloader_workers}, max_workers={self.max_workers}"
+            "TrainingPipeline initialized (mode=%s, tier=%s, gpu=%s, parallel=%s)",
+            mode,
+            self.hw_info.get('tier', normalized_size),
+            self.use_gpu,
+            parallel,
         )
-    
+
     def _apply_mode_config(self) -> None:
-        """Apply mode-specific overrides to model config."""
-        # Override CatBoost settings
-        self.model_config['catboost']['iterations'] = self.mode_config['catboost_iterations']
-        self.model_config['catboost']['depth'] = self.mode_config['catboost_depth']
-        self.model_config['catboost']['use_multi_loss'] = self.mode_config['multi_loss']
-        self.model_config['catboost']['use_quantile_models'] = self.mode_config['quantile_models']
-        
-        # Override NN settings
-        self.model_config['nn']['epochs'] = self.mode_config['nn_epochs']
-        self.model_config['lstm']['epochs'] = self.mode_config['nn_epochs']
-        self.model_config['transformer']['epochs'] = self.mode_config['nn_epochs']
-    
+        """Apply quick/standard/full overrides without changing the tier shape."""
+        catboost_cfg = self.model_config['catboost']
+        transformer_cfg = self.model_config['transformer']
+        training_cfg = self.model_config['training']
+
+        catboost_cfg['iterations'] = self.mode_config['catboost_iterations']
+        catboost_cfg['use_multi_loss'] = False
+        catboost_cfg['use_quantile_models'] = True
+
+        transformer_cfg['epochs'] = self.mode_config['transformer_epochs']
+        training_cfg['early_stop_patience'] = max(8, training_cfg.get('early_stop_patience', 12))
+
     def prepare_data(
         self,
         train_df: pd.DataFrame,
         test_date: Optional[str] = None,
         val_ratio: float = 0.15,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Prepare and split data for training.
-        
-        Args:
-            train_df: Full training DataFrame with features
-            test_date: Date to split test set (games >= this date)
-            val_ratio: Ratio of training data to use for validation
-            
-        Returns:
-            Tuple of (fit_df, val_df, test_df)
-        """
+        """Split the engineered dataset into chronological fit/val/test sets."""
         if 'GAME_DATE' not in train_df.columns:
             raise ValueError("Training data must include a GAME_DATE column")
         if not 0 < val_ratio < 1:
@@ -287,42 +192,28 @@ class TrainingPipeline:
 
         df = train_df.copy()
         df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
-        df = df.dropna(subset=['GAME_DATE']).sort_values('GAME_DATE').reset_index(drop=True)
+        df = df.dropna(subset=['GAME_DATE']).sort_values('GAME_DATE')
 
         if len(df) < 3:
-            raise ValueError(
-                f"Need at least 3 dated rows to build train/validation/test splits, got {len(df)}"
-            )
+            raise ValueError("Need at least 3 dated rows to build train/validation/test splits")
 
         split_date_str = test_date or self.model_config.get('training', {}).get('test_split_date', '2024-03-01')
         split_date = pd.to_datetime(split_date_str)
 
-        # Temporal split for test
         test_df = df[df['GAME_DATE'] >= split_date].copy()
         train_before = df[df['GAME_DATE'] < split_date].copy()
 
         if train_before.empty or test_df.empty:
             fallback_test_size = min(max(1, int(len(df) * 0.15)), len(df) - 2)
-            if fallback_test_size < 1:
-                raise ValueError(
-                    "Unable to create a non-empty temporal holdout split. "
-                    "Add more historical rows before training."
-                )
-
-            logger.warning(
-                "Configured test split date %s produced an empty train or test partition. "
-                "Falling back to a chronological 85/15 split for this run.",
-                split_date.strftime('%Y-%m-%d'),
-            )
             train_before = df.iloc[:-fallback_test_size].copy()
             test_df = df.iloc[-fallback_test_size:].copy()
-
-        # Split train into fit/val
-        if len(train_before) < 2:
-            raise ValueError(
-                "Need at least 2 rows before the test split date to create fit/validation sets. "
-                "Fetch more historical data or choose an earlier split."
+            logger.warning(
+                "Configured split date %s produced an empty partition; using chronological fallback.",
+                split_date.strftime('%Y-%m-%d'),
             )
+
+        if len(train_before) < 2:
+            raise ValueError("Need more historical rows before the split date to create fit/validation sets")
 
         split_idx = int(len(train_before) * (1 - val_ratio))
         split_idx = min(max(split_idx, 1), len(train_before) - 1)
@@ -330,40 +221,37 @@ class TrainingPipeline:
         val_df = train_before.iloc[split_idx:].copy()
 
         if fit_df.empty or val_df.empty or test_df.empty:
-            raise ValueError(
-                "Temporal split produced an empty fit, validation, or test partition. "
-                "Adjust the split date or fetch more data."
-            )
-        
-        # Select features
+            raise ValueError("Temporal split produced an empty fit, validation, or test partition")
+
         self.feature_cols = self._select_features(fit_df)
-        self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] 
-                           if c in self.feature_cols]
-        
+        self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+
         logger.info(
-            f"Data prepared: fit={len(fit_df)}, val={len(val_df)}, test={len(test_df)} "
-            f"(split_date={split_date.strftime('%Y-%m-%d')})"
+            "Data prepared: fit=%s, val=%s, test=%s, features=%s",
+            len(fit_df),
+            len(val_df),
+            len(test_df),
+            len(self.feature_cols or []),
         )
-        logger.info(f"Features: {len(self.feature_cols)} (categorical: {len(self.cat_features)})")
-        
         return fit_df, val_df, test_df
-    
+
     def _select_features(self, df: pd.DataFrame) -> List[str]:
-        """Select valid feature columns."""
-        # Exclude non-feature columns
+        """Select leakage-safe numeric features."""
+        targets = set(self.TARGETS)
         exclude = {
             'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
             'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
             'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
         }
-        exclude.update(self.TARGETS)
-        
-        # Safe prefixes and patterns
+        exclude.update(targets)
+
         safe_prefixes = ('ROLL_', 'EWMA_', 'VS_OPP_', 'PROJ_', 'LEAGUE_PCT_')
-        safe_substrings = ('TREND', 'BAYESIAN', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX',
-                         'SEASON_AVG', 'SEASON_SIN', 'SEASON_COS', 'HOT_STREAK', 'COLD_STREAK',
-                         'POTENTIAL', 'B2B_IMPACT', 'FATIGUE', 'EFF_Z_SCORE', 'FANTASY',
-                         'SOS_', 'PACE_ADJ', 'DEF_MATCHUP', 'OPP_DEF')
+        safe_substrings = (
+            'TREND', 'BAYESIAN', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX',
+            'SEASON_AVG', 'SEASON_SIN', 'SEASON_COS', 'HOT_STREAK', 'COLD_STREAK',
+            'POTENTIAL', 'B2B_IMPACT', 'FATIGUE', 'EFF_Z_SCORE', 'FANTASY',
+            'SOS_', 'PACE_ADJ', 'DEF_MATCHUP', 'OPP_DEF',
+        )
         safe_exact = {
             'IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
             'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK',
@@ -371,325 +259,393 @@ class TrainingPipeline:
             'MINS_LAST_7', 'EST_POSS', 'TEAM_PACE_10', 'PACE_FACTOR',
             'STAR_TEAMMATE_OUT',
         }
-        
-        # Filter numeric columns
-        features = []
+
+        features: List[str] = []
         for col in df.columns:
-            if col in exclude or df[col].dtype not in ('int64', 'float64', 'int32', 'float32'):
+            if col in exclude:
                 continue
-            
-            # Check if safe
-            if col in safe_exact:
+            if df[col].dtype not in ('int64', 'float64', 'int32', 'float32'):
+                continue
+            if col in safe_exact or any(col.startswith(p) for p in safe_prefixes) or any(s in col for s in safe_substrings):
                 features.append(col)
-            elif any(col.startswith(p) for p in safe_prefixes):
+                continue
+            if not any(t.lower() in col.lower() for t in targets):
                 features.append(col)
-            elif any(s in col for s in safe_substrings):
-                features.append(col)
-            elif not any(t.lower() in col.lower() for t in self.TARGETS):
-                features.append(col)
-        
+
         return features
-    
-    def train(
-        self,
-        fit_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-    ) -> Dict[str, Any]:
-        """Train all models.
-        
-        Args:
-            fit_df: Training data
-            val_df: Validation data
-            
-        Returns:
-            Dictionary of training results
-        """
-        # Start experiment
-        self.experiment.start_run(
-            config={
-                'mode': self.mode,
-                'model_config': self.model_config,
-                'hw_info': self.hw_info,
-            },
-            notes=f"Training run in {self.mode} mode"
-        )
-        
-        overall_start = time.time()
-        results = {}
-        
-        # Clean data
-        fit_df = self._clean_data(fit_df)
-        val_df = self._clean_data(val_df)
-        
-        # Extract features
-        X_fit = fit_df[self.feature_cols]
-        X_val = val_df[self.feature_cols]
-        
-        # Train CatBoost models (parallel)
-        logger.info("=== Training CatBoost Models ===")
-        catboost_results = self._train_catboost_parallel(X_fit, X_val, fit_df, val_df)
-        results['catboost'] = catboost_results
-        
-        # Train NN models if enabled
-        if self.mode_config['train_nn_models']:
-            logger.info("=== Training Neural Network Models ===")
-            
-            # Joint NN
-            nn_results = self._train_joint_nn(X_fit, X_val, fit_df, val_df)
-            results['joint_nn'] = nn_results
-            
-            # Clear GPU memory between models
-            clear_gpu_memory()
-            
-            # LSTM (if we have sequence data)
-            if 'lstm' in self.model_config:
-                lstm_results = self._train_lstm(fit_df, val_df)
-                results['lstm'] = lstm_results
-                clear_gpu_memory()
-            
-            # Transformer
-            if 'transformer' in self.model_config:
-                transformer_results = self._train_transformer(fit_df, val_df)
-                results['transformer'] = transformer_results
-                clear_gpu_memory()
-        
-        # End experiment
-        total_time = time.time() - overall_start
-        self.experiment.log_params({'total_training_time': total_time})
-        self.experiment.end_run('completed')
-        
-        # Save feature columns for inference
-        self._save_feature_cols()
-        
-        logger.info(f"=== Training Complete: {total_time:.1f}s ===")
-        
-        return results
-    
+
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Clean data for training."""
+        """Fill feature NaNs and coerce targets to numeric."""
         df = df.copy()
-        
-        # Fill NaN in features
-        df[self.feature_cols] = df[self.feature_cols].fillna(0)
-        
-        # Clean targets
+        if self.feature_cols is not None:
+            df[self.feature_cols] = df[self.feature_cols].fillna(0)
+
         for target in self.TARGETS:
-            if target in df.columns:
-                df[target] = pd.to_numeric(df[target], errors='coerce').fillna(0)
-        
+            clean_col = f'{target}_CLEAN' if f'{target}_CLEAN' in df.columns else target
+            if clean_col in df.columns:
+                df[target] = pd.to_numeric(df[clean_col], errors='coerce').fillna(0)
+
         return df
-    
+
+    def _catboost_train_config(self) -> Dict[str, Any]:
+        cfg = dict(self.model_config['catboost'])
+        cfg['use_multi_loss'] = False
+        cfg['use_quantile_models'] = True
+        cfg['use_per_target_tuning'] = True
+        return cfg
+
     def _train_catboost_parallel(
         self,
-        X_fit: pd.DataFrame,
-        X_val: pd.DataFrame,
         fit_df: pd.DataFrame,
         val_df: pd.DataFrame,
     ) -> Dict[str, TrainResult]:
-        """Train CatBoost models in parallel across targets."""
-        cat_config = self.model_config['catboost']
+        """Train one CatBoost regressor per stat."""
+        cat_config = self._catboost_train_config()
         cpu_count = os.cpu_count() or 1
         requested_workers = self.max_workers if self.parallel else 1
         max_workers = max(1, requested_workers)
-
         if self.use_gpu and max_workers > 1:
-            logger.info(
-                f"GPU CatBoost detected; reducing max_workers from {max_workers} to 1 to avoid GPU contention"
-            )
+            logger.info("Reducing CatBoost workers to 1 to avoid GPU contention")
             max_workers = 1
 
         thread_count_per_model = max(1, cpu_count // max_workers)
+        cat_config = {**cat_config, 'thread_count': thread_count_per_model}
+
         logger.info(
-            f"CatBoost training setup: cores={cpu_count}, max_workers={max_workers}, "
-            f"thread_count_per_model={thread_count_per_model}"
+            "CatBoost setup: cores=%s workers=%s thread_count_per_model=%s",
+            cpu_count,
+            max_workers,
+            thread_count_per_model,
         )
 
         if self.parallel and len(self.TARGETS) > 1:
-            # Parallel training
-            logger.info(
-                f"Training {len(self.TARGETS)} CatBoost targets in parallel "
-                f"(workers={max_workers}, thread_count_per_model={thread_count_per_model})"
-            )
-
             results_list = Parallel(n_jobs=max_workers, prefer='threads')(
                 delayed(train_catboost_target)(
                     target=target,
-                    X_train=X_fit,
+                    X_train=fit_df[self.feature_cols],
                     y_train=fit_df[target],
-                    X_val=X_val,
+                    X_val=val_df[self.feature_cols],
                     y_val=val_df[target],
-                    config={**cat_config, 'thread_count': thread_count_per_model},
+                    config=cat_config,
                     cat_features=self.cat_features,
                     sample_weight=None,
                     use_gpu=self.use_gpu,
                 )
                 for target in self.TARGETS
             )
-
             results = dict(results_list)
         else:
-            # Sequential training
             results = {}
             for target in self.TARGETS:
-                logger.info(
-                    f"Training CatBoost for {target} "
-                    f"(workers={max_workers}, thread_count={thread_count_per_model})"
-                )
                 _, result = train_catboost_target(
                     target=target,
-                    X_train=X_fit,
+                    X_train=fit_df[self.feature_cols],
                     y_train=fit_df[target],
-                    X_val=X_val,
+                    X_val=val_df[self.feature_cols],
                     y_val=val_df[target],
-                    config={**cat_config, 'thread_count': thread_count_per_model},
+                    config=cat_config,
                     cat_features=self.cat_features,
                     sample_weight=None,
                     use_gpu=self.use_gpu,
                 )
                 results[target] = result
-        
-        # Log metrics
+
         for target, result in results.items():
             self.experiment.log_model_metrics('catboost', result.metrics, target)
-        
-        # Save models
-        for target, result in results.items():
             trainer = result.model
-            trainer.save(self.models_dir)
-            self.trainers[f'catboost_{target}'] = trainer
-        
+            if isinstance(trainer, CatBoostTrainer):
+                self.models[target] = trainer.primary_model
+                if trainer.mae_model is not None:
+                    self.catboost_mae_models[target] = trainer.mae_model
+                if trainer.quantile_low_model is not None or trainer.quantile_high_model is not None:
+                    self.catboost_quantile_models[target] = {
+                        k: v for k, v in {
+                            'low': trainer.quantile_low_model,
+                            'high': trainer.quantile_high_model,
+                        }.items() if v is not None
+                    }
+                self.trainers[f'catboost_{target}'] = trainer
+            else:
+                self.models[target] = trainer
+
         return results
-    
-    def _train_joint_nn(
+
+    def _build_sequence_batch(
         self,
-        X_fit: pd.DataFrame,
-        X_val: pd.DataFrame,
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        target_cols: List[str],
+        seq_len: int,
+        target_index_set: Optional[set] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """Build sliding window sequences for a set of player rows."""
+        sequences: List[np.ndarray] = []
+        targets: List[np.ndarray] = []
+        indices: List[int] = []
+
+        df_sorted = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
+        for _, group in df_sorted.groupby('PLAYER_ID', sort=False):
+            if len(group) < seq_len + 1:
+                continue
+
+            group_features = group[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+            group_targets = group[target_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+            group_indices = list(group.index)
+
+            for idx in range(seq_len, len(group)):
+                target_idx = group_indices[idx]
+                if target_index_set is not None and target_idx not in target_index_set:
+                    continue
+                sequences.append(group_features[idx - seq_len:idx])
+                targets.append(group_targets[idx])
+                indices.append(target_idx)
+
+        if not sequences:
+            return (
+                np.empty((0, seq_len, len(feature_cols)), dtype=np.float32),
+                np.empty((0, len(target_cols)), dtype=np.float32),
+                [],
+            )
+
+        return np.asarray(sequences, dtype=np.float32), np.asarray(targets, dtype=np.float32), indices
+
+    def _predict_transformer_batch(self, model: TransformerWrapper, sequences: np.ndarray) -> np.ndarray:
+        """Run a TransformerWrapper on a batch of sequences."""
+        if sequences.size == 0:
+            return np.empty((0, len(self.TARGETS)), dtype=np.float32)
+
+        seq = (sequences - model.feat_mean) / model.feat_std
+        seq_tensor = torch.from_numpy(seq.astype(np.float32))
+        seq_tensor = seq_tensor.to(model.device)
+
+        device_str = model.device.type
+        use_amp = device_str == 'cuda'
+        amp_dtype = torch.bfloat16 if use_amp and hasattr(torch, 'bfloat16') else None
+        with torch.no_grad():
+            with torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
+                preds = model.model(seq_tensor).detach().cpu().numpy()
+        return preds
+
+    def _evaluate_transformer_validation(
+        self,
+        model: TransformerWrapper,
         fit_df: pd.DataFrame,
         val_df: pd.DataFrame,
-    ) -> TrainResult:
-        """Train joint multi-output neural network."""
-        try:
-            from src.models.multi_output_nn import MultiOutputNN
-            from src.training.nn_trainer import NeuralNetworkTrainer
-        except ModuleNotFoundError:
-            try:
-                from multi_output_nn import MultiOutputNN
-                from nn_trainer import NeuralNetworkTrainer
-            except ModuleNotFoundError as exc:
-                logger.warning(f'Skipping joint NN training because required model code is unavailable: {exc}')
-                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
-        
-        nn_config = self.model_config['nn']
-        
-        # Get numeric features only
-        numeric_features = [c for c in self.feature_cols if c not in self.cat_features]
-        
-        trainer = NeuralNetworkTrainer(
-            model_name='joint_nn',
-            config=nn_config,
-            model_class=MultiOutputNN,
-            model_kwargs={
-                'input_dim': len(numeric_features),
-                'output_dim': len(self.CORE_TARGETS),
-                'hidden_dim': nn_config.get('hidden_dim', 512),
-                'num_blocks': nn_config.get('num_blocks', 6),
-                'dropout': nn_config.get('dropout', 0.3),
-            },
-            use_gpu=self.use_gpu,
-            use_amp=nn_config.get('amp', True),
-            use_compile=nn_config.get('use_compile', False),
+    ) -> Dict[str, float]:
+        """Compute per-target validation MAE for the sequence model."""
+        seq_len = int(model.seq_len)
+        combined_df = pd.concat([fit_df, val_df], axis=0)
+        sequences, targets, _ = self._build_sequence_batch(
+            combined_df,
+            self.feature_cols,
+            self.TARGETS,
+            seq_len,
+            target_index_set=set(val_df.index),
         )
-        
-        X_fit_num = fit_df[numeric_features].values
-        X_val_num = val_df[numeric_features].values
-        y_fit = fit_df[self.CORE_TARGETS].values
-        y_val = val_df[self.CORE_TARGETS].values
-        
-        result = trainer.fit(X_fit_num, y_fit, X_val_num, y_val)
-        
-        # Log metrics
-        self.experiment.log_model_metrics('joint_nn', result.metrics)
-        
-        # Save model
-        trainer.save(self.models_dir / 'joint_stats_nn.pkl')
-        self.trainers['joint_nn'] = trainer
-        
-        return result
-    
-    def _train_lstm(
+
+        if len(sequences) == 0:
+            return {}
+
+        preds = self._predict_transformer_batch(model, sequences)
+        metrics: Dict[str, float] = {}
+        for i, target in enumerate(self.TARGETS):
+            metrics[target] = float(np.mean(np.abs(targets[:, i] - preds[:, i])))
+
+        metrics['mean_mae'] = float(np.mean([metrics[t] for t in self.TARGETS]))
+        return metrics
+
+    def _train_transformer_model(self, fit_df: pd.DataFrame, val_df: pd.DataFrame) -> TrainResult:
+        """Train the single sequence Transformer used in the ensemble."""
+        logger.info("Training Transformer sequence model...")
+        transformer_cfg = dict(self.model_config['transformer'])
+        nn_features = [c for c in self.feature_cols if c not in self.cat_features]
+        seq_len = int(transformer_cfg.get('seq_len', transformer_cfg.get('max_seq_length', 10)))
+
+        TransformerWrapper = _load_transformer_wrapper()
+        model = TransformerWrapper(
+            input_dim=len(nn_features),
+            seq_len=seq_len,
+            config=transformer_cfg,
+        )
+
+        model.fit(fit_df, nn_features, self.TARGETS)
+        model_path = self.models_dir / 'attention_transformer.pkl'
+        model.save(str(model_path))
+
+        self.transformer_model = model
+        self.attention_model = model
+        self.temporal_model = model
+
+        metrics = self._evaluate_transformer_validation(model, fit_df, val_df)
+        self.experiment.log_model_metrics('transformer', metrics)
+
+        return TrainResult(model=model, metrics=metrics, training_time=0.0)
+
+    def _build_inverse_mae_weights(
         self,
-        fit_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-    ) -> TrainResult:
-        """Train LSTM temporal model."""
-        # LSTM requires sequential data - use existing wrapper
-        try:
-            from src.models.lstm_model import LSTMWrapper
-        except ModuleNotFoundError:
-            try:
-                from lstm_model import LSTMWrapper
-            except ModuleNotFoundError as exc:
-                logger.warning(f'Skipping LSTM training because required model code is unavailable: {exc}')
-                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
-        
-        lstm_config = self.model_config['lstm']
-        numeric_features = [c for c in self.feature_cols if c not in self.cat_features]
-        
-        trainer = LSTMWrapper(
-            input_dim=len(numeric_features),
-            seq_len=lstm_config.get('seq_len', 10),
-            config=lstm_config,
-        )
-        
-        trainer.fit(fit_df, numeric_features, self.CORE_TARGETS)
-        trainer.save(str(self.models_dir / 'temporal_lstm.pkl'))
-        
-        # Log basic info
-        self.experiment.log_model_metrics('lstm', {'trained': 1.0})
-        
-        return TrainResult(model=trainer, metrics={}, training_time=0)
-    
-    def _train_transformer(
-        self,
-        fit_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-    ) -> TrainResult:
-        """Train Transformer attention model."""
-        try:
-            from src.models.transformer_model import TransformerWrapper
-        except ModuleNotFoundError:
-            try:
-                from transformer_model import TransformerWrapper
-            except ModuleNotFoundError as exc:
-                logger.warning(f'Skipping Transformer training because required model code is unavailable: {exc}')
-                return TrainResult(model=None, metrics={'skipped_missing_dependency': 1.0}, training_time=0)
-        
-        tx_config = self.model_config['transformer']
-        numeric_features = [c for c in self.feature_cols if c not in self.cat_features]
-        
-        trainer = TransformerWrapper(
-            input_dim=len(numeric_features),
-            seq_len=tx_config.get('seq_len', 50),
-            config=tx_config,
-        )
-        
-        trainer.fit(fit_df, numeric_features, self.CORE_TARGETS)
-        trainer.save(str(self.models_dir / 'attention_transformer.pkl'))
-        
-        self.experiment.log_model_metrics('transformer', {'trained': 1.0})
-        
-        return TrainResult(model=trainer, metrics={}, training_time=0)
-    
+        catboost_results: Dict[str, TrainResult],
+        transformer_result: TrainResult,
+    ) -> Dict[str, Dict[str, float]]:
+        """Create normalized inverse-MAE blend weights."""
+        weights: Dict[str, Dict[str, float]] = {}
+        tx_metrics = transformer_result.metrics or {}
+        tx_mean_mae = float(tx_metrics.get('mean_mae', 0.0))
+
+        for target in self.TARGETS:
+            cb_mae = float(catboost_results.get(target, TrainResult(None, {}, 0.0)).metrics.get('mae', 0.0))
+            tx_mae = float(tx_metrics.get(target, tx_mean_mae))
+
+            if cb_mae <= 0 and tx_mae <= 0:
+                cb_weight, tx_weight = 1.0, 0.0
+            elif cb_mae <= 0:
+                cb_weight, tx_weight = 0.0, 1.0
+            elif tx_mae <= 0:
+                cb_weight, tx_weight = 1.0, 0.0
+            else:
+                inv_cb = 1.0 / cb_mae
+                inv_tx = 1.0 / tx_mae
+                total = inv_cb + inv_tx
+                cb_weight = inv_cb / total
+                tx_weight = inv_tx / total
+
+            weights[target] = {
+                'catboost': float(cb_weight),
+                'transformer': float(tx_weight),
+                'catboost_mae': float(cb_mae),
+                'transformer_mae': float(tx_mae),
+            }
+
+        return weights
+
     def _save_feature_cols(self) -> None:
-        """Save feature column names."""
         if self.feature_cols:
             joblib.dump(self.feature_cols, self.models_dir / 'feature_cols.pkl')
-            logger.info(f"Saved {len(self.feature_cols)} feature columns")
-    
+            logger.info("Saved %s feature columns", len(self.feature_cols))
+
+    def _save_blend_weights(self) -> None:
+        if self.blend_weights:
+            joblib.dump(self.blend_weights, self.models_dir / 'blend_weights.pkl')
+            logger.info("Saved blend weights for %s targets", len(self.blend_weights))
+
+    def train(
+        self,
+        fit_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Train all active models."""
+        if fit_df is None or fit_df.empty:
+            raise ValueError("Training DataFrame is None or empty")
+        if len(fit_df) < 1000:
+            raise ValueError(f"Training data too small: {len(fit_df)} rows")
+        if val_df is None or val_df.empty:
+            raise ValueError("Validation DataFrame is None or empty")
+
+        if self.feature_cols is None:
+            self.feature_cols = self._select_features(fit_df)
+            self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+
+        required_cols = ['PLAYER_ID', 'GAME_DATE'] + self.TARGETS
+        missing_cols = [c for c in required_cols if c not in fit_df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+
+        fit_df = self._clean_data(fit_df)
+        val_df = self._clean_data(val_df)
+
+        self.experiment.start_run(
+            config={
+                'mode': self.mode,
+                'model_size': self.hw_info.get('tier', 'M'),
+                'model_config': self.model_config,
+                'hw_info': self.hw_info,
+            },
+            notes=f"Training run in {self.mode} mode",
+        )
+
+        overall_start = time.time()
+        results: Dict[str, Any] = {}
+
+        logger.info("=== Training CatBoost Models ===")
+        catboost_results = self._train_catboost_parallel(fit_df, val_df)
+        results['catboost'] = catboost_results
+
+        if self.model_config['transformer']['enabled']:
+            logger.info("=== Training Transformer Model ===")
+            transformer_result = self._train_transformer_model(fit_df, val_df)
+            results['transformer'] = transformer_result
+        else:
+            transformer_result = TrainResult(model=None, metrics={}, training_time=0.0)
+
+        self.blend_weights = self._build_inverse_mae_weights(catboost_results, transformer_result)
+        self._save_blend_weights()
+        self._save_feature_cols()
+
+        total_time = time.time() - overall_start
+        self.experiment.log_params({'total_training_time': total_time, 'model_size': self.hw_info.get('tier', 'M')})
+        self.experiment.end_run('completed')
+
+        logger.info("=== Training Complete: %.1fs ===", total_time)
+        return results
+
+    train_all_models = train
+
+    def load_models(self) -> None:
+        """Load saved models and blend weights from disk."""
+        logger.info("Loading models from disk...")
+
+        feature_cols_path = self.models_dir / 'feature_cols.pkl'
+        if feature_cols_path.exists():
+            self.feature_cols = joblib.load(feature_cols_path)
+            self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+            logger.info("Loaded %s feature columns", len(self.feature_cols))
+
+        self.models = {}
+        self.catboost_mae_models = {}
+        self.catboost_quantile_models = {}
+
+        for target in self.TARGETS:
+            try:
+                trainer = CatBoostTrainer.load(self.models_dir, target)
+            except Exception as exc:
+                logger.debug("Failed to load CatBoost trainer for %s: %s", target, exc)
+                continue
+
+            if trainer.primary_model is not None:
+                self.models[target] = trainer.primary_model
+            if trainer.mae_model is not None:
+                self.catboost_mae_models[target] = trainer.mae_model
+            if trainer.quantile_low_model is not None or trainer.quantile_high_model is not None:
+                self.catboost_quantile_models[target] = {
+                    k: v for k, v in {
+                        'low': trainer.quantile_low_model,
+                        'high': trainer.quantile_high_model,
+                    }.items() if v is not None
+                }
+
+        transformer_path = self.models_dir / 'attention_transformer.pkl'
+        if transformer_path.exists():
+            try:
+                TransformerWrapper = _load_transformer_wrapper()
+                self.transformer_model = TransformerWrapper.load(str(transformer_path))
+                self.attention_model = self.transformer_model
+                self.temporal_model = self.transformer_model
+                logger.info("Loaded Transformer model")
+            except Exception as exc:
+                logger.warning("Failed to load Transformer model: %s", exc)
+
+        blend_path = self.models_dir / 'blend_weights.pkl'
+        if blend_path.exists():
+            try:
+                self.blend_weights = joblib.load(blend_path)
+                logger.info("Loaded blend weights for %s targets", len(self.blend_weights))
+            except Exception as exc:
+                logger.warning("Failed to load blend weights: %s", exc)
+
     def get_summary(self) -> Dict[str, Any]:
-        """Get training summary."""
+        """Return a compact summary for CLI output."""
         return {
             'mode': self.mode,
+            'model_size': self.hw_info.get('tier', 'M'),
             'experiment_name': self.experiment.experiment_name,
             'models_trained': list(self.trainers.keys()),
             'feature_count': len(self.feature_cols) if self.feature_cols else 0,
@@ -697,17 +653,6 @@ class TrainingPipeline:
         }
 
 
-def create_pipeline(
-    mode: str = 'standard',
-    **kwargs
-) -> TrainingPipeline:
-    """Factory function to create a training pipeline.
-    
-    Args:
-        mode: Training mode ('quick', 'standard', 'full')
-        **kwargs: Additional arguments for TrainingPipeline
-        
-    Returns:
-        Configured TrainingPipeline
-    """
+def create_pipeline(mode: str = 'standard', **kwargs) -> TrainingPipeline:
+    """Factory function used by train.py."""
     return TrainingPipeline(mode=mode, **kwargs)

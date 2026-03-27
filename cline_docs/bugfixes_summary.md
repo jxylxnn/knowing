@@ -35,7 +35,7 @@ player_poss = shifted_fga + 0.44 * shifted_fta + shifted_tov
 
 ### ISSUE #2: StackedEnsemble Time-Series Leakage (HIGH - FIXED)
 
-**Location:** `src/models/stacked_ensemble.py`, `fit()` method
+**Location:** legacy ensemble model, `fit()` method
 
 **Problem:** 
 1. Player averages used `cumsum()` which included the current row, causing leakage
@@ -61,7 +61,7 @@ player_avg = df_full.groupby('PLAYER_ID')[self.target_name].transform(
 
 ### ISSUE #3: MultiOutputNN Uncertainty Calculation (MEDIUM - FIXED)
 
-**Location:** `src/models/multi_output_nn.py`, `predict()` method
+**Location:** legacy multi-output model, `predict()` method
 
 **Problem:** Standard deviation was incorrectly computed using `var_` instead of `scale_`.
 
@@ -94,7 +94,7 @@ stds = np.sqrt(vars_scaled) * self.scaler_y.scale_
 
 ### ISSUE #5: StackedEnsemble GPU Parameter Handling (MEDIUM - FIXED)
 
-**Location:** `src/models/stacked_ensemble.py`
+**Location:** legacy ensemble model
 
 **Problem:** The `rf_proxy` model (which is XGBRegressor) wasn't receiving GPU parameters because the condition `if 'xgb' in name` didn't match `'rf_proxy'`.
 
@@ -143,8 +143,8 @@ After these fixes, the following should be verified:
 ## FILES MODIFIED
 
 1. `src/preprocessing/feature_engineer.py` - Fixed data leakage in advanced scoring features
-2. `src/models/stacked_ensemble.py` - Fixed time-series leakage and GPU parameter handling
-3. `src/models/multi_output_nn.py` - Fixed uncertainty calculation
+2. Legacy ensemble model - Fixed time-series leakage and GPU parameter handling
+3. Legacy multi-output model - Fixed uncertainty calculation
 4. `src/models/model_manager.py` - Fixed quantile calibration
 
 ---

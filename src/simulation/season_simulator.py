@@ -72,7 +72,8 @@ class SeasonSimulator:
                         self.game_simulator.simulate_matchup, 
                         row['HOME_TEAM'], 
                         row['AWAY_TEAM'], 
-                        num_sims
+                        num_sims,
+                        row.get('GAME_DATE')
                     ): row for _, row in games_df.iterrows()
                 }
 
@@ -101,7 +102,8 @@ class SeasonSimulator:
                     sim_result = self.game_simulator.simulate_matchup(
                         row['HOME_TEAM'], 
                         row['AWAY_TEAM'], 
-                        num_sims
+                        num_sims,
+                        row.get('GAME_DATE')
                     )
                     
                     if sim_result and 'error' not in sim_result:

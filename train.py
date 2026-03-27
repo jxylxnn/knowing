@@ -82,6 +82,21 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def normalize_model_size(value: str) -> str:
+    """Normalize model-size CLI values to S/M/L/XL or auto."""
+    raw = value.strip()
+    if raw.lower() == 'auto':
+        return 'auto'
+    aliases = {
+        'small': 'S',
+        'medium': 'M',
+        'large': 'L',
+        'pro': 'XL',
+        'ultra': 'XL',
+    }
+    return aliases.get(raw.lower(), raw.upper())
+
+
 def resolve_runtime_path(path_value: str, default_name: str) -> Path:
     """Resolve default relative paths against the project root.
 
@@ -197,9 +212,9 @@ Examples:
         help='Training mode (default: standard)'
     )
     parser.add_argument(
-        '--model-size', type=str, default='auto',
-        choices=['auto', 'small', 'medium', 'large', 'pro', 'ultra'],
-        help='Model size preset (default: auto-detect)'
+        '--model-size', type=normalize_model_size, default='M',
+        choices=['auto', 'S', 'M', 'L', 'XL'],
+        help='Model size preset (default: M)'
     )
     parser.add_argument(
         '--parallel', action='store_true',

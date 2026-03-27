@@ -33,16 +33,16 @@ class CatBoostConfig:
     K-fold cross-validation.
     """
     enabled: bool = True
-    iterations: int = 3000
+    iterations: int = 1500
     learning_rate: float = 0.02
-    depth: int = 8
+    depth: int = 6
     l2_leaf_reg: float = 5.0
     random_strength: float = 1.0
     bagging_temperature: float = 0.5
     border_count: int = 254
     thread_count: int = -1
     random_seed: int = 42
-    early_stopping_rounds: int = 150
+    early_stopping_rounds: int = 80
 
     # Advanced tree structure
     grow_policy: str = "Depthwise"
@@ -55,7 +55,7 @@ class CatBoostConfig:
     diffusion_temperature: float = 10000.0
 
     # Multi-loss training: blend RMSE + MAE models for robustness
-    use_multi_loss: bool = True
+    use_multi_loss: bool = False
     multi_loss_rmse_weight: float = 0.6
     multi_loss_mae_weight: float = 0.4
 
@@ -97,7 +97,7 @@ class TransformerConfig(NeuralNetConfig):
     """Transformer-specific configuration."""
     d_model: int = 128
     nhead: int = 8
-    num_encoder_layers: int = 4
+    num_encoder_layers: int = 3
     dim_feedforward: int = 512
     max_seq_length: int = 10
 
@@ -157,6 +157,15 @@ class SimulationConfig:
     minutes_distribution: str = "dirichlet"  # dirichlet, beta, uniform
     correlation_injection: bool = True
     clutch_adjustment: bool = True
+    seed: int = 42
+    use_context_engine: bool = True
+    use_player_correlations: bool = True
+    use_betting_calibration: bool = True
+    use_minutes_model: bool = True
+    use_error_calibration: bool = True
+    four_factors_weight: float = 0.25
+    detailed_path_threshold: int = 250
+    fast_path_threshold: int = 1000
 
 
 @dataclass
