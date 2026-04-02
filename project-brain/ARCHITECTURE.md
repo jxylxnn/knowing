@@ -40,6 +40,7 @@ Important named functions in `update_data.py`:
    - a Transformer sequence model
    - quantile models
    - blend weights
+   - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
 6. Training writes the runtime artifact set to `models/`:
    - per-target CatBoost model files
    - per-target CatBoost metadata files
@@ -63,6 +64,7 @@ Important current contract:
 
 - `src/training/pipeline.py`, `src/training/catboost_trainer.py`, `src/models/model_manager.py`, and `simulate_season.py` now share one filesystem contract for runtime artifacts.
 - `ModelManager` validates that shared artifacts plus all six per-target CatBoost backbones and metadata exist before simulation loads any models.
+- `TrainingPipeline._predict_transformer_batch()` delegates validation inference through `TransformerWrapper.predict_batch()`, which defaults to the eager model path and safe SDPA backend controls on CUDA.
 
 ### Flow 3: Simulation
 
@@ -158,6 +160,7 @@ Do not change casually:
 Key invariant:
 
 - Training and inference rely on stable feature-column semantics. Adding or renaming columns without updating saved schema expectations is risky.
+- `rolling.py` now materializes its wide rolling/efficiency/momentum outputs in temporary structures and appends them with a single concat per group to avoid pandas fragmentation.
 
 ### `src/training/`
 
@@ -170,7 +173,7 @@ Key invariant:
 ### `src/models/`
 
 - Owns runtime model definitions and model loading.
-- `transformer_model.py` implements the Transformer wrapper and checkpoint compatibility handling.
+- `transformer_model.py` implements the Transformer wrapper, checkpoint compatibility handling, and the eager-safe inference path used by validation/runtime callers.
 - `model_manager.py` loads saved artifacts and exposes runtime prediction methods to the simulator.
 
 Critical coupling:
@@ -178,6 +181,7 @@ Critical coupling:
 - `model_manager.py` assumes specific artifact names exist in `models/`.
 - Training now validates those names before success, and runtime loading fails loudly if the on-disk set is incomplete.
 - Any training-side artifact rename or format change must still be coordinated here.
+- `TransformerWrapper` keeps compile behind an explicit opt-in safety flag. Validation and runtime prediction use the eager model path, and on CUDA they try to force a math SDPA backend when the backend API is available.
 
 ### `src/simulation/`
 

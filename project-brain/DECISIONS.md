@@ -398,3 +398,86 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 
 - If operators want fail-fast behavior for optional input degradation.
 - If a more reliable upstream data provider replaces the current scraper set.
+
+---
+
+## DR-010: Batch Wide Feature-Group Column Assembly Before Concatenation
+
+- Status: active
+- Date: 2026-04-02
+- Confidence: high
+
+### Context
+
+- `src/preprocessing/features/rolling.py` generates a wide set of rolling, efficiency, and momentum features.
+- The previous implementation added many columns one at a time inside loops, which fragmented the DataFrame and produced thousands of pandas `PerformanceWarning` messages during test runs.
+
+### Options Considered
+
+- Keep repeated `df[col] = ...` assignments.
+- Rebuild each feature group in a temporary structure and concatenate once.
+
+### Decision
+
+- Accumulate new feature columns in temporary dicts/Series and attach them with a single `pd.concat(axis=1)` per feature group.
+
+### Why
+
+- This preserves the same feature values and schema while avoiding the fragmentation penalty and warning flood.
+
+### Tradeoffs
+
+- Slightly more temporary memory during feature generation.
+- Much lower fragmentation risk and cleaner test output.
+
+### Consequences
+
+- New wide feature groups should follow the same batched-assembly pattern.
+- Performance changes in preprocessing should be measured against this style, not against repeated column insertion.
+
+### Revisit Triggers
+
+- If pandas internals change enough that the concat path is no longer the better default.
+- If a future feature group has a narrow enough output that repeated insertion is clearly cheaper and still safe.
+
+---
+
+## DR-011: Keep Transformer Validation And Runtime Prediction On The Eager Path By Default
+
+- Status: active
+- Date: 2026-04-02
+- Confidence: high
+
+### Context
+
+- A CUDA training run in this workspace completed Transformer fitting and saved `attention_transformer.pkl`, but failed during validation prediction in a compiled flash-attention path with `CUDA error: invalid configuration argument`.
+- `src/models/transformer_model.py` now retains an eager base model for validation/runtime inference and only compiles when the caller explicitly allows it.
+
+### Options Considered
+
+- Leave `torch.compile` enabled by default and treat the crash as an environment-specific edge case.
+- Disable compile for the Transformer and validate with the eager model path.
+- Build a separate inference-only Transformer wrapper with a more complex dispatch layer.
+
+### Decision
+
+- Default Transformer validation/runtime prediction to the eager path, keep `torch.compile` behind an explicit safety flag, and prefer a math SDPA backend when backend controls are available.
+
+### Why
+
+- The compiled flash-attention path is not stable across the observed CUDA/runtime combination.
+- The eager path still allows safe GPU acceleration through TF32, cuDNN benchmark, and BF16 autocast where supported.
+
+### Tradeoffs
+
+- Slightly lower peak throughput for the Transformer validation/runtime path.
+- Much lower risk of a post-fit validation crash.
+
+### Consequences
+
+- Future compile re-enablement needs regression coverage on the exact target GPU/runtime combination.
+- Training configs must continue to carry an eager-safe inference path.
+
+### Revisit Triggers
+
+- If a future runtime proves the compiled path stable across the supported CUDA matrix and there is a measurable performance win.

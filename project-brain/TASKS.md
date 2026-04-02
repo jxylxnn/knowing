@@ -76,17 +76,6 @@
   - a fresh process can run `ModelManager.load_models()`
   - `simulate_season.py` gets through startup model loading with that artifact set
 
-### Reduce pandas fragmentation in rolling feature generation
-
-- Why it matters: the test suite emits 1612 `PerformanceWarning` messages from `src/preprocessing/features/rolling.py`.
-- Likely files:
-  - `src/preprocessing/features/rolling.py`
-  - `src/preprocessing/feature_engineer.py`
-- Done when:
-  - repeated column insertion is replaced by batch concat or equivalent
-  - warnings are materially reduced
-  - large-dataset runtime is not worse
-
 ### Audit remaining legacy scraper modules for inactive drift
 
 - Why it matters: `rotowire_lineup_scraper.py` and similar alternate paths still look legacy relative to the active simulator stack.
@@ -150,6 +139,16 @@
 
 ## DONE
 
+### Stabilize Transformer validation inference on CUDA
+
+- Completed on 2026-04-02 in code and unit tests.
+- Delivered:
+  - `src/models/transformer_model.py` now keeps an eager base model for validation/runtime inference, only compiles when explicitly allowed, and prefers a safe math SDPA backend during eager inference on CUDA.
+  - `src/training/pipeline.py` now delegates Transformer validation batch prediction through the wrapper instead of calling the compiled model directly.
+  - `src/config/model_config.py` now generates Transformer configs with `use_compile` disabled by default and marks compile as opt-in.
+  - `train_colab.ipynb` now launches training/simulation through `subprocess.run(..., check=True)` so failed runs stop the notebook instead of printing fake success text.
+  - Regression tests now cover the eager validation path and the training pipeline delegation seam.
+
 ### Harden scraper reliability and surface degraded simulation inputs
 
 - Completed on 2026-04-02.
@@ -192,3 +191,13 @@
   - `83 passed, 2 skipped`
 - Important follow-up:
   - AGENTS guidance about a known failing test is stale and should not be trusted as current repo state.
+
+### Reduce pandas fragmentation in rolling feature generation
+
+- Completed on 2026-04-02.
+- Delivered:
+  - `src/preprocessing/features/rolling.py` now batches new feature columns into temporary Series/DataFrames and concatenates them once per feature group.
+  - `tests/test_preprocessing/test_feature_engineer.py` now asserts the feature-engineering path does not emit pandas `PerformanceWarning` fragmentation warnings.
+  - Full test suite runtime after the refactor: `94 passed, 2 skipped`.
+- Follow-up:
+  - a real-data large-scale profile can still be collected later if the team wants a stricter production baseline.

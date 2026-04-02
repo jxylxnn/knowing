@@ -14,17 +14,19 @@ Optimizations included:
 - Optimal DataLoader worker configuration
 """
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.checkpoint import checkpoint
+import logging
+import math
+from contextlib import nullcontext
+from typing import List, Tuple, Dict, Any, Optional
+
 import numpy as np
 import pandas as pd
-import logging
-from typing import List, Tuple, Dict, Any, Optional
-import math
+import torch
 import torch.backends.cudnn as cudnn
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.checkpoint import checkpoint
+from torch.utils.data import DataLoader, Dataset
 
 from src.models.gpu_utils import (
     get_device, 
@@ -45,6 +47,38 @@ cudnn.benchmark = True
 
 # Check if Flash Attention is available
 _FLASH_ATTENTION_AVAILABLE = check_flash_attention_available()
+
+
+def _safe_sdpa_context():
+    """Return a context that prefers math SDPA kernels on CUDA when possible."""
+    if not torch.cuda.is_available():
+        return nullcontext()
+
+    backend_cuda = getattr(torch.backends, 'cuda', None)
+    if backend_cuda is not None:
+        sdp_kernel = getattr(backend_cuda, 'sdp_kernel', None)
+        if callable(sdp_kernel):
+            try:
+                return sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True)
+            except TypeError:
+                try:
+                    return sdp_kernel(False, False, True)
+                except Exception:
+                    return nullcontext()
+            except Exception:
+                return nullcontext()
+
+    attention_module = getattr(torch.nn, 'attention', None)
+    if attention_module is not None:
+        sdpa_kernel = getattr(attention_module, 'sdpa_kernel', None)
+        sdp_backend = getattr(attention_module, 'SDPBackend', None)
+        if callable(sdpa_kernel) and sdp_backend is not None and hasattr(sdp_backend, 'MATH'):
+            try:
+                return sdpa_kernel(sdp_backend.MATH)
+            except Exception:
+                return nullcontext()
+
+    return nullcontext()
 
 
 class PlayerSequenceDataset(Dataset):
@@ -132,6 +166,9 @@ class TransformerWrapper:
         'warmup_ratio': 0.1,
         'grad_checkpoint': False,
         'use_compile': False,
+        'allow_compile': False,
+        'validation_use_eager': True,
+        'validation_force_safe_sdpa': True,
     }
     
     def __init__(
@@ -148,7 +185,7 @@ class TransformerWrapper:
         self.output_dim = int(output_dim if output_dim is not None else self.config.get('output_dim', 6))
         self.config['output_dim'] = self.output_dim
         
-        self.model = TransformerModel(
+        self.eager_model = TransformerModel(
             input_dim=input_dim,
             d_model=self.config['d_model'],
             nhead=self.config['nhead'],
@@ -158,56 +195,61 @@ class TransformerWrapper:
             dropout=self.config['dropout'],
             grad_checkpoint=self.config['grad_checkpoint']
         ).to(self.device)
-        
-        # Apply torch.compile for PyTorch 2.0+ speedup if enabled
-        use_compile = self.config.get('use_compile', False) and get_compile_status()
-        if use_compile:
-            self.model = apply_compile(self.model, True, "Transformer")
+
+        self.model = self.eager_model
+        self.validation_model = self.eager_model
+        self.compile_enabled = False
+
+        # Keep torch.compile opt-in and disabled unless the caller explicitly
+        # allows it on the current environment.
+        requested_compile = bool(self.config.get('use_compile', False))
+        allow_compile = bool(self.config.get('allow_compile', False))
+        if requested_compile and allow_compile and get_compile_status():
+            compiled_model = apply_compile(self.eager_model, True, "Transformer")
+            if compiled_model is not self.eager_model:
+                self.model = compiled_model
+                self.compile_enabled = True
+        elif requested_compile and not allow_compile:
+            logger.info("Transformer torch.compile disabled by safety flag; using eager model.")
         
         self.input_dim = input_dim
         self.is_trained = False
         self.feat_mean = None
         self.feat_std = None
+        self.validation_use_eager = bool(self.config.get('validation_use_eager', True))
+        self.validation_force_safe_sdpa = bool(self.config.get('validation_force_safe_sdpa', True))
         
         logger.info(f"Transformer initialized: d_model={self.config['d_model']}, "
                    f"heads={self.config['nhead']}, layers={self.config['num_layers']}, "
                    f"ff_dim={self.config['dim_feedforward']}, grad_ckpt={self.config['grad_checkpoint']}, "
-                   f"compile={use_compile}, device={self.device}")
+                   f"compile={self.compile_enabled}, validation_eager={self.validation_use_eager}, "
+                   f"safe_sdpa={self.validation_force_safe_sdpa}, device={self.device}")
 
     def _create_sequences(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         """Creates sliding window sequences for each player (vectorized)."""
         df_sorted = df.sort_values(['PLAYER_ID', 'GAME_DATE'])
-        features = df_sorted[feature_cols].values
-        targets = df_sorted[target_cols].values
-        player_ids = df_sorted['PLAYER_ID'].values
+        sequences = []
+        targets = []
 
-        player_boundaries = np.flatnonzero(np.diff(player_ids) != 0) + 1
-        starts = np.concatenate([[0], player_boundaries])
-        ends = np.concatenate([player_boundaries, [len(player_ids)]])
-        group_lens = ends - starts
+        for _, group in df_sorted.groupby('PLAYER_ID', sort=False):
+            if len(group) < self.seq_len + 1:
+                continue
 
-        valid_mask = group_lens >= (self.seq_len + 1)
-        valid_starts = starts[valid_mask]
-        valid_lens = group_lens[valid_mask]
+            features = group[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+            targets_raw = group[target_cols].apply(pd.to_numeric, errors='coerce')
+            valid_target_rows = targets_raw.notna().all(axis=1).values
+            targets_arr = targets_raw.fillna(0).values.astype(np.float32)
 
-        total_seqs = int(np.sum(valid_lens - self.seq_len))
-        if total_seqs == 0:
+            for idx in range(self.seq_len, len(group)):
+                if not valid_target_rows[idx]:
+                    continue
+                sequences.append(features[idx - self.seq_len: idx])
+                targets.append(targets_arr[idx])
+
+        if not sequences:
             return np.array([]), np.array([])
 
-        n_feat = features.shape[1]
-        n_tgt = targets.shape[1]
-        X = np.empty((total_seqs, self.seq_len, n_feat), dtype=np.float32)
-        y = np.empty((total_seqs, n_tgt), dtype=np.float32)
-
-        idx = 0
-        for s, gl in zip(valid_starts, valid_lens):
-            n_seq = gl - self.seq_len
-            for i in range(n_seq):
-                X[idx] = features[s + i: s + i + self.seq_len]
-                y[idx] = targets[s + i + self.seq_len]
-                idx += 1
-
-        return X, y
+        return np.asarray(sequences, dtype=np.float32), np.asarray(targets, dtype=np.float32)
 
     def fit(self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str], 
             epochs: Optional[int] = None):
@@ -300,24 +342,50 @@ class TransformerWrapper:
         self.is_trained = True
         logger.info(f"Transformer training complete. Final loss: {best_loss:.4f}")
 
-    def predict(self, sequence: np.ndarray) -> np.ndarray:
+    def _predict_sequences(self, sequences: np.ndarray, *, use_eager: bool = True) -> np.ndarray:
         if not self.is_trained:
             return None
-        self.model.eval()
-        sequence = (sequence - self.feat_mean) / self.feat_std
-        seq_tensor = torch.from_numpy(np.asarray(sequence, dtype=np.float32)).unsqueeze(0).to(self.device)
-        
+
+        sequences = np.asarray(sequences, dtype=np.float32)
+        if sequences.size == 0:
+            return np.empty((0, self.output_dim), dtype=np.float32)
+
+        if sequences.ndim == 2:
+            sequences = np.expand_dims(sequences, axis=0)
+
+        model = self.eager_model if use_eager or not self.compile_enabled else self.model
+        model.eval()
+
+        sequences = (sequences - self.feat_mean) / self.feat_std
+        seq_tensor = torch.from_numpy(sequences.astype(np.float32)).to(self.device)
+
         device_str = self.device.type
         use_amp = device_str == 'cuda'
         amp_dtype = get_autocast_dtype() if use_amp else None
-        with torch.no_grad(), torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
-            preds = self.model(seq_tensor).cpu().numpy()
+        sdpa_context = _safe_sdpa_context() if (use_eager and self.validation_force_safe_sdpa and use_amp) else nullcontext()
+
+        with torch.no_grad(), sdpa_context, torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
+            preds = model(seq_tensor).detach().cpu().numpy()
         return preds
+
+    def predict(self, sequence: np.ndarray) -> np.ndarray:
+        if not self.is_trained:
+            return None
+        preds = self._predict_sequences(sequence, use_eager=self.validation_use_eager)
+        if preds is None:
+            return None
+        return preds
+
+    def predict_batch(self, sequences: np.ndarray, *, use_eager: Optional[bool] = None) -> np.ndarray:
+        """Predict a batch of sequences, defaulting to the eager validation path."""
+        if use_eager is None:
+            use_eager = self.validation_use_eager
+        return self._predict_sequences(sequences, use_eager=use_eager)
 
     def save(self, path: str):
         import joblib
         state = {
-            'model_state': self.model.state_dict(),
+            'model_state': self.eager_model.state_dict(),
             'feat_mean': self.feat_mean,
             'feat_std': self.feat_std,
             'input_dim': self.input_dim,
@@ -349,6 +417,8 @@ class TransformerWrapper:
             output_dim=output_dim,
         )
         instance.model.load_state_dict(state['model_state'])
+        if hasattr(instance, 'eager_model'):
+            instance.eager_model.load_state_dict(state['model_state'])
         instance.feat_mean = state['feat_mean']
         instance.feat_std = state['feat_std']
         instance.is_trained = True

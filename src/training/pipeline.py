@@ -33,9 +33,10 @@ from src.models.gpu_utils import (
     clear_gpu_memory,
     initialize_gpu_optimizations,
 )
-from src.training.catboost_trainer import CatBoostTrainer, train_catboost_target
+from src.training.catboost_trainer import CatBoostTrainer, ConstantRegressor, train_catboost_target
 from src.training.experiment import ExperimentTracker
 from src.training.trainer import TrainResult
+from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,8 @@ class TrainingPipeline:
 
         self.feature_cols: Optional[List[str]] = None
         self.cat_features: List[str] = []
+        self.feature_schema: Optional[FeatureSchema] = None
+        self.feature_selector = FeatureSelector(self.TARGETS)
         self.models: Dict[str, Any] = {}
         self.catboost_mae_models: Dict[str, Any] = {}
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
@@ -223,8 +226,9 @@ class TrainingPipeline:
         if fit_df.empty or val_df.empty or test_df.empty:
             raise ValueError("Temporal split produced an empty fit, validation, or test partition")
 
-        self.feature_cols = self._select_features(fit_df)
-        self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+        self.feature_schema = self.feature_selector.fit(fit_df)
+        self.feature_cols = self.feature_schema.feature_cols
+        self.cat_features = list(self.feature_schema.categorical_cols)
 
         logger.info(
             "Data prepared: fit=%s, val=%s, test=%s, features=%s",
@@ -236,54 +240,16 @@ class TrainingPipeline:
         return fit_df, val_df, test_df
 
     def _select_features(self, df: pd.DataFrame) -> List[str]:
-        """Select leakage-safe numeric features."""
-        targets = set(self.TARGETS)
-        exclude = {
-            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
-            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
-            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
-        }
-        exclude.update(targets)
-
-        safe_prefixes = ('ROLL_', 'EWMA_', 'VS_OPP_', 'PROJ_', 'LEAGUE_PCT_')
-        safe_substrings = (
-            'TREND', 'BAYESIAN', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX',
-            'SEASON_AVG', 'SEASON_SIN', 'SEASON_COS', 'HOT_STREAK', 'COLD_STREAK',
-            'POTENTIAL', 'B2B_IMPACT', 'FATIGUE', 'EFF_Z_SCORE', 'FANTASY',
-            'SOS_', 'PACE_ADJ', 'DEF_MATCHUP', 'OPP_DEF',
-        )
-        safe_exact = {
-            'IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
-            'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK',
-            'CLOSE_GAME', 'EXP_MARGIN', 'DAYS_SINCE_LAST', 'MINS_LAST_3',
-            'MINS_LAST_7', 'EST_POSS', 'TEAM_PACE_10', 'PACE_FACTOR',
-            'STAR_TEAMMATE_OUT',
-        }
-
-        features: List[str] = []
-        for col in df.columns:
-            if col in exclude:
-                continue
-            if df[col].dtype not in ('int64', 'float64', 'int32', 'float32'):
-                continue
-            if col in safe_exact or any(col.startswith(p) for p in safe_prefixes) or any(s in col for s in safe_substrings):
-                features.append(col)
-                continue
-            if not any(t.lower() in col.lower() for t in targets):
-                features.append(col)
-
-        return features
+        """Select canonical leakage-safe features via the shared selector."""
+        return self.feature_selector.fit(df).feature_cols
 
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fill feature NaNs and coerce targets to numeric."""
         df = df.copy()
-        if self.feature_cols is not None:
-            df[self.feature_cols] = df[self.feature_cols].fillna(0)
-
-        for target in self.TARGETS:
-            clean_col = f'{target}_CLEAN' if f'{target}_CLEAN' in df.columns else target
-            if clean_col in df.columns:
-                df[target] = pd.to_numeric(df[clean_col], errors='coerce').fillna(0)
+        if self.feature_schema is not None:
+            aligned = self.feature_selector.transform(df, self.feature_schema, strict=False, fill_value=0.0)
+            for col in aligned.columns:
+                df[col] = aligned[col].values
 
         return df
 
@@ -318,31 +284,69 @@ class TrainingPipeline:
             thread_count_per_model,
         )
 
+        filtered_frames: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        results: Dict[str, TrainResult] = {}
+        for target in self.TARGETS:
+            fit_target = fit_df[fit_df[target].notna()].copy() if target in fit_df.columns else fit_df.copy()
+            val_target = val_df[val_df[target].notna()].copy() if target in val_df.columns else val_df.copy()
+            if fit_target.empty or val_target.empty:
+                logger.warning(
+                    "Target %s has too little labeled data after filtering; using constant fallback.",
+                    target,
+                )
+                fallback_value = float(fit_df[target].dropna().mean()) if target in fit_df.columns and fit_df[target].notna().any() else 0.0
+                trainer = CatBoostTrainer(
+                    model_name=f"catboost_{target}",
+                    target=target,
+                    config=cat_config,
+                    use_gpu=False,
+                    use_multi_loss=cat_config.get('use_multi_loss', True),
+                    use_quantile=cat_config.get('use_quantile_models', cat_config.get('use_quantile', True)),
+                )
+                trainer.primary_model = ConstantRegressor(fallback_value)
+                if trainer.use_multi_loss:
+                    trainer.mae_model = ConstantRegressor(fallback_value)
+                if trainer.use_quantile:
+                    trainer.quantile_low_model = ConstantRegressor(fallback_value)
+                    trainer.quantile_high_model = ConstantRegressor(fallback_value)
+                trainer.feature_cols = list(self.feature_cols or [])
+                trainer.cat_features = list(self.cat_features)
+                trainer.is_trained = True
+                self.models[target] = trainer.primary_model
+                self.trainers[f'catboost_{target}'] = trainer
+                results[target] = TrainResult(model=trainer, metrics={}, training_time=0.0)
+                continue
+            filtered_frames[target] = (fit_target, val_target)
+
         if self.parallel and len(self.TARGETS) > 1:
             results_list = Parallel(n_jobs=max_workers, prefer='threads')(
                 delayed(train_catboost_target)(
                     target=target,
-                    X_train=fit_df[self.feature_cols],
-                    y_train=fit_df[target],
-                    X_val=val_df[self.feature_cols],
-                    y_val=val_df[target],
+                    X_train=filtered_frames[target][0][self.feature_cols],
+                    y_train=filtered_frames[target][0][target],
+                    X_val=filtered_frames[target][1][self.feature_cols],
+                    y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
                     sample_weight=None,
                     use_gpu=self.use_gpu,
                 )
                 for target in self.TARGETS
+                if target in filtered_frames
             )
-            results = dict(results_list)
+            results.update(dict(results_list))
         else:
-            results = {}
             for target in self.TARGETS:
+                if target not in filtered_frames:
+                    if target in self.models:
+                        results[target] = TrainResult(model=self.models[target], metrics={}, training_time=0.0)
+                    continue
                 _, result = train_catboost_target(
                     target=target,
-                    X_train=fit_df[self.feature_cols],
-                    y_train=fit_df[target],
-                    X_val=val_df[self.feature_cols],
-                    y_val=val_df[target],
+                    X_train=filtered_frames[target][0][self.feature_cols],
+                    y_train=filtered_frames[target][0][target],
+                    X_val=filtered_frames[target][1][self.feature_cols],
+                    y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
                     sample_weight=None,
@@ -370,6 +374,69 @@ class TrainingPipeline:
 
         return results
 
+    def _save_catboost_artifacts(self, catboost_results: Dict[str, TrainResult]) -> None:
+        """Persist every per-target CatBoost runtime artifact to disk."""
+        missing_targets: List[str] = []
+        artifact_errors: Dict[str, List[str]] = {}
+
+        for target in self.TARGETS:
+            result = catboost_results.get(target)
+            trainer = result.model if result and isinstance(result.model, CatBoostTrainer) else self.trainers.get(f'catboost_{target}')
+            if not isinstance(trainer, CatBoostTrainer):
+                missing_targets.append(target)
+                continue
+
+            trainer.save(self.models_dir)
+            missing_files = trainer.validate_saved_artifacts(self.models_dir)
+            if missing_files:
+                artifact_errors[target] = missing_files
+
+        if missing_targets or artifact_errors:
+            details: List[str] = []
+            if missing_targets:
+                details.append(f"missing trainers for targets: {', '.join(missing_targets)}")
+            if artifact_errors:
+                details.extend(
+                    f"{target}: {', '.join(paths)}"
+                    for target, paths in sorted(artifact_errors.items())
+                )
+            raise RuntimeError(
+                "Training finished without a complete CatBoost runtime artifact set: "
+                + " | ".join(details)
+            )
+
+    def _validate_runtime_artifact_contract(self, *, require_transformer: bool) -> None:
+        """Fail if the training run did not produce the runtime artifacts loaders depend on."""
+        missing: List[str] = []
+
+        required_files = [
+            self.models_dir / 'feature_schema.pkl',
+            self.models_dir / 'feature_cols.pkl',
+            self.models_dir / 'blend_weights.pkl',
+        ]
+        if require_transformer:
+            required_files.append(self.models_dir / 'attention_transformer.pkl')
+
+        missing.extend(str(path) for path in required_files if not path.exists())
+
+        per_target_missing: Dict[str, List[str]] = {}
+        for target in self.TARGETS:
+            target_missing = CatBoostTrainer.missing_runtime_artifacts(self.models_dir, target)
+            if target_missing:
+                per_target_missing[target] = target_missing
+
+        if per_target_missing:
+            missing.extend(
+                f"{target}: {', '.join(paths)}"
+                for target, paths in sorted(per_target_missing.items())
+            )
+
+        if missing:
+            raise RuntimeError(
+                "Training completed without all required runtime artifacts. Missing: "
+                + " | ".join(missing)
+            )
+
     def _build_sequence_batch(
         self,
         df: pd.DataFrame,
@@ -389,12 +456,16 @@ class TrainingPipeline:
                 continue
 
             group_features = group[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
-            group_targets = group[target_cols].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+            group_targets_raw = group[target_cols].apply(pd.to_numeric, errors='coerce')
+            valid_target_rows = group_targets_raw.notna().all(axis=1).values
+            group_targets = group_targets_raw.fillna(0).values.astype(np.float32)
             group_indices = list(group.index)
 
             for idx in range(seq_len, len(group)):
                 target_idx = group_indices[idx]
                 if target_index_set is not None and target_idx not in target_index_set:
+                    continue
+                if not valid_target_rows[idx]:
                     continue
                 sequences.append(group_features[idx - seq_len:idx])
                 targets.append(group_targets[idx])
@@ -413,18 +484,7 @@ class TrainingPipeline:
         """Run a TransformerWrapper on a batch of sequences."""
         if sequences.size == 0:
             return np.empty((0, len(self.TARGETS)), dtype=np.float32)
-
-        seq = (sequences - model.feat_mean) / model.feat_std
-        seq_tensor = torch.from_numpy(seq.astype(np.float32))
-        seq_tensor = seq_tensor.to(model.device)
-
-        device_str = model.device.type
-        use_amp = device_str == 'cuda'
-        amp_dtype = torch.bfloat16 if use_amp and hasattr(torch, 'bfloat16') else None
-        with torch.no_grad():
-            with torch.amp.autocast(device_type=device_str, dtype=amp_dtype, enabled=use_amp):
-                preds = model.model(seq_tensor).detach().cpu().numpy()
-        return preds
+        return model.predict_batch(sequences)
 
     def _evaluate_transformer_validation(
         self,
@@ -519,9 +579,10 @@ class TrainingPipeline:
         return weights
 
     def _save_feature_cols(self) -> None:
-        if self.feature_cols:
-            joblib.dump(self.feature_cols, self.models_dir / 'feature_cols.pkl')
-            logger.info("Saved %s feature columns", len(self.feature_cols))
+        if self.feature_schema:
+            joblib.dump(self.feature_schema, self.models_dir / 'feature_schema.pkl')
+            joblib.dump(self.feature_schema.feature_cols, self.models_dir / 'feature_cols.pkl')
+            logger.info("Saved %s feature columns and schema hash %s", len(self.feature_schema.feature_cols), self.feature_schema.schema_hash)
 
     def _save_blend_weights(self) -> None:
         if self.blend_weights:
@@ -541,9 +602,17 @@ class TrainingPipeline:
         if val_df is None or val_df.empty:
             raise ValueError("Validation DataFrame is None or empty")
 
-        if self.feature_cols is None:
-            self.feature_cols = self._select_features(fit_df)
-            self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+        if self.feature_schema is None:
+            if self.feature_cols:
+                self.feature_schema = FeatureSchema(
+                    feature_cols=list(self.feature_cols),
+                    categorical_cols=[c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols],
+                )
+                self.feature_selector.feature_schema = self.feature_schema
+            else:
+                self.feature_schema = self.feature_selector.fit(fit_df)
+            self.feature_cols = self.feature_schema.feature_cols
+            self.cat_features = list(self.feature_schema.categorical_cols)
 
         required_cols = ['PLAYER_ID', 'GAME_DATE'] + self.TARGETS
         missing_cols = [c for c in required_cols if c not in fit_df.columns]
@@ -577,9 +646,13 @@ class TrainingPipeline:
         else:
             transformer_result = TrainResult(model=None, metrics={}, training_time=0.0)
 
+        self._save_catboost_artifacts(catboost_results)
         self.blend_weights = self._build_inverse_mae_weights(catboost_results, transformer_result)
         self._save_blend_weights()
         self._save_feature_cols()
+        self._validate_runtime_artifact_contract(
+            require_transformer=bool(self.model_config['transformer']['enabled']),
+        )
 
         total_time = time.time() - overall_start
         self.experiment.log_params({'total_training_time': total_time, 'model_size': self.hw_info.get('tier', 'M')})
@@ -594,10 +667,20 @@ class TrainingPipeline:
         """Load saved models and blend weights from disk."""
         logger.info("Loading models from disk...")
 
-        feature_cols_path = self.models_dir / 'feature_cols.pkl'
-        if feature_cols_path.exists():
-            self.feature_cols = joblib.load(feature_cols_path)
-            self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+        feature_schema_path = self.models_dir / 'feature_schema.pkl'
+        legacy_feature_cols_path = self.models_dir / 'feature_cols.pkl'
+        schema = self.feature_selector.load_schema(feature_schema_path)
+        if schema is None and legacy_feature_cols_path.exists():
+            legacy_cols = joblib.load(legacy_feature_cols_path)
+            schema = FeatureSchema(
+                feature_cols=list(legacy_cols),
+                categorical_cols=[c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in legacy_cols],
+            )
+            self.feature_selector.feature_schema = schema
+        if schema is not None:
+            self.feature_schema = schema
+            self.feature_cols = schema.feature_cols
+            self.cat_features = list(schema.categorical_cols)
             logger.info("Loaded %s feature columns", len(self.feature_cols))
 
         self.models = {}

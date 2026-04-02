@@ -418,13 +418,13 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-009: Rolling Feature Generation Emits Heavy Pandas Fragmentation Warnings
 
-- Status: open
+- Status: fixed in code on 2026-04-02, synthetic benchmark completed
 - Severity: medium
 - Confidence: high
 
 ### Symptom
 
-- Test runs emit many `PerformanceWarning: DataFrame is highly fragmented` messages.
+- Test runs previously emitted many `PerformanceWarning: DataFrame is highly fragmented` messages.
 
 ### Expected Behavior
 
@@ -432,11 +432,14 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Evidence
 
-- Running `pytest tests/ -q` on 2026-04-01 produced 1612 warnings, dominated by `src/preprocessing/features/rolling.py` lines 73-76.
+- Before the refactor, running `pytest tests/ -q` on 2026-04-01 produced 1612 warnings, dominated by `src/preprocessing/features/rolling.py` lines 73-76.
+- The refactor now batches new columns in `RollingFeatureGroup`, `EfficiencyFeatureGroup`, and `MomentumFeatureGroup` before concatenating them back into the frame.
+- `tests/test_preprocessing/test_feature_engineer.py` includes a regression check that the feature-engineering path does not emit pandas `PerformanceWarning` fragmentation warnings.
+- The full test suite after the fix completed with `94 passed, 2 skipped`.
 
 ### Reproduction
 
-- Run `pytest tests/ -q` in the audited workspace.
+- Historical reproduction was `pytest tests/ -q` in the audited workspace.
 
 ### Suspected Cause
 
@@ -444,18 +447,84 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Workaround
 
-- None beyond tolerating slower execution and noisy test output.
+- No workaround should be needed after the code fix.
 
 ### Fix Ideas
 
-- Rebuild affected feature sets in temporary DataFrames and concatenate once.
-- Profile large-history runs after the change.
+- Implemented:
+  - rebuild affected feature sets in temporary dicts/Series
+  - concatenate once per feature group
+  - add a regression test for the warning flood
 
 ### Risks
 
-- Slower feature generation and harder-to-read test output.
+- A future feature group could reintroduce the same anti-pattern if new columns are appended one by one.
+
+### Follow-Up
+
+- A real-data production-scale profile can still be collected later if the team wants a stricter runtime baseline.
 
 ### Related Files
 
 - `src/preprocessing/features/rolling.py`
 - `src/preprocessing/feature_engineer.py`
+
+---
+
+## KB-010: Transformer Validation Crashes On Compiled CUDA Flash-Attention Path
+
+- Status: fixed in code on 2026-04-02, pending live CUDA smoke confirmation
+- Severity: critical
+- Confidence: high
+
+### Symptom
+
+- `train.py` can finish fitting the Transformer and save `attention_transformer.pkl`, then fail during validation batch prediction with `CUDA error: invalid configuration argument`.
+
+### Expected Behavior
+
+- Transformer validation inference should complete after training, even on CUDA systems that expose flash-attention kernels.
+
+### Evidence
+
+- Repro description from the user:
+  - the crash occurred after epoch 18 during Transformer validation prediction
+  - the failure path ran through `_predict_transformer_batch`, `torch.compile`, and `_scaled_dot_product_flash_attention`
+- Fix evidence now in repo:
+  - `src/models/transformer_model.py` keeps an eager model for validation/runtime inference and only uses compile when explicitly allowed.
+  - The same module now prefers a math SDPA backend during eager inference on CUDA when backend controls are available.
+  - `src/training/pipeline.py` no longer calls the compiled model directly for validation batches.
+  - `src/config/model_config.py` generates Transformer configs with compile disabled by default.
+  - `train_colab.ipynb` now raises on nonzero subprocess exit codes instead of printing completion unconditionally.
+  - Regression tests cover the eager validation path and wrapper delegation.
+
+### Reproduction
+
+- Historical reproduction came from a CUDA training run in this workspace.
+
+### Suspected Cause
+
+- `torch.compile` combined with the runtime's flash-attention SDPA path produced an unstable CUDA kernel configuration for validation inference.
+
+### Workaround
+
+- Run Transformer validation and runtime prediction through the eager model path.
+
+### Fix Ideas
+
+- Implemented:
+  - disable compile by default for the Transformer stack
+  - keep validation inference eager
+  - prefer math SDPA for eager CUDA validation
+  - make notebook launch cells fail loudly on subprocess errors
+
+### Risks
+
+- If compile is re-enabled later, the compiled validation path must be re-audited on the target CUDA/runtime combination.
+
+### Related Files
+
+- `src/models/transformer_model.py`
+- `src/training/pipeline.py`
+- `src/config/model_config.py`
+- `train_colab.ipynb`

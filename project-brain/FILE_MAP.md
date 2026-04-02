@@ -134,6 +134,7 @@ Important files:
   - `get_diagnostics`
 - Owns feature-group registration, diagnostics, and main feature build flow.
 - Risk level: high.
+- Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.
 
 ### `src/preprocessing/features/`
 
@@ -152,7 +153,7 @@ Important files:
   - `league_ranking.py`
   - `base.py`
 - Safe entry point for adding new features if the feature schema contract is respected.
-- Current caution: `rolling.py` is a performance hotspot due to DataFrame fragmentation warnings.
+- Current caution: `rolling.py` was a performance hotspot due to DataFrame fragmentation warnings; the hot groups now assemble feature columns in batches and concatenate once per group.
 
 ## Training Layer
 
@@ -178,6 +179,7 @@ Important files:
   - `load_models`
 - Risk level: very high.
 - Current caution: any artifact filename or format change here must stay aligned with `CatBoostTrainer`, `ModelManager`, and `simulate_season.py`.
+- Current note: Transformer validation no longer calls the compiled model directly; it delegates through `TransformerWrapper.predict_batch()` so the validation seam stays on the eager-safe path.
 
 ### `src/training/catboost_trainer.py`
 
@@ -223,10 +225,12 @@ Important files:
 - Breakage here can invalidate all simulation output.
 - Risk level: very high.
 - Current note: runtime loading is now intentionally strict about missing per-target CatBoost artifacts and shared metadata files.
+- Current note: Transformer predictions flow through `TransformerWrapper.predict()`, which now defaults to eager inference and can force a math SDPA backend on CUDA when backend controls are available.
 
 ### `src/models/transformer_model.py`
 
 - Transformer wrapper and checkpoint compatibility logic.
+- Owns the eager-safe Transformer inference path used by training validation and runtime prediction.
 - Risk level: medium to high.
 
 ## Simulation Layer

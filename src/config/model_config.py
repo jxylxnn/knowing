@@ -110,7 +110,7 @@ SIZE_TIER_SPECS = {
         'training': {
             'warmup_steps': 10,
             'early_stop_patience': 12,
-            'use_compile': True,
+            'use_compile': False,
             'compile_mode': 'reduce-overhead',
             'amp': True,
             'use_bf16': False,
@@ -151,7 +151,7 @@ SIZE_TIER_SPECS = {
         'training': {
             'warmup_steps': 20,
             'early_stop_patience': 16,
-            'use_compile': True,
+            'use_compile': False,
             'compile_mode': 'reduce-overhead',
             'amp': True,
             'use_bf16': True,
@@ -192,7 +192,7 @@ SIZE_TIER_SPECS = {
         'training': {
             'warmup_steps': 40,
             'early_stop_patience': 20,
-            'use_compile': True,
+            'use_compile': False,
             'compile_mode': 'max-autotune',
             'amp': True,
             'use_bf16': True,
@@ -355,6 +355,9 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
         'warmup_ratio': 0.1,
         'grad_checkpoint': tier in {'L', 'XL'},
         'use_compile': spec['training']['use_compile'],
+        'allow_compile': False,
+        'validation_use_eager': True,
+        'validation_force_safe_sdpa': True,
         'seq_len': spec['transformer']['seq_len'],
         'max_seq_length': spec['transformer']['max_seq_length'],
     }
