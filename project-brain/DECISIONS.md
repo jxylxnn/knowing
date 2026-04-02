@@ -525,3 +525,47 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 ### Revisit Triggers
 
 - If notebook output becomes too noisy for normal use or if the workflow is replaced by a different launcher.
+
+---
+
+## DR-013: Colab Training Launchers Must Resolve Code Checkout Independently From Drive Storage
+
+- Status: active
+- Date: 2026-04-02
+- Confidence: high
+
+### Context
+
+- The Colab training notebook originally derived `project_root` from the Drive models directory, which only works when code and persisted artifacts share the same filesystem root.
+- In the real Colab flow, code may live under a working checkout such as `/content/knowing` while data and models remain on Drive.
+
+### Options Considered
+
+- Keep the old assumption that Drive-backed models storage and code live under the same root.
+- Require a single explicit project root and force both code and artifacts to live there.
+- Resolve the repo checkout independently from Drive-backed storage, with an explicit override and common fallback candidates.
+
+### Decision
+
+- The notebook should resolve `train.py` from the actual repo checkout and treat Drive paths as data/model storage only.
+- An explicit `project_root_override` should win when provided; otherwise the launcher may search common Colab checkout locations.
+
+### Why
+
+- Training needs the real code checkout, not just the artifact directory.
+- The old root inference failed before `train.py` could run whenever the notebook used a different checkout directory.
+
+### Tradeoffs
+
+- Slightly more launcher logic.
+- A small amount of extra diagnostic output.
+- Much less ambiguity between code location and storage location.
+
+### Consequences
+
+- Notebook launchers should not derive script paths from model/data storage roots.
+- Colab workflows can keep Drive-backed inputs and outputs while still using a normal repo checkout.
+
+### Revisit Triggers
+
+- If the notebook is replaced by a different launcher pattern or if the repo adopts a single canonical Colab mount location.

@@ -45,7 +45,8 @@
 
 - Role: Colab-oriented wrapper around `train.py`.
 - Behavior:
-  - validates the Drive project root, raw CSV inputs, and writability of the Google Drive models directory before launch
+  - resolves the actual repo checkout separately from Drive-backed storage paths
+  - validates the repo root / `train.py`, raw CSV inputs, and writability of the Google Drive models directory before launch
   - runs `train.py` through `subprocess.run(..., capture_output=True, text=True)` and prints both stdout and stderr
   - raises a `RuntimeError` on nonzero exit so the notebook stops loudly instead of hiding the real traceback
 - Risk level: medium.

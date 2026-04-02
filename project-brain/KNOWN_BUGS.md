@@ -583,3 +583,61 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 - `train_colab.ipynb`
 - `train.py`
+
+---
+
+## KB-012: Colab Launcher Assumed The Drive Models Directory Contained `train.py`
+
+- Status: fixed in code on 2026-04-02, pending live Colab confirmation
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- The Colab training launcher built `project_root` from `/content/drive/MyDrive/nba_model/models` and then looked for `/content/drive/MyDrive/nba_model/train.py`, which failed when the repo was actually cloned under a separate Colab working directory such as `/content/knowing`.
+
+### Expected Behavior
+
+- The notebook should resolve the actual repo checkout separately from the persistent Drive-backed `data/` and `models/` directories.
+- `train.py` should be launched from the real repo root, and a missing script should fail with explicit path diagnostics.
+
+### Evidence
+
+- Historical launcher code derived `project_root = drive_models_path.parent`, which only works if code and persisted artifacts share the same root.
+- The launcher then built `train_script = project_root / "train.py"`, so any Colab checkout outside Drive caused a preflight `FileNotFoundError`.
+- Fix evidence now in repo:
+  - `train_colab.ipynb` now resolves a repo checkout independently of Drive storage paths.
+  - The notebook accepts an explicit `project_root_override` and otherwise checks common candidates like `os.getcwd()` and `/content/knowing`.
+  - The launcher prints the resolved `project_root`, `train_script`, `data_dir`, and `models_dir` before launch.
+
+### Reproduction
+
+- Historical reproduction path from user report and notebook inspection:
+  - repo cloned into `/content/knowing`
+  - data and models intended for `/content/drive/MyDrive/nba_model/data` and `/content/drive/MyDrive/nba_model/models`
+  - training cell looked for `/content/drive/MyDrive/nba_model/train.py` and failed before subprocess launch
+
+### Suspected Cause
+
+- The launcher conflated code location with persistent storage location.
+
+### Workaround
+
+- Clone the repo into the working directory the notebook expects, or set `project_root_override` explicitly until the fix is verified in a live Colab run.
+
+### Fix Ideas
+
+- Implemented:
+  - explicit repo-root resolution
+  - independent Drive-backed data/models paths
+  - path-diagnostic failure if no candidate contains `train.py`
+
+### Risks
+
+- The new resolver still needs a real Colab run to confirm the exact mounted-Drive behavior and the printed diagnostics.
+
+### Related Files
+
+- `train_colab.ipynb`
+- `project-brain/CURRENT_STATE.md`
+- `project-brain/TASKS.md`

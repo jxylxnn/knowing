@@ -68,6 +68,7 @@ Not supported by repo evidence:
 - The script loads the CSV data through `src/preprocessing/data_loader.py`.
 - It engineers features through `src/preprocessing/feature_engineer.py`.
 - It trains the model stack through `src/training/pipeline.py`.
+- In Colab, `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage so code can run from `/content/knowing` while `data/` and `models/` stay in Google Drive.
 - Expected artifact contract for downstream consumers:
   - CatBoost model files per target in `models/`
   - per-target CatBoost metadata files in `models/`
@@ -191,6 +192,7 @@ This repo does not currently implement:
 ## Important Assumptions
 
 - The operator can run Python locally and manage data/model artifacts on disk.
+- Colab notebook launchers may run code from a repo checkout while persisting data and models in Drive; code paths should not be inferred from Drive artifact paths.
 - Raw data is expected in CSV form under `data/`.
 - Downstream inference assumes training artifacts exist in `models/` with stable file names.
 - The model stack assumes six canonical target stats in uppercase naming inside training/inference code.

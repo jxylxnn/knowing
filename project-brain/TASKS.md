@@ -26,6 +26,18 @@
   - there is one clearly documented active simulation path
   - dead legacy code is removed or intentionally isolated with comments and tests
 
+### Verify Colab launcher repo-root detection against a live mounted Drive run
+
+- Why it matters: the notebook now resolves `train.py` from the cloned repo checkout instead of inferring code location from Drive-backed model storage, but the full Colab path still needs a real smoke test.
+- Likely files:
+  - `train_colab.ipynb`
+  - `project-brain/CURRENT_STATE.md`
+  - `project-brain/KNOWN_BUGS.md`
+- Done when:
+  - a Colab checkout under `/content/knowing` launches `train.py` successfully while `data/` and `models/` stay on Drive
+  - the notebook prints the resolved repo root, script path, and storage directories before launch
+  - a missing `train.py` produces the new path-diagnostic error
+
 ## NEXT
 
 ### Add a strict simulation mode for optional scraper degradation
@@ -124,7 +136,7 @@
 
 - Why it is blocked:
   - this workspace does not have the `/content/drive/MyDrive/nba_model/data/*.csv` inputs mounted locally
-  - the notebook fix can be validated only in a Colab-like environment with the real Drive paths
+  - the notebook fix can be validated only in a Colab-like environment with the real Drive paths and an actual repo checkout
 - What is needed:
   - run the hardened `train_colab.ipynb` cell against the real Drive data and models directories
   - confirm that stdout/stderr from `train.py` are printed when the subprocess fails
@@ -218,5 +230,12 @@
 - Delivered:
   - `train.py` now preflights writable model/cache directories and required raw CSV inputs before expensive work starts.
   - `train.py` now logs explicit stage names so failures point to the loading, feature engineering, pipeline init, split, or training stage.
+
+### Decouple Colab repo root from Drive-backed training storage
+
+- Completed on 2026-04-02.
+- Delivered:
+  - `train_colab.ipynb` now resolves `train.py` from the cloned repo checkout instead of assuming the Drive models directory is the code root.
+  - The notebook now supports an explicit `project_root_override` and falls back to common repo checkout candidates like `/content/knowing`.
+  - The launcher now prints the resolved `project_root`, `train_script`, `data_dir`, and `models_dir` before starting training.
   - `train_colab.ipynb` now captures stdout/stderr from `train.py`, prints the return code, and raises immediately on nonzero exit.
-  - `tests/test_training/test_training_pipeline_colab.py` and the existing training/runtime regression tests still pass after the launch hardening.
