@@ -12,9 +12,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import re
 
-from src.utils.team_mappings import get_bref_abbr
+from src.utils.team_mappings import TEAMS, get_bref_abbr
 
 logger = logging.getLogger(__name__)
+
+BREF_TO_TEAM_ABBR = {
+    team_info['bref_abbr']: team_abbr
+    for team_abbr, team_info in TEAMS.items()
+}
+TEAM_ABBR_TO_BREF = {
+    team_abbr: team_info['bref_abbr']
+    for team_abbr, team_info in TEAMS.items()
+}
 
 
 class BasketballRefScraper:
@@ -95,7 +104,7 @@ class BasketballRefScraper:
         csv_path = os.path.join(self.cache_dir, f"bref_{cache_key}.csv")
         if os.path.exists(csv_path):
             file_time = datetime.fromtimestamp(os.path.getmtime(csv_path))
-            if datetime.now() - file_time < timedelta(hours=self.CACHE_TTL_HOURS):
+            if datetime.now() - file_time < timedelta(hours=self.cache_ttl_hours):
                 try:
                     df = pd.read_csv(csv_path)
                     result = df.to_dict('records')[0] if not df.empty else {}
@@ -119,7 +128,7 @@ class BasketballRefScraper:
         """Fetch team stats from basketball-reference team page."""
         url = f"{self.BASE_URL}/teams/{bref_abbr}/{season.replace('-', '')}.html"
         
-        for attempt in range(self.MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 response = self._session.get(url, timeout=15)
                 response.raise_for_status()
@@ -152,8 +161,8 @@ class BasketballRefScraper:
                     
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Attempt {attempt + 1} failed for {bref_abbr}: {e}")
-                if attempt < self.MAX_RETRIES - 1:
-                    time.sleep(self.RETRY_DELAY * (attempt + 1))
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
             except Exception as e:
                 logger.error(f"Error parsing {bref_abbr}: {e}")
                 break

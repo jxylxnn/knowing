@@ -101,6 +101,8 @@ class ReportGenerator:
             home = res['team_a']
             away = res['team_b']
             status = res.get('status', 'Scheduled')
+            input_health = self._get_input_health(res)
+            degraded_marker = " [DEGRADED INPUTS]" if input_health.get('overall_status') == 'degraded' else ""
             
             # Get pre-calculated probabilities if available (Massive Sims Support)
             if 'win_prob_a' in res:
@@ -130,8 +132,11 @@ class ReportGenerator:
             # Header
             print(f"\n{'='*120}", flush=True)
             print(f" {away} @ {home}", flush=True)
-            print(f" {status}", flush=True)
+            print(f" {status}{degraded_marker}", flush=True)
             print(f"{'='*120}", flush=True)
+            if degraded_marker:
+                degraded_sources = input_health.get('degraded_sources', [])
+                print(f" Input health: degraded via {', '.join(degraded_sources)}", flush=True)
             
             # Win Probability Bar
             away_bar = '█' * int(away_win_pct / 5)
@@ -289,6 +294,9 @@ class ReportGenerator:
         else:
             return "OUT"
 
+    def _get_input_health(self, res: Dict[str, Any]) -> Dict[str, Any]:
+        return res.get('metadata', {}).get('input_health', {})
+
     def format_matchup_summary(self, res: Dict[str, Any], stat_type: str = 'mode') -> str:
         """Returns a compact one-line summary of a matchup."""
         if 'error' in res:
@@ -314,7 +322,8 @@ class ReportGenerator:
         winner = home if home_win_pct > 50 else away
         win_pct = home_win_pct if home_win_pct > 50 else (100 - home_win_pct)
         
-        return f"{away} @ {home}: {winner} wins ({win_pct:.0f}%) | {avg_away_pts:.0f}-{avg_home_pts:.0f}"
+        marker = " [DEGRADED]" if self._get_input_health(res).get('overall_status') == 'degraded' else ""
+        return f"{away} @ {home}: {winner} wins ({win_pct:.0f}%) | {avg_away_pts:.0f}-{avg_home_pts:.0f}{marker}"
 
     def export_to_csv(self, results: List[Dict[str, Any]], filename: str = None) -> str:
         """Exports key predictions to a CSV file for backtesting."""
@@ -363,6 +372,8 @@ class ReportGenerator:
                     'AVG_AWAY_AST': ts[away]['ast']['mean'],
                     'HOME_PTS_STD': ts[home]['pts']['std'],
                     'AWAY_PTS_STD': ts[away]['pts']['std'],
+                    'INPUT_HEALTH': self._get_input_health(res).get('overall_status', 'healthy'),
+                    'DEGRADED_SOURCES': ','.join(self._get_input_health(res).get('degraded_sources', [])),
                     'SIM_TIMESTAMP': datetime.now().isoformat()
                 })
             else:
@@ -386,6 +397,8 @@ class ReportGenerator:
                     'AVG_AWAY_AST': np.mean([s[away]['ast'] for s in res['simulations']]),
                     'HOME_PTS_STD': np.std(home_pts_list),
                     'AWAY_PTS_STD': np.std(away_pts_list),
+                    'INPUT_HEALTH': self._get_input_health(res).get('overall_status', 'healthy'),
+                    'DEGRADED_SOURCES': ','.join(self._get_input_health(res).get('degraded_sources', [])),
                     'SIM_TIMESTAMP': datetime.now().isoformat()
                 })
             

@@ -1,7 +1,6 @@
 import pandas as pd
 import logging
 import os
-import json
 import time
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Optional
@@ -20,6 +19,7 @@ class ScheduleScraper:
     def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
         self._config = config
         self.cache_dir = cache_dir
+        self.last_fetch_status: Dict[str, Any] = {}
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
             
@@ -29,6 +29,23 @@ class ScheduleScraper:
         self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
         self.cache_ttl_hours = self._get_config_value('cache.schedule_ttl_hours', 1.0)
         self.season_cache_ttl_days = self._get_config_value('cache.season_schedule_ttl_days', 1.0)
+
+    def _set_last_fetch_status(
+        self,
+        status: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.last_fetch_status = {
+            'source_key': 'schedule',
+            'status': status,
+            'required': True,
+            'message': message,
+            'details': details or {},
+        }
+
+    def get_last_fetch_status(self) -> Dict[str, Any]:
+        return dict(self.last_fetch_status)
     
     def _get_config_value(self, key: str, default: Any) -> Any:
         """Get config value using dot notation."""
@@ -78,16 +95,26 @@ class ScheduleScraper:
         # Check cache
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            if datetime.now() - file_time < timedelta(hours=self.CACHE_TTL_HOURS):
+            if datetime.now() - file_time < timedelta(hours=self.cache_ttl_hours):
                 logger.info(f"Loading cached schedule for {game_date}")
                 try:
-                    return pd.read_csv(cache_file)
+                    cached_df = pd.read_csv(cache_file)
+                    self._set_last_fetch_status(
+                        'success',
+                        f"Loaded cached schedule for {game_date}",
+                        {
+                            'game_date': game_date,
+                            'source': 'cache',
+                            'rows': int(len(cached_df)),
+                        },
+                    )
+                    return cached_df
                 except Exception as e:
                     logger.warning(f"Failed to load cached schedule: {e}")
 
         logger.info(f"Fetching NBA schedule for {game_date} from NBA.com...")
         
-        for attempt in range(self.MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 # Reformat date for nba_api if needed
                 board = scoreboardv2.ScoreboardV2(game_date=game_date)
@@ -99,6 +126,15 @@ class ScheduleScraper:
                 df = pd.DataFrame(data, columns=headers)
                 
                 if df.empty:
+                    self._set_last_fetch_status(
+                        'success',
+                        f"No games scheduled for {game_date}",
+                        {
+                            'game_date': game_date,
+                            'source': 'nba_api',
+                            'rows': 0,
+                        },
+                    )
                     return pd.DataFrame()
 
                 # Process into a simpler format
@@ -123,6 +159,14 @@ class ScheduleScraper:
                 
                 if not matchups:
                     logger.warning(f"No valid matchups found for {game_date}")
+                    self._set_last_fetch_status(
+                        'failed',
+                        f"Schedule response for {game_date} did not contain valid matchups",
+                        {
+                            'game_date': game_date,
+                            'source': 'nba_api',
+                        },
+                    )
                     return pd.DataFrame()
                 
                 matchups_df = pd.DataFrame(matchups)
@@ -130,6 +174,14 @@ class ScheduleScraper:
                 # Validate the result
                 if matchups_df.empty:
                     logger.warning(f"Empty matchups dataframe for {game_date}")
+                    self._set_last_fetch_status(
+                        'failed',
+                        f"Schedule fetch for {game_date} returned an empty matchup frame",
+                        {
+                            'game_date': game_date,
+                            'source': 'nba_api',
+                        },
+                    )
                     return pd.DataFrame()
                 
                 # Save to cache
@@ -139,27 +191,81 @@ class ScheduleScraper:
                     logger.warning(f"Failed to save cache: {e}")
                 
                 logger.info(f"Found {len(matchups_df)} games for {game_date}")
+                self._set_last_fetch_status(
+                    'success',
+                    f"Fetched {len(matchups_df)} scheduled games for {game_date}",
+                    {
+                        'game_date': game_date,
+                        'source': 'nba_api',
+                        'rows': int(len(matchups_df)),
+                    },
+                )
                 return matchups_df
 
             except KeyError as e:
                 logger.error(f"API response structure changed (missing key): {e}")
+                self._set_last_fetch_status(
+                    'failed',
+                    f"Schedule API response changed for {game_date}",
+                    {
+                        'game_date': game_date,
+                        'source': 'nba_api',
+                        'error': str(e),
+                    },
+                )
                 break  # Don't retry if structure changed
             except ValueError as e:
                 logger.error(f"Invalid data format: {e}")
+                self._set_last_fetch_status(
+                    'failed',
+                    f"Schedule API returned invalid data for {game_date}",
+                    {
+                        'game_date': game_date,
+                        'source': 'nba_api',
+                        'error': str(e),
+                    },
+                )
                 break  # Don't retry if format invalid
             except Exception as e:
-                logger.warning(f"Attempt {attempt + 1}/{self.MAX_RETRIES} failed: {e}")
-                if attempt < self.MAX_RETRIES - 1:
-                    time.sleep(self.RETRY_DELAY * (attempt + 1))
+                logger.warning(f"Attempt {attempt + 1}/{self.max_retries} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
         
         # All attempts failed, try to load from cache as last resort
         if os.path.exists(cache_file):
             logger.warning(f"All API attempts failed, loading cached data for {game_date}")
             try:
-                return pd.read_csv(cache_file)
+                cached_df = pd.read_csv(cache_file)
+                self._set_last_fetch_status(
+                    'fallback',
+                    f"Schedule API failed for {game_date}; using cached schedule",
+                    {
+                        'game_date': game_date,
+                        'source': 'cache',
+                        'rows': int(len(cached_df)),
+                    },
+                )
+                return cached_df
             except Exception as e:
                 logger.error(f"Failed to load cached data: {e}")
+                self._set_last_fetch_status(
+                    'failed',
+                    f"Schedule API failed and cache load also failed for {game_date}",
+                    {
+                        'game_date': game_date,
+                        'source': 'cache',
+                        'error': str(e),
+                    },
+                )
         
+        self._set_last_fetch_status(
+            'failed',
+            f"Unable to load schedule for {game_date}",
+            {
+                'game_date': game_date,
+                'source': 'nba_api',
+            },
+        )
         return pd.DataFrame()
 
     def _get_current_season(self) -> str:
@@ -183,8 +289,18 @@ class ScheduleScraper:
         # Check cache (24 hour expiry)
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            if datetime.now() - file_time < timedelta(days=1):
-                return pd.read_csv(cache_file)
+            if datetime.now() - file_time < timedelta(days=self.season_cache_ttl_days):
+                cached_df = pd.read_csv(cache_file)
+                self._set_last_fetch_status(
+                    'success',
+                    f"Loaded cached remaining-season schedule for {season}",
+                    {
+                        'season': season,
+                        'source': 'cache',
+                        'rows': int(len(cached_df)),
+                    },
+                )
+                return cached_df
 
         logger.info(f"Fetching full season schedule for {season}...")
         try:
@@ -207,12 +323,40 @@ class ScheduleScraper:
                     all_games.append(day_games)
             
             if not all_games:
+                self._set_last_fetch_status(
+                    'failed',
+                    f"Unable to build remaining-season schedule for {season}",
+                    {
+                        'season': season,
+                        'source': 'composed_daily_schedule',
+                        'days_attempted': 30,
+                    },
+                )
                 return pd.DataFrame()
                 
             full_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
             full_df.to_csv(cache_file, index=False)
+            self._set_last_fetch_status(
+                'success',
+                f"Built remaining-season schedule stub for {season}",
+                {
+                    'season': season,
+                    'source': 'composed_daily_schedule',
+                    'rows': int(len(full_df)),
+                    'days_attempted': 30,
+                },
+            )
             return full_df
 
         except Exception as e:
             logger.error(f"Error fetching remaining season: {e}")
+            self._set_last_fetch_status(
+                'failed',
+                f"Error fetching remaining-season schedule for {season}",
+                {
+                    'season': season,
+                    'source': 'composed_daily_schedule',
+                    'error': str(e),
+                },
+            )
             return pd.DataFrame()

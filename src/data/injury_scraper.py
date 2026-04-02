@@ -40,6 +40,7 @@ class InjuryScraper:
     def __init__(self, cache_dir='data/cache', config: Optional[Any] = None):
         self._config = config
         self.cache_dir = cache_dir
+        self.last_fetch_status: Dict[str, Any] = {}
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self._cache_timestamp = None
@@ -48,6 +49,23 @@ class InjuryScraper:
         self._session.headers.update({
             'User-Agent': self._get_config_value('http.user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         })
+
+    def _set_last_fetch_status(
+        self,
+        status: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.last_fetch_status = {
+            'source_key': 'injury',
+            'status': status,
+            'required': False,
+            'message': message,
+            'details': details or {},
+        }
+
+    def get_last_fetch_status(self) -> Dict[str, Any]:
+        return dict(self.last_fetch_status)
     
     @property
     def URL(self) -> str:
@@ -90,6 +108,14 @@ class InjuryScraper:
         if not force_refresh and self._is_cache_valid():
             logger.debug("Using in-memory cached injury data")
             if self._cached_df is not None:
+                self._set_last_fetch_status(
+                    'success',
+                    "Using in-memory injury cache",
+                    {
+                        'source': 'memory_cache',
+                        'rows': int(len(self._cached_df)),
+                    },
+                )
                 return self._cached_df.copy()
         
         df = None
@@ -101,12 +127,28 @@ class InjuryScraper:
                 # Try HTML parsing first
                 df = self._fetch_from_html()
                 if df is not None and not df.empty:
+                    self._set_last_fetch_status(
+                        'success',
+                        "Fetched injury data from ESPN HTML",
+                        {
+                            'source': 'espn_html',
+                            'rows': int(len(df)),
+                        },
+                    )
                     break
                 
                 # Fallback to API
                 logger.warning("HTML parsing failed, trying API fallback...")
                 df = self._fetch_from_api()
                 if df is not None and not df.empty:
+                    self._set_last_fetch_status(
+                        'fallback',
+                        "Fetched injury data from ESPN API fallback",
+                        {
+                            'source': 'espn_api',
+                            'rows': int(len(df)),
+                        },
+                    )
                     break
                     
             except Exception as e:
@@ -117,6 +159,21 @@ class InjuryScraper:
         if df is None or df.empty:
             logger.error("All fetch attempts failed, loading from cache...")
             df = self._load_from_cache()
+            if df is not None and not df.empty:
+                self._set_last_fetch_status(
+                    'fallback',
+                    "Loaded injury data from disk cache after fetch failure",
+                    {
+                        'source': 'disk_cache',
+                        'rows': int(len(df)),
+                    },
+                )
+            else:
+                self._set_last_fetch_status(
+                    'failed',
+                    "Unable to load injury data from live sources or cache",
+                    {'source': 'espn'},
+                )
         else:
             if not df.empty:
                 df['TEAM_ABBR'] = df['TEAM'].apply(normalize_team)

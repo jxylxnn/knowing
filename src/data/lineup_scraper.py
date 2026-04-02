@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Set, Any
 import re
 
-from src.utils.team_mappings import ID_TO_ABBR, ABBR_TO_ID, get_team_by_abbr
+from src.utils.team_mappings import ID_TO_ABBR, ABBR_TO_ID, normalize_team
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +26,36 @@ class LineupScraper:
     def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
         self._config = config
         self.cache_dir = cache_dir
+        self.last_fetch_status: Dict[str, Any] = {}
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self._session = requests.Session()
-        self._session.headers.update(self._get_headers())
+        self.nba_headers = self._get_headers()
+        self._session.headers.update(self.nba_headers)
         
         self.max_retries = self._get_config_value('http.max_retries', 3)
         self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
         self.cache_ttl_hours = self._get_config_value('cache.lineup_ttl_hours', 6.0)
+        self._lineup_cache: Dict[str, dict] = {}
+        self._coach_tendencies: Dict[str, dict] = {}
+        self._load_coach_tendencies()
+
+    def _set_last_fetch_status(
+        self,
+        status: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.last_fetch_status = {
+            'source_key': 'lineup',
+            'status': status,
+            'required': False,
+            'message': message,
+            'details': details or {},
+        }
+
+    def get_last_fetch_status(self) -> Dict[str, Any]:
+        return dict(self.last_fetch_status)
     
     def _get_headers(self) -> Dict[str, str]:
         """Get HTTP headers from config or use defaults."""
@@ -69,9 +91,6 @@ class LineupScraper:
             else:
                 return default
         return obj
-        self._lineup_cache: Dict[str, dict] = {}
-        self._coach_tendencies: Dict[str, dict] = {}
-        self._load_coach_tendencies()
         
     def _load_coach_tendencies(self):
         """Load cached coach tendencies from disk."""
@@ -122,16 +141,37 @@ class LineupScraper:
         cache_key = f"{team_abbr}_{game_date}"
         
         if cache_key in self._lineup_cache:
-            return self._lineup_cache[cache_key]
+            cached = self._lineup_cache[cache_key]
+            self._set_last_fetch_status(
+                'success' if cached.get('health_status') == 'success' else cached.get('health_status', 'fallback'),
+                f"Using in-memory lineup cache for {team_abbr}",
+                {
+                    'team': team_abbr,
+                    'game_date': game_date,
+                    'source': 'memory_cache',
+                    'lineup_source': cached.get('source'),
+                },
+            )
+            return cached
         
         cache_file = os.path.join(self.cache_dir, f"lineup_{cache_key}.json")
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            if datetime.now() - file_time < timedelta(hours=self.CACHE_TTL_HOURS):
+            if datetime.now() - file_time < timedelta(hours=self.cache_ttl_hours):
                 try:
                     with open(cache_file, 'r') as f:
                         result = json.load(f)
                         self._lineup_cache[cache_key] = result
+                        self._set_last_fetch_status(
+                            result.get('health_status', 'success'),
+                            f"Loaded cached lineup for {team_abbr}",
+                            {
+                                'team': team_abbr,
+                                'game_date': game_date,
+                                'source': 'disk_cache',
+                                'lineup_source': result.get('source'),
+                            },
+                        )
                         return result
                 except Exception as e:
                     logger.debug(f"Failed to load lineup cache: {e}")
@@ -172,6 +212,17 @@ class LineupScraper:
         if lineup and len(lineup.get('starters', [])) >= 5:
             lineup['status'] = 'confirmed'
             lineup['confidence'] = 0.95
+            lineup['health_status'] = 'success'
+            lineup['health_message'] = f"Confirmed lineup found for {team_abbr}"
+            self._set_last_fetch_status(
+                'success',
+                lineup['health_message'],
+                {
+                    'team': team_abbr,
+                    'game_date': game_date,
+                    'source': lineup.get('source'),
+                },
+            )
             return lineup
         
         if include_projected:
@@ -179,14 +230,48 @@ class LineupScraper:
             if projected and len(projected.get('starters', [])) >= 5:
                 projected['status'] = 'projected'
                 projected['confidence'] = 0.75
+                projected['health_status'] = 'fallback'
+                projected['health_message'] = f"Using projected lineup fallback for {team_abbr}"
+                self._set_last_fetch_status(
+                    'fallback',
+                    projected['health_message'],
+                    {
+                        'team': team_abbr,
+                        'game_date': game_date,
+                        'source': projected.get('source'),
+                    },
+                )
                 return projected
         
         inferred = self._infer_lineup_from_history(team_abbr, game_date)
         if inferred and len(inferred.get('starters', [])) >= 5:
             inferred['status'] = 'inferred'
             inferred['confidence'] = 0.55
+            inferred['health_status'] = 'fallback'
+            inferred['health_message'] = f"Using inferred lineup fallback for {team_abbr}"
+            self._set_last_fetch_status(
+                'fallback',
+                inferred['health_message'],
+                {
+                    'team': team_abbr,
+                    'game_date': game_date,
+                    'source': inferred.get('source'),
+                },
+            )
             return inferred
         
+        result['source'] = 'failed'
+        result['health_status'] = 'failed'
+        result['health_message'] = f"Unable to determine lineup for {team_abbr}"
+        self._set_last_fetch_status(
+            'failed',
+            result['health_message'],
+            {
+                'team': team_abbr,
+                'game_date': game_date,
+                'source': 'lineup_sources',
+            },
+        )
         return result
     
     def _fetch_from_nba_stats(self, team_abbr: str, game_date: str) -> Optional[dict]:
@@ -194,7 +279,7 @@ class LineupScraper:
         Fetch confirmed starters from NBA.com stats API.
         Uses the game book / boxscore endpoint.
         """
-        team_id = TEAM_ID_MAP.get(team_abbr.upper())
+        team_id = ABBR_TO_ID.get(team_abbr.upper())
         if not team_id:
             return None
             
@@ -217,12 +302,12 @@ class LineupScraper:
             'startRange': 0
         }
         
-        for attempt in range(self.MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 response = self._session.get(
                     url, 
                     params=params,
-                    headers=self.NBA_HEADERS,
+                    headers=self.nba_headers,
                     timeout=15
                 )
                 response.raise_for_status()
@@ -241,8 +326,8 @@ class LineupScraper:
                     
             except requests.exceptions.RequestException as e:
                 logger.debug(f"NBA stats attempt {attempt + 1} failed: {e}")
-                if attempt < self.MAX_RETRIES - 1:
-                    time.sleep(self.RETRY_DELAY)
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
             except Exception as e:
                 logger.debug(f"Error parsing NBA stats: {e}")
                 break
@@ -253,7 +338,7 @@ class LineupScraper:
         """Find the game ID for a team on a specific date."""
         season = self._get_season_for_date(game_date)
         season_param = season.replace('-', '')
-        team_id = TEAM_ID_MAP.get(team_abbr.upper())
+        team_id = ABBR_TO_ID.get(team_abbr.upper())
         
         url = "https://stats.nba.com/stats/scoreboardV3"
         params = {
@@ -265,7 +350,7 @@ class LineupScraper:
             response = self._session.get(
                 url, 
                 params=params,
-                headers=self.NBA_HEADERS,
+                headers=self.nba_headers,
                 timeout=10
             )
             response.raise_for_status()
@@ -532,16 +617,19 @@ class LineupScraper:
             from src.data.injury_scraper import InjuryScraper
             scraper = InjuryScraper()
             
-            injuries = scraper.get_injuries(team_abbr)
+            injuries_df = scraper.fetch_injuries()
+            if injuries_df.empty:
+                return []
+            injuries_df = injuries_df[injuries_df['TEAM_ABBR'] == normalize_team(team_abbr)]
             
             inactive = []
-            for injury in injuries:
-                status = injury.get('status', '').lower()
+            for _, injury in injuries_df.iterrows():
+                status = str(injury.get('STATUS', '')).lower()
                 if 'out' in status or 'injured' in status:
                     inactive.append({
-                        'name': injury.get('name', ''),
-                        'reason': injury.get('reason', injury.get('detail', '')),
-                        'status': injury.get('status', 'OUT')
+                        'name': injury.get('PLAYER', ''),
+                        'reason': injury.get('COMMENT', ''),
+                        'status': injury.get('STATUS', 'OUT')
                     })
                     
             return inactive
@@ -635,7 +723,7 @@ class LineupScraper:
             response = self._session.get(
                 url, 
                 params=params,
-                headers=self.NBA_HEADERS,
+                headers=self.nba_headers,
                 timeout=10
             )
             response.raise_for_status()
@@ -645,8 +733,8 @@ class LineupScraper:
             for game in data.get('scoreboard', {}).get('games', []):
                 games.append({
                     'game_id': game.get('gameId'),
-                    'home_team': ID_TO_TEAM.get(game.get('homeTeam', {}).get('teamId'), 'UNK'),
-                    'away_team': ID_TO_TEAM.get(game.get('awayTeam', {}).get('teamId'), 'UNK'),
+                    'home_team': ID_TO_ABBR.get(game.get('homeTeam', {}).get('teamId'), 'UNK'),
+                    'away_team': ID_TO_ABBR.get(game.get('awayTeam', {}).get('teamId'), 'UNK'),
                     'game_time': game.get('gameTimeUTC')
                 })
             

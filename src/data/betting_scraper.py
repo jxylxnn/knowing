@@ -33,6 +33,7 @@ class BettingScraper:
     def __init__(self, cache_dir: str = 'data/cache', config: Optional[Any] = None):
         self._config = config
         self.cache_dir = cache_dir
+        self.last_fetch_status: Dict[str, Any] = {}
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         
@@ -40,6 +41,23 @@ class BettingScraper:
         self._session.headers.update({
             'User-Agent': self._get_config_value('http.user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         })
+
+    def _set_last_fetch_status(
+        self,
+        status: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.last_fetch_status = {
+            'source_key': 'betting',
+            'status': status,
+            'required': False,
+            'message': message,
+            'details': details or {},
+        }
+
+    def get_last_fetch_status(self) -> Dict[str, Any]:
+        return dict(self.last_fetch_status)
     
     @property
     def CACHE_TTL_HOURS(self) -> float:
@@ -93,7 +111,18 @@ class BettingScraper:
             if datetime.now() - file_time < timedelta(hours=self.CACHE_TTL_HOURS):
                 try:
                     with open(cache_file, 'r') as f:
-                        return json.load(f)
+                        cached_lines = json.load(f)
+                    self._set_last_fetch_status(
+                        'success',
+                        f"Loaded cached betting lines for {away_team} @ {home_team}",
+                        {
+                            'source': 'cache',
+                            'home_team': home_team,
+                            'away_team': away_team,
+                            'line_source': cached_lines.get('source'),
+                        },
+                    )
+                    return cached_lines
                 except Exception:
                     pass
         
@@ -101,6 +130,25 @@ class BettingScraper:
         
         if lines.get('total') is None:
             lines = self._get_fallback_lines(home_team, away_team)
+            self._set_last_fetch_status(
+                'fallback',
+                f"Using fallback betting context for {away_team} @ {home_team}",
+                {
+                    'source': lines.get('source'),
+                    'home_team': home_team,
+                    'away_team': away_team,
+                },
+            )
+        else:
+            self._set_last_fetch_status(
+                'success',
+                f"Fetched betting lines for {away_team} @ {home_team}",
+                {
+                    'source': lines.get('source'),
+                    'home_team': home_team,
+                    'away_team': away_team,
+                },
+            )
         
         try:
             with open(cache_file, 'w') as f:

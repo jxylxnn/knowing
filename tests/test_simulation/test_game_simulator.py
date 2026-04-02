@@ -338,10 +338,13 @@ class TestGameSimulatorUpgrade:
         lineup = simulator._safe_get_lineup('LAL', '2024-01-01')
         injuries = simulator._safe_get_injury_probs('LAL')
 
-        assert lines['total'] is None
-        assert lines['source'] == 'fallback'
-        assert lineup == {}
-        assert injuries == {}
+        assert lines['data']['total'] is None
+        assert lines['data']['source'] == 'fallback'
+        assert lines['health']['status'] == 'failed'
+        assert lineup['data'] == {}
+        assert lineup['health']['status'] == 'failed'
+        assert injuries['data'] == {}
+        assert injuries['health']['status'] == 'failed'
 
     def test_team_target_means_use_four_factors_prior(self, simulator):
         """Team target means should blend the model baseline with four-factors priors."""
@@ -438,10 +441,28 @@ class TestGameSimulatorUpgrade:
 
         with patch.object(simulator, 'prepare_simulation_context'), \
              patch.object(simulator, '_build_roster_context', side_effect=build_roster_context), \
-             patch.object(simulator, '_get_defensive_adjustments', return_value={}), \
-             patch.object(simulator, '_safe_get_game_lines', return_value={'total': 225.0, 'spread': -2.5, 'home_implied_pts': 113.8, 'away_implied_pts': 111.2, 'source': 'test'}), \
-             patch.object(simulator, '_safe_get_lineup', side_effect=lambda team, game_date=None: lineup_a if team == 'LAL' else lineup_b), \
-             patch.object(simulator, '_safe_get_injury_probs', return_value={}), \
+             patch.object(simulator, '_safe_get_defensive_adjustments', side_effect=lambda opponent, roster: {
+                 'data': {},
+                 'health': {
+                     'source_key': f'defense_{opponent.lower()}',
+                     'status': 'fallback',
+                     'required': False,
+                     'message': 'defense unavailable',
+                     'details': {'adjustments_applied': False},
+                 },
+             }), \
+             patch.object(simulator, '_safe_get_game_lines', return_value={
+                 'data': {'total': 225.0, 'spread': -2.5, 'home_implied_pts': 113.8, 'away_implied_pts': 111.2, 'source': 'test'},
+                 'health': {'source_key': 'betting', 'status': 'success', 'required': False, 'message': 'ok', 'details': {}},
+             }), \
+             patch.object(simulator, '_safe_get_lineup', side_effect=lambda team, game_date=None: {
+                 'data': lineup_a if team == 'LAL' else lineup_b,
+                 'health': {'source_key': f'lineup_{team.lower()}', 'status': 'success', 'required': False, 'message': 'ok', 'details': {}},
+             }), \
+             patch.object(simulator, '_safe_get_injury_probs', side_effect=lambda team: {
+                 'data': {},
+                 'health': {'source_key': f'injury_{team.lower()}', 'status': 'success', 'required': False, 'message': 'ok', 'details': {}},
+             }), \
              patch.object(simulator, '_get_team_rest_days', return_value={'rest_days': 2, 'is_b2b': False, 'is_3_in_4': False, 'games_last_7': 3, 'games_last_14': 6}), \
              patch.object(simulator, '_get_team_pace', side_effect=lambda team: 100.0 if team == 'LAL' else 99.0), \
              patch.object(simulator, '_get_team_efficiency_snapshot', side_effect=lambda team: team_eff_map[team]), \
@@ -466,3 +487,73 @@ class TestGameSimulatorUpgrade:
         assert len(result1['player_averages']) == 10
         assert 'context' in result1 and 'metadata' in result1
         assert 'team_targets' in result1['context']
+        assert result1['metadata']['input_health']['overall_status'] == 'degraded'
+
+    def test_optional_scraper_failures_mark_matchup_degraded(self, simulator):
+        """Optional scraper failures should keep the simulation running but mark degraded input health."""
+        ctx_a, hist_a, info_a = self._build_mock_roster('LAL', 100)
+        ctx_b, hist_b, info_b = self._build_mock_roster('BOS', 200)
+        pred_a = self._build_prediction_frame(len(info_a))
+        pred_b = self._build_prediction_frame(len(info_b))
+
+        def build_roster_context(team, opponent, is_home, injury_probs, lineup_data=None, game_date=None, rest_info=None):
+            if team == 'LAL':
+                return ctx_a, hist_a, info_a
+            return ctx_b, hist_b, info_b
+
+        def predict_batch(context_df, histories_map):
+            return pred_a if context_df.iloc[0]['TEAM_ABBREVIATION'] == 'LAL' else pred_b
+
+        with patch.object(simulator, 'prepare_simulation_context'), \
+             patch.object(simulator, '_build_roster_context', side_effect=build_roster_context), \
+             patch.object(simulator, '_safe_get_game_lines', return_value={
+                 'data': {'total': None, 'spread': None, 'source': 'fallback'},
+                 'health': {'source_key': 'betting', 'status': 'fallback', 'required': False, 'message': 'betting fallback', 'details': {}},
+             }), \
+             patch.object(simulator, '_safe_get_lineup', side_effect=lambda team, game_date=None: {
+                 'data': {},
+                 'health': {'source_key': f'lineup_{team.lower()}', 'status': 'failed', 'required': False, 'message': 'lineup failed', 'details': {}},
+             }), \
+             patch.object(simulator, '_safe_get_injury_probs', side_effect=lambda team: {
+                 'data': {},
+                 'health': {'source_key': f'injury_{team.lower()}', 'status': 'success', 'required': False, 'message': 'injury ok', 'details': {}},
+             }), \
+             patch.object(simulator, '_safe_get_defensive_adjustments', side_effect=lambda opponent, roster: {
+                 'data': {},
+                 'health': {'source_key': f'defense_{opponent.lower()}', 'status': 'fallback', 'required': False, 'message': 'defense fallback', 'details': {'adjustments_applied': False}},
+             }), \
+             patch.object(simulator, '_get_team_rest_days', return_value={'rest_days': 2, 'is_b2b': False, 'is_3_in_4': False, 'games_last_7': 3, 'games_last_14': 6}), \
+             patch.object(simulator, '_get_team_pace', return_value=100.0), \
+             patch.object(simulator, '_get_team_efficiency_snapshot', return_value={'pace': 100.0, 'offensive_rating': 114.0, 'defensive_rating': 112.0}), \
+             patch.object(simulator, '_build_team_target_means', return_value={
+                 'LAL': {'pts': 114.0, 'reb': 44.0, 'ast': 26.0},
+                 'BOS': {'pts': 111.0, 'reb': 43.0, 'ast': 25.0},
+             }), \
+             patch.object(simulator, '_apply_error_calibration', side_effect=lambda roster: roster), \
+             patch.object(simulator, '_apply_context_adjustments', side_effect=lambda roster, *args, **kwargs: roster), \
+             patch.object(simulator.manager, 'predict_player_stats_batch', side_effect=predict_batch):
+            result = simulator.simulate_matchup('LAL', 'BOS', num_sims=10, seed=99)
+
+        input_health = result['metadata']['input_health']
+        assert input_health['overall_status'] == 'degraded'
+        assert 'lineup_lal' in input_health['degraded_sources']
+        assert input_health['betting_calibration_applied'] is False
+        assert input_health['defensive_adjustments_applied'] is False
+
+    def test_lineup_context_reflects_missing_primary_handler(self, simulator):
+        """Lineup context should boost usage and assists when the primary handler is absent."""
+        roster = [
+            {'name': 'A', 'usage': 0.30, 'mean_reb': 4.0, 'mean_blk': 0.4, 'is_starter': True},
+            {'name': 'B', 'usage': 0.22, 'mean_reb': 6.0, 'mean_blk': 0.6, 'is_starter': True},
+            {'name': 'C', 'usage': 0.18, 'mean_reb': 8.5, 'mean_blk': 1.3, 'is_starter': False},
+        ]
+
+        context = simulator._build_team_lineup_context(
+            roster,
+            {'starters': ['B', 'C']},
+            coach_tightness=0.72,
+        )
+
+        assert context['usage_boost'] > 1.0
+        assert context['assist_boost'] > 1.0
+        assert context['starter_overlap'] < 1.0

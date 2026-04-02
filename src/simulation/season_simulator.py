@@ -6,6 +6,7 @@ from tqdm import tqdm
 from typing import List, Dict, Any
 from src.simulation.game_simulator import GameSimulator
 from src.data.schedule_scraper import ScheduleScraper
+from src.simulation.input_health import summarize_input_health
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,45 @@ class SeasonSimulator:
     def __init__(self, game_simulator: GameSimulator, schedule_scraper: ScheduleScraper):
         self.game_simulator = game_simulator
         self.schedule_scraper = schedule_scraper
+        self.last_run_summary: Dict[str, Any] = {
+            'games_requested': 0,
+            'games_simulated': 0,
+            'overall_status': 'healthy',
+            'input_health': summarize_input_health([]),
+            'schedule_health': {},
+            'hard_failures': [],
+        }
+
+    def _set_schedule_health(self, health: Dict[str, Any]) -> None:
+        self.last_run_summary['schedule_health'] = dict(health or {})
+
+    def _finalize_run_summary(self, results: List[Dict[str, Any]], requested_games: int) -> None:
+        source_health = []
+        for result in results:
+            metadata = result.get('metadata', {})
+            input_health = metadata.get('input_health', {})
+            source_health.extend(input_health.get('sources', []))
+
+        aggregated_input_health = summarize_input_health(source_health)
+        hard_failures = []
+        schedule_health = self.last_run_summary.get('schedule_health', {})
+        if schedule_health.get('status') == 'failed':
+            hard_failures.append(schedule_health['source_key'])
+        hard_failures.extend(aggregated_input_health.get('hard_failures', []))
+
+        overall_status = 'healthy'
+        if hard_failures:
+            overall_status = 'failed'
+        elif aggregated_input_health.get('degraded_sources'):
+            overall_status = 'degraded'
+
+        self.last_run_summary.update({
+            'games_requested': int(requested_games),
+            'games_simulated': int(len(results)),
+            'overall_status': overall_status,
+            'input_health': aggregated_input_health,
+            'hard_failures': hard_failures,
+        })
 
     def simulate_games(self, games_df: pd.DataFrame, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:
         """
@@ -38,6 +78,7 @@ class SeasonSimulator:
         
         if games_df.empty:
             logger.warning("No games found to simulate.")
+            self._finalize_run_summary([], 0)
             return []
         
         if not isinstance(num_sims, int) or num_sims < 1:
@@ -117,11 +158,14 @@ class SeasonSimulator:
                 except Exception as e:
                     logger.error(f"Error simulating {row['AWAY_TEAM']} @ {row['HOME_TEAM']}: {e}", exc_info=True)
 
+        self._finalize_run_summary(results, len(games_df))
         return results
 
     def simulate_today(self, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_todays_games()
+        self._set_schedule_health(self.schedule_scraper.get_last_fetch_status())
         if df is None:
+            self._finalize_run_summary([], 0)
             return []
         if not df.empty:
             logger.info(f"Retrieved {len(df)} games from schedule.")
@@ -129,12 +173,16 @@ class SeasonSimulator:
 
     def simulate_date(self, game_date: str, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_games_by_date(game_date)
+        self._set_schedule_health(self.schedule_scraper.get_last_fetch_status())
         if df is None:
+            self._finalize_run_summary([], 0)
             return []
         return self.simulate_games(df, num_sims, max_workers)
 
     def simulate_remaining_season(self, num_sims: int = 50, max_workers: int = 1) -> List[Dict[str, Any]]:
         df = self.schedule_scraper.get_remaining_season()
+        self._set_schedule_health(self.schedule_scraper.get_last_fetch_status())
         if df is None:
+            self._finalize_run_summary([], 0)
             return []
         return self.simulate_games(df, num_sims, max_workers)

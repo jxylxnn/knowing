@@ -10,6 +10,7 @@ from src.simulation.game_simulator import GameSimulator
 from src.data.schedule_scraper import ScheduleScraper
 from src.simulation.season_simulator import SeasonSimulator
 from src.simulation.report_generator import ReportGenerator
+from src.simulation.input_health import summarize_input_health
 import pandas as pd
 
 if sys.platform == "win32":
@@ -29,6 +30,52 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def format_input_health_summary(run_summary: Dict[str, Any]) -> str:
+    """Format run-level input health into a readable CLI summary."""
+    overall_status = run_summary.get('overall_status', 'healthy').upper()
+    lines = [
+        "",
+        "=" * 90,
+        f"INPUT HEALTH SUMMARY [{overall_status}]",
+        "=" * 90,
+    ]
+
+    schedule_health = run_summary.get('schedule_health') or {}
+    if schedule_health:
+        lines.append(
+            f"Schedule: {schedule_health.get('status', 'unknown')} - {schedule_health.get('message', '')}"
+        )
+
+    input_health = run_summary.get('input_health', {})
+    counts = input_health.get('counts', {})
+    if counts:
+        lines.append(
+            "Sources: "
+            f"success={counts.get('success', 0)} "
+            f"fallback={counts.get('fallback', 0)} "
+            f"failed={counts.get('failed', 0)} "
+            f"disabled={counts.get('disabled', 0)}"
+        )
+
+    degraded = input_health.get('degraded_sources', [])
+    if degraded:
+        lines.append("Degraded sources: " + ", ".join(degraded))
+
+    hard_failures = run_summary.get('hard_failures', [])
+    if hard_failures:
+        lines.append("Hard failures: " + ", ".join(hard_failures))
+
+    for source in input_health.get('sources', []):
+        if source.get('status') == 'success':
+            continue
+        lines.append(
+            f"- {source.get('source_key')}: {source.get('status')} - {source.get('message')}"
+        )
+
+    lines.append("=" * 90)
+    return "\n".join(lines)
 
 def main() -> None:
     """
@@ -74,14 +121,7 @@ def main() -> None:
         output_dir = args.output_dir if args.output_dir else os.path.join(args.data_dir, 'sim_results')
         
         manager = ModelManager(data_dir=args.data_dir, models_dir=args.models_dir)
-        
-        model_path = os.path.join(args.models_dir, 'pts_catboost.cbm')
-        if not os.path.exists(model_path):
-            print(f"\nError: Models not found in '{args.models_dir}' directory.")
-            print("Please run training first: python train.py --models-dir <path>")
-            sys.exit(1)
-        
-        manager._load_models()
+        manager.load_models()
             
         game_sim = GameSimulator(manager)
         schedule_scraper = ScheduleScraper()
@@ -89,11 +129,15 @@ def main() -> None:
         report_gen = ReportGenerator(output_dir=output_dir)
         
     except Exception as e:
+        if isinstance(e, FileNotFoundError):
+            print(f"\nError: {e}")
+            print("Please run training first: python train.py --models-dir <path>")
         logger.error(f"Failed to initialize components: {e}")
         sys.exit(1)
 
     # 2. Execute Mode
     results = []
+    hard_failure = False
     
     if args.today:
         print("\nFetching today's games...")
@@ -107,15 +151,29 @@ def main() -> None:
         print("\nFetching games for the upcoming week...")
         # Simulate next 7 days
         all_games = []
+        schedule_statuses = []
         today = datetime.now().date()
         for i in range(7):
             target_date = (today + timedelta(days=i)).strftime('%Y-%m-%d')
             day_games = schedule_scraper.get_games_by_date(target_date)
+            schedule_statuses.append(schedule_scraper.get_last_fetch_status())
             if day_games is not None and not day_games.empty:
                 all_games.append(day_games)
+
+        aggregated_schedule = summarize_input_health(schedule_statuses)
+        season_sim._set_schedule_health({
+            'source_key': 'schedule',
+            'status': 'failed' if aggregated_schedule.get('hard_failures') else (
+                'fallback' if aggregated_schedule.get('degraded_sources') else 'success'
+            ),
+            'required': True,
+            'message': "Aggregated weekly schedule retrieval status",
+            'details': aggregated_schedule,
+        })
         
         if not all_games:
             logger.warning("No games found for the upcoming week.")
+            season_sim._finalize_run_summary([], 0)
             results = []
         else:
             combined_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
@@ -137,6 +195,7 @@ def main() -> None:
             report_gen.print_quick_summary(results, stat_type=args.stat)
             
             report_gen.format_console_report(results, detailed=True, stat_type=args.stat)
+            print(format_input_health_summary(season_sim.last_run_summary), flush=True)
             
             if not args.no_csv:
                 # Export both game results and player projections
@@ -153,6 +212,11 @@ def main() -> None:
             logger.error(f"Reporting error: {e}", exc_info=True)
     else:
         print("\nNo games found or all simulations failed for the selected period.", flush=True)
+        print(format_input_health_summary(season_sim.last_run_summary), flush=True)
+
+    hard_failure = bool(season_sim.last_run_summary.get('hard_failures'))
+    if hard_failure:
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
