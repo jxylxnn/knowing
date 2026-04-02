@@ -20,6 +20,8 @@
 - Training internals for CatBoost/Transformer components are implemented and testable in isolation.
 - Transformer validation and runtime inference now default to an eager path with a safe SDPA backend fallback; `torch.compile` is disabled by default for this model path.
 - The active training path now persists per-target CatBoost runtime artifacts and validates the required `models/` contract before returning success.
+- `train.py` now preflights writable model/cache directories and required raw CSV inputs before doing expensive work, and it emits stage names so subprocess callers can tell where a failure occurred.
+- `train_colab.ipynb` now captures full stdout/stderr from `train.py`, prints the return code, and fails immediately on nonzero exit instead of hiding the real traceback behind `CalledProcessError`.
 - `ModelManager` now rejects incomplete runtime artifact sets instead of silently loading a partial model directory.
 - `simulate_season.py` now uses `ModelManager.load_models()` for startup validation instead of hard-coding a single `pts_catboost.cbm` existence check.
 - Rolling feature generation now batches wide feature columns before concatenating them back into the frame, which removed the prior pandas fragmentation warning flood.
@@ -32,6 +34,7 @@
 - Simulation stack is feature-rich and still depends on volatile third-party scrapers, but degraded optional inputs are now surfaced explicitly in per-game metadata and CLI output.
 - Query flow supports six stats at the parser/calculator level, but projection exports only appear complete for `PTS`, `REB`, and `AST`.
 - The train-to-simulation artifact contract is covered by focused regression tests, but a true CLI smoke run of `python train.py` could not be completed in this workspace because no raw training CSVs are present and the usable local interpreter crashes when importing `torch`.
+- The Colab notebook launch path has been hardened in code, but a live run against mounted Drive data is still needed to confirm the exact traceback the user was seeing and to verify the full notebook-to-training flow with real CSV inputs.
 - Transformer validation inference has been repaired in code, but a live CUDA smoke test is still needed to confirm the exact GPU/runtime combination that previously crashed.
 - Schedule scraping and season simulation features are implemented, and the previously confirmed config/state regressions in schedule/lineup/betting-support scrapers are now fixed in code.
 - Rolling feature generation no longer emits the large pandas fragmentation warning flood; the hot feature groups now batch new columns before concatenating them back into the frame.
@@ -99,6 +102,11 @@
 - Verified on 2026-04-02 after the Transformer validation fix:
   - `venv/bin/python3.12 -m pytest tests/test_models/test_transformer_model.py tests/test_training/test_runtime_artifact_contract.py -q`
   - Result: `3 passed, 4 skipped`
+- Verified on 2026-04-02 after the notebook/training launch hardening:
+  - `python3 -m py_compile train.py`
+  - `python3 -m json.tool train_colab.ipynb > /tmp/train_colab_validated.json`
+  - `python3 -m pytest tests/test_training/test_training_pipeline_colab.py tests/test_training/test_runtime_artifact_contract.py tests/test_models/test_transformer_model.py -q`
+  - Result: `5 passed, 4 skipped`
 - Synthetic timing check on the rolling feature path with representative 2000-row input:
   - batched implementation: `1.554s`
   - reconstructed old insertion path: `1.543s`

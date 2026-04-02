@@ -481,3 +481,47 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 ### Revisit Triggers
 
 - If a future runtime proves the compiled path stable across the supported CUDA matrix and there is a measurable performance win.
+
+---
+
+## DR-012: Notebook Training Launches Should Capture Subprocess Output And Preflight Inputs
+
+- Status: active
+- Date: 2026-04-02
+- Confidence: high
+
+### Context
+
+- The Colab training notebook historically launched `train.py` with `subprocess.run(..., check=True)` and did not print captured stdout/stderr.
+- That made a real training failure indistinguishable from a wrapper-level `CalledProcessError`.
+
+### Options Considered
+
+- Keep the simple `check=True` launch and let notebook exceptions surface without captured logs.
+- Add a separate debug notebook cell that prints logs only when manually enabled.
+- Capture stdout/stderr and print them every time, alongside basic input/writability preflight checks.
+
+### Decision
+
+- The notebook launch should always capture subprocess output, print the return code, and fail fast after printing stdout/stderr.
+- The notebook should also preflight the required raw CSV inputs and the output directory before launching training.
+
+### Why
+
+- Training failures are only actionable when the underlying traceback is visible.
+- The notebook is part of the operator workflow, so it should optimize for immediate diagnosis rather than terse subprocess behavior.
+
+### Tradeoffs
+
+- Slightly more verbose notebook output.
+- A little more preflight logic in the wrapper.
+- Much better debugging signal when training fails.
+
+### Consequences
+
+- Future notebook wrappers that invoke the CLI should follow the same capture-and-print pattern.
+- `train.py` stage logging becomes more valuable because the notebook now preserves it.
+
+### Revisit Triggers
+
+- If notebook output becomes too noisy for normal use or if the workflow is replaced by a different launcher.

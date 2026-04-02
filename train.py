@@ -111,6 +111,22 @@ def resolve_runtime_path(path_value: str, default_name: str) -> Path:
     return path
 
 
+def ensure_directory_writable(path: Path, label: str) -> None:
+    """Create a directory if needed and verify that it is writable."""
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".codex_write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError(f"{label} directory is not writable: {path}") from exc
+    finally:
+        try:
+            if probe.exists():
+                probe.unlink()
+        except Exception:
+            pass
+
+
 def print_banner(console=None):
     """Print the training banner with rich formatting."""
     banner_text = """
@@ -225,6 +241,10 @@ Examples:
         help='Maximum parallel workers (default: auto)'
     )
     parser.add_argument(
+        '--feature-ablation', action='store_true',
+        help='Benchmark and prune weak feature groups/formulas before training'
+    )
+    parser.add_argument(
         '--no-gpu', action='store_true',
         help='Disable GPU even if available'
     )
@@ -242,7 +262,19 @@ Examples:
     data_dir = resolve_runtime_path(args.data_dir, 'data')
     models_dir = resolve_runtime_path(args.models_dir, 'models')
     cache_dir = resolve_runtime_path(args.cache_dir, 'cache/training')
-    
+
+    logger.info(
+        "Training CLI starting: data_dir=%s models_dir=%s cache_dir=%s mode=%s model_size=%s parallel=%s max_workers=%s no_gpu=%s",
+        data_dir,
+        models_dir,
+        cache_dir,
+        args.mode,
+        args.model_size,
+        args.parallel,
+        args.max_workers,
+        args.no_gpu,
+    )
+
     # Initialize rich console and training logger
     console = Console() if RICH_AVAILABLE else None
     training_logger = get_training_logger(use_rich=RICH_AVAILABLE, log_gpu=True)
@@ -265,21 +297,36 @@ Examples:
         if console and RICH_AVAILABLE:
             console.print("[yellow]GPU unavailable or incompatible; falling back to CPU training.[/yellow]")
     
-    # Check for data files
-    players_file = data_dir / 'nba_players.csv'
-    games_file = data_dir / 'nba_games.csv'
-    
-    if not players_file.exists() or not games_file.exists():
-        if console and RICH_AVAILABLE:
-            console.print("[bold red]ERROR: Data files not found![/bold red]")
-            console.print(f"Please run 'python update_data.py' first to fetch NBA data.")
-        else:
-            print(f"\nERROR: Data files not found in {data_dir}")
-            print("Please run 'python update_data.py' first to fetch NBA data.")
-        sys.exit(1)
-    
+    current_stage = "startup"
+
     try:
+        # Preflight the runtime directories before doing expensive work.
+        current_stage = "preflight checks"
+        logger.info("Step 0/5: %s", current_stage.title())
+        ensure_directory_writable(models_dir, "models")
+        ensure_directory_writable(cache_dir, "cache")
+
+        # Check for data files
+        players_file = data_dir / 'nba_players.csv'
+        games_file = data_dir / 'nba_games.csv'
+
+        if not players_file.exists() or not games_file.exists():
+            if console and RICH_AVAILABLE:
+                console.print("[bold red]ERROR: Data files not found![/bold red]")
+                console.print("Please run 'python update_data.py' first to fetch NBA data.")
+            else:
+                print(f"\nERROR: Data files not found in {data_dir}")
+                print("Please run 'python update_data.py' first to fetch NBA data.")
+            raise FileNotFoundError(
+                f"Missing required data files in {data_dir}: "
+                f"{'nba_players.csv' if not players_file.exists() else ''}"
+                f"{', ' if (not players_file.exists() and not games_file.exists()) else ''}"
+                f"{'nba_games.csv' if not games_file.exists() else ''}"
+            )
+
         # Load data
+        current_stage = "loading and merging datasets"
+        logger.info("Step 1/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
             console.print("\n[bold cyan]Step 1: Loading and merging datasets...[/bold cyan]")
         else:
@@ -294,12 +341,33 @@ Examples:
             print(f"  Loaded {len(merged_df)} player-game records")
         
         # Engineer features
+        current_stage = "feature engineering"
+        logger.info("Step 2/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
             console.print("\n[bold cyan]Step 2: Engineering features...[/bold cyan]")
         else:
             print("\nStep 2: Engineering features...")
         
-        feature_engineer = FeatureEngineer()
+        disable_groups = []
+        disable_columns = []
+        if args.feature_ablation:
+            ablation_probe = FeatureEngineer()
+            ablation_report = ablation_probe.benchmark_feature_variants(merged_df, target='PTS')
+            logger.info("Feature ablation report: %s", ablation_report)
+            best_variant = ablation_report.get('best', {}).get('variant')
+            if best_variant == 'no_matchup':
+                disable_groups = ['matchup', 'opponent_strength']
+            elif best_variant == 'no_context':
+                disable_groups = ['context', 'fatigue']
+            elif best_variant == 'no_target_encoding':
+                disable_groups = ['target_encoding', 'league_rank']
+            elif best_variant == 'formula_raw_only':
+                disable_columns = ablation_probe._formula_columns_hint()
+
+        feature_engineer = FeatureEngineer(
+            disable_groups=disable_groups,
+            disable_columns=disable_columns,
+        )
         full_df = feature_engineer.create_features(merged_df)
         
         if console and RICH_AVAILABLE:
@@ -308,6 +376,8 @@ Examples:
             print(f"  Created {len(full_df.columns)} features")
         
         # Create and run pipeline
+        current_stage = "pipeline initialization"
+        logger.info("Step 3/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
             console.print(f"\n[bold cyan]Step 3: Initializing training pipeline ({args.mode} mode)...[/bold cyan]")
         else:
@@ -329,6 +399,8 @@ Examples:
         print_hardware_info(pipeline.hw_info, console)
         
         # Prepare data
+        current_stage = "data preparation and splitting"
+        logger.info("Step 4/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
             console.print("\n[bold cyan]Step 4: Preparing data splits...[/bold cyan]")
         else:
@@ -340,6 +412,8 @@ Examples:
         print_data_info(merged_df, full_df, fit_df, val_df, test_df, console)
         
         # Train models
+        current_stage = "model training"
+        logger.info("Step 5/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
             console.print(f"\n[bold cyan]Step 5: Training models (this may take a while)...[/bold cyan]")
         else:
@@ -421,7 +495,8 @@ Examples:
         print("\n\nTraining interrupted by user.")
         return 130
     except Exception as e:
-        print(f"\n\nERROR: Training failed: {e}")
+        logger.exception("Training failed during %s", current_stage)
+        print(f"\n\nERROR: Training failed during {current_stage}: {e}")
         import traceback
         traceback.print_exc()
         return 1

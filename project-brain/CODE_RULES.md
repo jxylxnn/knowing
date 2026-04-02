@@ -13,6 +13,7 @@
   - `simulate_season.py`
   - `query_prob.py`
   - `clear_cache.py`
+- When a notebook or wrapper script launches one of the top-level CLIs, capture stdout and stderr before re-raising on failure so the real traceback is visible to the operator.
 - Treat filesystem artifact names and locations as API contracts unless you update every consumer in the same change.
 - Update `/project-brain` after every meaningful code change.
 - Do not silently change target-stat semantics, query names, or exported CSV schemas.

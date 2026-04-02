@@ -120,6 +120,16 @@
 
 ## BLOCKED
 
+### Live Colab training smoke test with mounted Drive data
+
+- Why it is blocked:
+  - this workspace does not have the `/content/drive/MyDrive/nba_model/data/*.csv` inputs mounted locally
+  - the notebook fix can be validated only in a Colab-like environment with the real Drive paths
+- What is needed:
+  - run the hardened `train_colab.ipynb` cell against the real Drive data and models directories
+  - confirm that stdout/stderr from `train.py` are printed when the subprocess fails
+  - confirm the notebook exits immediately on nonzero status
+
 ### Full end-to-end validation with live data
 
 - Why it is blocked:
@@ -201,3 +211,12 @@
   - Full test suite runtime after the refactor: `94 passed, 2 skipped`.
 - Follow-up:
   - a real-data large-scale profile can still be collected later if the team wants a stricter production baseline.
+
+### Harden Colab training launch and train.py preflight logging
+
+- Completed on 2026-04-02.
+- Delivered:
+  - `train.py` now preflights writable model/cache directories and required raw CSV inputs before expensive work starts.
+  - `train.py` now logs explicit stage names so failures point to the loading, feature engineering, pipeline init, split, or training stage.
+  - `train_colab.ipynb` now captures stdout/stderr from `train.py`, prints the return code, and raises immediately on nonzero exit.
+  - `tests/test_training/test_training_pipeline_colab.py` and the existing training/runtime regression tests still pass after the launch hardening.

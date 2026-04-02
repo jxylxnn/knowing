@@ -39,6 +39,21 @@
   - `src/training/pipeline.py`
 - Risk level: high because it defines the artifact contract consumed later by simulation.
 - Current note: success now depends on `TrainingPipeline` validating the full runtime artifact set, so failures here can indicate missing output files rather than only model-fit errors.
+- Current note: `train.py` now performs explicit preflight checks for the writable model/cache directories and required raw CSV inputs before expensive work begins, and it logs stage names so subprocess callers can surface a failure stage clearly.
+
+### `train_colab.ipynb`
+
+- Role: Colab-oriented wrapper around `train.py`.
+- Behavior:
+  - validates the Drive project root, raw CSV inputs, and writability of the Google Drive models directory before launch
+  - runs `train.py` through `subprocess.run(..., capture_output=True, text=True)` and prints both stdout and stderr
+  - raises a `RuntimeError` on nonzero exit so the notebook stops loudly instead of hiding the real traceback
+- Risk level: medium.
+- Safe edits:
+  - launch UX
+  - debug output and preflight checks
+- Risky edits:
+  - changing the training command contract without keeping it aligned with `train.py`
 
 ### `simulate_season.py`
 

@@ -528,3 +528,58 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - `src/training/pipeline.py`
 - `src/config/model_config.py`
 - `train_colab.ipynb`
+
+---
+
+## KB-011: Colab Training Cell Hid The Real `train.py` Error Output
+
+- Status: fixed in code on 2026-04-02, pending live Colab confirmation
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- The notebook training cell raised `CalledProcessError` with exit status 1, but the operator could not see the actual stdout/stderr emitted by `train.py`.
+
+### Expected Behavior
+
+- The notebook should print the full subprocess stdout and stderr, show the return code, and stop immediately on failure so the real traceback is visible.
+
+### Evidence
+
+- Historical notebook code used `subprocess.run(train_cmd, check=True)` without capturing or printing subprocess output.
+- The notebook cell also did not preflight the required raw CSV inputs or verify that the Google Drive models directory was writable before launch.
+- Fix evidence now in repo:
+  - `train_colab.ipynb` now uses `subprocess.run(..., capture_output=True, text=True)` and prints stdout/stderr before raising on nonzero exit.
+  - The notebook now checks for `nba_players.csv` and `nba_games.csv` under the configured Drive data directory.
+  - The notebook now verifies that the Drive models directory can be written to before launching training.
+  - `train.py` now logs explicit stage names and preflights writable runtime directories so direct CLI runs fail more clearly too.
+
+### Reproduction
+
+- Historical repro was the user-reported notebook failure.
+
+### Suspected Cause
+
+- The wrapper suppressed the actual subprocess logs, and the notebook launched training without enough preflight context to isolate path or permission issues.
+
+### Workaround
+
+- Use the hardened notebook cell or run `python train.py` directly from a terminal to get the full traceback.
+
+### Fix Ideas
+
+- Implemented:
+  - capture and print stdout/stderr
+  - print the return code
+  - fail fast on missing inputs and unwritable models directory
+  - add stage logging to the CLI
+
+### Risks
+
+- The live Colab environment still needs a real mounted Drive smoke test to confirm the exact user-facing output path.
+
+### Related Files
+
+- `train_colab.ipynb`
+- `train.py`
