@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -206,3 +209,64 @@ def test_transformer_validation_batch_prediction_delegates_to_wrapper(tmp_path, 
     assert transformer.calls == 1
     assert preds.shape == (3, len(pipeline.TARGETS))
     assert np.allclose(preds, 2.0)
+
+
+def test_feature_schema_import_contract_survives_clean_process(tmp_path):
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    (stub_dir / "torch.py").write_text(
+        "class _Cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available():\n"
+        "        return False\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def get_device_capability(index=0):\n"
+        "        return (0, 0)\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def get_device_name(index=0):\n"
+        "        return 'cpu'\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def get_device_properties(index=0):\n"
+        "        class _Props:\n"
+        "            total_memory = 0\n"
+        "        return _Props()\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def empty_cache():\n"
+        "        return None\n"
+        "\n"
+        "cuda = _Cuda()\n"
+        "__version__ = 'stub'\n"
+        "compile = lambda *args, **kwargs: None\n"
+        "device = lambda value: value\n"
+        "Tensor = object\n"
+        "backends = type('B', (), {'cuda': type('C', (), {'enable_flash_sdp': staticmethod(lambda *args, **kwargs: None), 'enable_mem_efficient_sdp': staticmethod(lambda *args, **kwargs: None), 'enable_math_sdp': staticmethod(lambda *args, **kwargs: None)})()})()\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(stub_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    code = (
+        "from src.utils.prediction_utils import FeatureSchema\n"
+        "from src.utils import FeatureSchema as PackageFeatureSchema\n"
+        "from src.training.pipeline import TrainingPipeline\n"
+        "print(FeatureSchema.__name__)\n"
+        "print(PackageFeatureSchema.__name__)\n"
+        "print(TrainingPipeline.__name__)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "FeatureSchema" in result.stdout
+    assert "TrainingPipeline" in result.stdout

@@ -21,6 +21,7 @@
 - Transformer validation and runtime inference now default to an eager path with a safe SDPA backend fallback; `torch.compile` is disabled by default for this model path.
 - The active training path now persists per-target CatBoost runtime artifacts and validates the required `models/` contract before returning success.
 - `train.py` now preflights writable model/cache directories and required raw CSV inputs before doing expensive work, and it emits stage names so subprocess callers can tell where a failure occurred.
+- `FeatureSchema` is explicitly exported from `src.utils.prediction_utils` and re-exported from `src.utils`, with a clean-process regression test guarding the import contract.
 - `train_colab.ipynb` now resolves the repo checkout separately from Drive-backed data/models, captures full stdout/stderr from `train.py`, prints the return code, and fails immediately on nonzero exit instead of hiding the real traceback behind `CalledProcessError`.
 - `ModelManager` now rejects incomplete runtime artifact sets instead of silently loading a partial model directory.
 - `simulate_season.py` now uses `ModelManager.load_models()` for startup validation instead of hard-coding a single `pts_catboost.cbm` existence check.
@@ -107,6 +108,9 @@
   - `python3 -m json.tool train_colab.ipynb > /tmp/train_colab_validated.json`
   - `python3 -m pytest tests/test_training/test_training_pipeline_colab.py tests/test_training/test_runtime_artifact_contract.py tests/test_models/test_transformer_model.py -q`
   - Result: `5 passed, 4 skipped`
+- Verified on 2026-04-02 after the FeatureSchema import-contract hardening:
+  - `./venv/bin/python3.12 -m pytest tests/test_training/test_runtime_artifact_contract.py -q`
+  - Result: `4 passed`
 - Synthetic timing check on the rolling feature path with representative 2000-row input:
   - batched implementation: `1.554s`
   - reconstructed old insertion path: `1.543s`

@@ -356,6 +356,7 @@ These are important but secondary to the main orchestration files above.
 
 - Owns `FeatureSchema`, selectors, fallback predictors, and temporal weighting helpers.
 - High-risk because training and inference compatibility depend on it.
+- `src/utils/__init__.py` re-exports `FeatureSchema` and the other shared helpers so compatibility-sensitive callers can import from the package namespace too.
 
 ## Tests
 

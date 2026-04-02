@@ -4,13 +4,52 @@ This module contains utility classes extracted from ModelManager and DataPipelin
 to reduce code duplication and improve maintainability.
 """
 
+import hashlib
+import json
 import logging
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
+import joblib
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    'FeatureSchema',
+    'TemporalWeightCalculator',
+    'FallbackPredictor',
+    'FeatureSelector',
+    'TargetPreprocessor',
+]
+
+
+@dataclass
+class FeatureSchema:
+    """Persisted feature schema shared by training and inference."""
+
+    feature_cols: List[str]
+    categorical_cols: List[str] = field(default_factory=list)
+    group_columns: Dict[str, List[str]] = field(default_factory=dict)
+    dtype_map: Dict[str, str] = field(default_factory=dict)
+    version: str = 'feature_schema_v2'
+    schema_hash: str = ''
+
+    def __post_init__(self) -> None:
+        if not self.schema_hash:
+            payload = json.dumps(
+                {
+                    'feature_cols': self.feature_cols,
+                    'categorical_cols': self.categorical_cols,
+                    'group_columns': self.group_columns,
+                    'version': self.version,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode('utf-8')
+            self.schema_hash = hashlib.sha256(payload).hexdigest()
 
 
 class TemporalWeightCalculator:
@@ -176,89 +215,193 @@ class FallbackPredictor:
 
 
 class FeatureSelector:
-    """Selects safe features for model training, avoiding data leakage.
-    
-    Identifies and filters features that could leak target information,
-    keeping only lagged, rolling, and contextual features.
-    """
-    
-    SAFE_PREFIXES = ['ROLL', 'EWMA_', 'VS_OPP_']
-    SAFE_KEYWORDS = ['TREND', 'BAYESIAN', 'PROJ_', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX']
-    SAFE_COLUMNS = [
-        'IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
-        'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK', 'CLOSE_GAME', 'EXP_MARGIN'
-    ]
-    
+    """Master selector shared by training and inference."""
+
+    SAFE_PREFIXES = (
+        'ROLL_',
+        'EWMA_',
+        'VS_OPP_',
+        'RAW_',
+        'LEAGUE_PCT_',
+    )
+    SAFE_KEYWORDS = (
+        'TREND',
+        'BAYESIAN',
+        'PACE',
+        '_TE',
+        '_SHARE',
+        'ROLE_INDEX',
+        'MISSING_',
+        'IMPUTED_',
+        'COLD_START',
+        'FATIGUE',
+        'EFF_Z_SCORE',
+        'HOT_STREAK',
+        'COLD_STREAK',
+        'POTENTIAL',
+        'B2B_IMPACT',
+        'USG_PCT',
+        'REB_OPPORTUNITY',
+        'FT_RATE',
+        'TS_PCT_MOMENTUM',
+        'DEF_MATCHUP',
+        'OPP_DEF',
+        'EST_POSS',
+        'PACE_FACTOR',
+    )
+    SAFE_EXACT = (
+        'IS_HOME',
+        'REST_DAYS',
+        'IS_B2B',
+        'FATIGUE_SCORE',
+        'DAYS_SINCE_LAST',
+        'MINS_LAST_3',
+        'MINS_LAST_7',
+        'CONTEXT_COLD_START',
+        'TEAM_PACE_10',
+        'PACE_FACTOR',
+        'STAR_TEAMMATE_OUT',
+    )
+    EXCLUDE_ALWAYS = {
+        'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
+        'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
+        'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
+    }
+    RAW_BOX_SCORE = {
+        'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'MIN', 'FGA', 'FGM', 'FTA',
+        'FTM', 'FG3A', 'FG3M', 'OREB', 'DREB',
+    }
+
     def __init__(self, targets: Optional[List[str]] = None):
-        """Initialize with target columns to exclude.
-        
-        Args:
-            targets: List of target column names.
-        """
         self.targets = targets or ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
-    
+        self.feature_schema: Optional[FeatureSchema] = None
+
+    def _is_numeric(self, series: pd.Series) -> bool:
+        return pd.api.types.is_numeric_dtype(series)
+
+    def _is_safe_feature(self, col: str) -> bool:
+        if col in self.EXCLUDE_ALWAYS or col in self.targets or col in self.RAW_BOX_SCORE:
+            return False
+        if col in self.SAFE_EXACT:
+            return True
+        if col.startswith(self.SAFE_PREFIXES):
+            return True
+        if any(keyword in col for keyword in self.SAFE_KEYWORDS):
+            return True
+        if (col.startswith('TEAM_') or col.startswith('OPP_TEAM_')) and (
+            'ROLL_' in col or 'PACE' in col or 'DEF' in col
+        ):
+            return True
+        return False
+
     def select_features(self, df: pd.DataFrame) -> List[str]:
-        """Select safe features from DataFrame.
-        
-        Args:
-            df: DataFrame with all columns.
-            
-        Returns:
-            List of safe feature column names.
-        """
-        exclude_cols = [
-            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
-            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
-            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE'
-        ] + self.targets + self.targets
-        
+        schema = self.fit(df)
+        return schema.feature_cols
+
+    def fit(
+        self,
+        df: pd.DataFrame,
+        group_columns: Optional[Dict[str, List[str]]] = None,
+        categorical_columns: Optional[Sequence[str]] = None,
+    ) -> FeatureSchema:
+        """Build and cache the canonical feature schema."""
         candidate_cols = [
             c for c in df.columns
-            if c not in exclude_cols and
-            (df[c].dtype in ['int64', 'float64', 'int32', 'float32', 'float', 'int'])
+            if c not in self.EXCLUDE_ALWAYS and c not in self.targets and self._is_numeric(df[c])
         ]
-        
-        leaky_suspects = [
-            c for c in candidate_cols 
-            if any(t.lower() in c.lower() for t in self.targets)
-        ]
-        if leaky_suspects:
-            logger.warning(f"Potential leaky features detected: {leaky_suspects[:10]}...")
-        
-        safe_features = [
-            c for c in candidate_cols
-            if self._is_safe_feature(c)
-        ]
-        
-        safe_features = [
-            c for c in safe_features
-            if not (c.endswith('_TEAM') and c.replace('_TEAM', '') in self.targets)
-        ]
-        
-        logger.info(f"Selected {len(safe_features)} features for training.")
-        return safe_features
-    
-    def _is_safe_feature(self, col: str) -> bool:
-        """Check if a column is a safe feature.
-        
-        Args:
-            col: Column name to check.
-            
-        Returns:
-            True if the feature is safe to use.
-        """
-        if col in self.SAFE_COLUMNS:
-            return True
-        
-        for prefix in self.SAFE_PREFIXES:
-            if col.startswith(prefix):
-                return True
-        
-        for keyword in self.SAFE_KEYWORDS:
-            if keyword in col:
-                return True
-        
-        return False
+
+        safe_features = [c for c in candidate_cols if self._is_safe_feature(c)]
+
+        if group_columns:
+            ordered: List[str] = []
+            seen = set()
+            for cols in group_columns.values():
+                for col in cols:
+                    if col in safe_features and col not in seen:
+                        ordered.append(col)
+                        seen.add(col)
+            for col in safe_features:
+                if col not in seen:
+                    ordered.append(col)
+            safe_features = ordered
+
+        cat_cols = [c for c in (categorical_columns or ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID']) if c in df.columns]
+        dtype_map = {col: str(df[col].dtype) for col in safe_features if col in df.columns}
+
+        self.feature_schema = FeatureSchema(
+            feature_cols=safe_features,
+            categorical_cols=cat_cols,
+            group_columns=group_columns or {},
+            dtype_map=dtype_map,
+        )
+        logger.info("Selected %s canonical features", len(safe_features))
+        return self.feature_schema
+
+    def save_schema(self, schema: FeatureSchema, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(schema, path)
+
+    def load_schema(self, path: Path) -> Optional[FeatureSchema]:
+        if not Path(path).exists():
+            return None
+        schema = joblib.load(path)
+        if isinstance(schema, list):
+            schema = FeatureSchema(feature_cols=list(schema))
+        self.feature_schema = schema
+        return schema
+
+    def validate_exact_match(self, df: pd.DataFrame, schema: Optional[FeatureSchema] = None) -> None:
+        schema = schema or self.feature_schema
+        if schema is None:
+            raise ValueError("No feature schema available for validation")
+
+        missing = [c for c in schema.feature_cols if c not in df.columns]
+        extra = [c for c in df.columns if c not in schema.feature_cols and c not in self.EXCLUDE_ALWAYS]
+        if missing or extra:
+            raise ValueError(
+                f"Feature schema mismatch. missing={missing[:10]} extra={extra[:10]} schema_hash={schema.schema_hash}"
+            )
+
+    def align_frame(
+        self,
+        df: pd.DataFrame,
+        schema: Optional[FeatureSchema] = None,
+        *,
+        strict: bool = False,
+        fill_value: float = 0.0,
+    ) -> pd.DataFrame:
+        """Align a frame to the canonical schema."""
+        schema = schema or self.feature_schema
+        if schema is None:
+            raise ValueError("No feature schema available")
+
+        frame = df.copy()
+        missing = [c for c in schema.feature_cols if c not in frame.columns]
+        extra = [c for c in frame.columns if c not in schema.feature_cols]
+
+        if missing:
+            logger.warning("Missing feature columns: %s", missing[:20])
+            if strict:
+                raise ValueError(f"Missing feature columns: {missing}")
+            for col in missing:
+                frame[col] = fill_value
+        if extra:
+            logger.info("Dropping %s non-schema columns", len(extra))
+
+        aligned = frame.reindex(columns=list(schema.feature_cols), fill_value=fill_value)
+        for col in aligned.columns:
+            aligned[col] = pd.to_numeric(aligned[col], errors='coerce').fillna(fill_value)
+        return aligned
+
+    def transform(
+        self,
+        df: pd.DataFrame,
+        schema: Optional[FeatureSchema] = None,
+        *,
+        strict: bool = False,
+        fill_value: float = 0.0,
+    ) -> pd.DataFrame:
+        return self.align_frame(df, schema=schema, strict=strict, fill_value=fill_value)
 
 
 class TargetPreprocessor:

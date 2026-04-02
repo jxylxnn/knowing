@@ -11,6 +11,7 @@ __all__ = [
     'set_global_seed',
     'normalize_team',
     'TEAM_MAPPINGS',
+    'FeatureSchema',
     'TemporalWeightCalculator',
     'FallbackPredictor',
     'FeatureSelector',
@@ -24,7 +25,7 @@ def __getattr__(name: str) -> Any:
     if name in {'normalize_team', 'TEAM_MAPPINGS'}:
         module = import_module('.team_mappings', __name__)
         return getattr(module, name)
-    if name in {'TemporalWeightCalculator', 'FallbackPredictor', 'FeatureSelector', 'TargetPreprocessor'}:
+    if name in {'FeatureSchema', 'TemporalWeightCalculator', 'FallbackPredictor', 'FeatureSelector', 'TargetPreprocessor'}:
         module = import_module('.prediction_utils', __name__)
         return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -641,3 +641,61 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - `train_colab.ipynb`
 - `project-brain/CURRENT_STATE.md`
 - `project-brain/TASKS.md`
+
+---
+
+## KB-013: FeatureSchema Import Contract Was Too Implicit For Training Startup
+
+- Status: fixed in code on 2026-04-02, verified with targeted regression test
+- Severity: high
+- Confidence: medium
+
+### Symptom
+
+- Training startup was reported to fail when `src/training/pipeline.py` imported `FeatureSchema` from `src.utils.prediction_utils`, because the import contract was not explicit enough to protect against stale or divergent environments.
+
+### Expected Behavior
+
+- `FeatureSchema` should be importable from `src.utils.prediction_utils`.
+- The package-level `src.utils` namespace should also re-export `FeatureSchema` so compatibility is preserved if callers import from the utility package instead of the module directly.
+
+### Evidence
+
+- The current source already defines `FeatureSchema` in `src/utils/prediction_utils.py`, but the contract was not guarded by an explicit public export list or a regression test.
+- Fix evidence now in repo:
+  - `src/utils/prediction_utils.py` now declares `FeatureSchema` in `__all__`.
+  - `src/utils/__init__.py` re-exports `FeatureSchema` through its lazy attribute loader.
+  - `tests/test_training/test_runtime_artifact_contract.py` now validates a clean-process import of both `src.utils.prediction_utils.FeatureSchema` and `src.utils.FeatureSchema`, plus `src.training.pipeline`.
+
+### Reproduction
+
+- Clean-process import check in the repo venv now succeeds:
+  - `from src.utils.prediction_utils import FeatureSchema`
+  - `from src.utils import FeatureSchema`
+- Regression test also imports `src.training.pipeline` in a subprocess with a stub `torch` module to avoid local CUDA runtime crashes.
+
+### Suspected Cause
+
+- The import contract was too implicit for a repository that relies on stable module/file interfaces.
+
+### Workaround
+
+- Importing `FeatureSchema` directly from `src.utils.prediction_utils` works in the current source tree, but the package re-export is the safer compatibility path.
+
+### Fix Ideas
+
+- Implemented:
+  - explicit module exports
+  - package-level compatibility re-export
+  - subprocess regression coverage
+
+### Risks
+
+- If `FeatureSchema` is moved again, the re-export and regression test should be updated in the same change.
+
+### Related Files
+
+- `src/utils/prediction_utils.py`
+- `src/utils/__init__.py`
+- `src/training/pipeline.py`
+- `tests/test_training/test_runtime_artifact_contract.py`

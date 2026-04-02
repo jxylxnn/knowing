@@ -239,3 +239,12 @@
   - The notebook now supports an explicit `project_root_override` and falls back to common repo checkout candidates like `/content/knowing`.
   - The launcher now prints the resolved `project_root`, `train_script`, `data_dir`, and `models_dir` before starting training.
   - `train_colab.ipynb` now captures stdout/stderr from `train.py`, prints the return code, and raises immediately on nonzero exit.
+
+### Restore and guard the `FeatureSchema` import contract
+
+- Completed on 2026-04-02.
+- Delivered:
+  - `src/utils/prediction_utils.py` now explicitly declares `FeatureSchema` in its public exports.
+  - `src/utils/__init__.py` re-exports `FeatureSchema` so package-level imports stay compatible.
+  - `tests/test_training/test_runtime_artifact_contract.py` now verifies the import contract in a clean subprocess with a stubbed `torch` module.
+  - Targeted regression run: `4 passed`.

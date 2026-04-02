@@ -569,3 +569,45 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 ### Revisit Triggers
 
 - If the notebook is replaced by a different launcher pattern or if the repo adopts a single canonical Colab mount location.
+
+---
+
+## DR-014: Keep `FeatureSchema` Explicitly Exported From The Utility Layer
+
+- Status: active
+- Date: 2026-04-02
+- Confidence: medium
+
+### Context
+
+- `src/training/pipeline.py` and related loaders depend on `FeatureSchema` as part of the training/inference feature-layout contract.
+- The utility module already defined `FeatureSchema`, but the export contract was not explicit enough for a repo that relies on stable import paths.
+
+### Options Considered
+
+- Leave the class defined only in `src.utils.prediction_utils` and rely on implicit module attributes.
+- Move the class elsewhere and update all import sites.
+- Keep the canonical definition in `src.utils.prediction_utils` and re-export it from `src.utils` for compatibility.
+
+### Decision
+
+- Keep `FeatureSchema` defined in `src.utils.prediction_utils` and make the export contract explicit with `__all__` plus a package-level re-export from `src.utils`.
+
+### Why
+
+- The repository depends heavily on stable module/file contracts.
+- An explicit export is easier to verify and less likely to regress than an implicit attribute.
+
+### Tradeoffs
+
+- Slightly more explicit module surface area.
+- Better compatibility for both direct module imports and package-level imports.
+
+### Consequences
+
+- Future refactors that move `FeatureSchema` must preserve the re-export or update all callers in the same change.
+- Regression tests should validate the import contract in a clean process, not just by in-process attribute access.
+
+### Revisit Triggers
+
+- If the feature schema ownership changes to a dedicated shared-contract module or package.
