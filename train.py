@@ -12,6 +12,7 @@ This script provides an efficient, modular training pipeline with:
 """
 
 import argparse
+import inspect
 import logging
 import sys
 import time
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from src.training.pipeline import TrainingPipeline, create_pipeline
     from src.preprocessing.data_loader import DataLoader
-    from src.preprocessing.feature_engineer import FeatureEngineer
+    from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
     from src.training.training_logger import get_training_logger, RichTrainingLogger
     from src.models.gpu_utils import (
         check_gpu_compatibility,
@@ -61,6 +62,44 @@ except ModuleNotFoundError:
 
     def setup_logging():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    def build_feature_engineer(
+        rolling_windows=None,
+        use_gpu=None,
+        enable_groups=None,
+        disable_groups=None,
+        disable_columns=None,
+        max_missing_rate=0.35,
+        max_imputed_rate=0.40,
+    ):
+        """Compatibility-safe FeatureEngineer constructor for legacy checkouts."""
+        init_kwargs = {
+            'rolling_windows': rolling_windows,
+            'use_gpu': use_gpu,
+            'enable_groups': enable_groups,
+            'disable_groups': disable_groups,
+            'disable_columns': disable_columns,
+            'max_missing_rate': max_missing_rate,
+            'max_imputed_rate': max_imputed_rate,
+        }
+        supported_kwargs = {
+            name
+            for name in inspect.signature(FeatureEngineer.__init__).parameters
+            if name != 'self'
+        }
+        filtered_kwargs = {
+            key: value
+            for key, value in init_kwargs.items()
+            if value is not None and key in supported_kwargs
+        }
+        engineer = FeatureEngineer(**filtered_kwargs)
+        if disable_groups is not None and 'disable_groups' not in supported_kwargs:
+            engineer.disable_groups = set(disable_groups)
+        if disable_columns is not None and 'disable_columns' not in supported_kwargs:
+            engineer.disable_columns = set(disable_columns)
+        if enable_groups is not None and 'enable_groups' not in supported_kwargs:
+            engineer.enable_groups = set(enable_groups)
+        return engineer
 
 setup_logging()
 
@@ -364,7 +403,7 @@ Examples:
             elif best_variant == 'formula_raw_only':
                 disable_columns = ablation_probe._formula_columns_hint()
 
-        feature_engineer = FeatureEngineer(
+        feature_engineer = build_feature_engineer(
             disable_groups=disable_groups,
             disable_columns=disable_columns,
         )

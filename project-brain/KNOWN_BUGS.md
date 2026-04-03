@@ -699,3 +699,62 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - `src/utils/__init__.py`
 - `src/training/pipeline.py`
 - `tests/test_training/test_runtime_artifact_contract.py`
+
+---
+
+## KB-014: `train.py` Could Fail When `FeatureEngineer` Lacked `disable_groups`
+
+- Status: fixed in code on 2026-04-03, verified with targeted preprocessing and entrypoint regression tests
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- The training CLI could fail during Step 2 feature engineering if the active runtime checkout exposed a `FeatureEngineer` constructor that did not accept the `disable_groups` keyword used by `train.py`.
+
+### Expected Behavior
+
+- The training CLI should construct `FeatureEngineer` successfully in both current and older checkouts.
+- If a checkout lacks direct `disable_groups` support, the CLI should still disable the selected feature groups by applying the filter after instantiation.
+
+### Evidence
+
+- `train.py` builds a `disable_groups` list during feature-ablation selection and passes it into the feature-engineering setup path.
+- The current repository already accepts `disable_groups`, but the user-reported failure indicates a stale or divergent runtime checkout where that constructor keyword was missing.
+- Fix evidence now in repo:
+  - `src/preprocessing/feature_engineer.py` now exposes `build_feature_engineer(...)`, which filters supported constructor kwargs and backfills `disable_groups`/`disable_columns` attributes when necessary.
+  - `train.py` now uses that helper for Step 2 feature-engineering setup.
+  - `tests/test_preprocessing/test_feature_engineer.py` covers both the current constructor contract and a simulated legacy constructor without `disable_groups`.
+  - `tests/test_training/test_train_entrypoint.py` statically verifies that the entrypoint keeps calling `build_feature_engineer(...)` with the ablation filters instead of passing them directly into `FeatureEngineer(...)`.
+
+### Reproduction
+
+- Compatibility regression test simulates an older constructor without `disable_groups` and verifies the helper still applies the requested group filter.
+- Entrypoint regression test parses `train.py` and verifies the active Step 2 call site routes the ablation filters through `build_feature_engineer(...)`.
+
+### Suspected Cause
+
+- Version skew between the CLI caller and the `FeatureEngineer` constructor contract.
+
+### Workaround
+
+- The new helper path makes the training CLI tolerant of older constructors while preserving the current `disable_groups` behavior.
+
+### Fix Ideas
+
+- Implemented:
+  - compatibility-safe constructor helper
+  - canonical training-path call site
+  - regression coverage for both current and legacy constructor signatures
+
+### Risks
+
+- If `FeatureEngineer` adds new required constructor parameters later, the helper should be updated in the same change.
+- A stale Colab checkout can still reproduce the original crash even though the active repo code path is fixed.
+
+### Related Files
+
+- `train.py`
+- `src/preprocessing/feature_engineer.py`
+- `tests/test_preprocessing/test_feature_engineer.py`
+- `tests/test_training/test_train_entrypoint.py`

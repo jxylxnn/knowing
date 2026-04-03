@@ -248,3 +248,13 @@
   - `src/utils/__init__.py` re-exports `FeatureSchema` so package-level imports stay compatible.
   - `tests/test_training/test_runtime_artifact_contract.py` now verifies the import contract in a clean subprocess with a stubbed `torch` module.
   - Targeted regression run: `4 passed`.
+
+### Make `train.py` tolerate older `FeatureEngineer` constructors
+
+- Completed on 2026-04-03.
+- Delivered:
+  - `src/preprocessing/feature_engineer.py` now exposes `build_feature_engineer(...)`, a compatibility-safe constructor that backfills `disable_groups` and `disable_columns` when an older checkout does not accept them.
+  - `train.py` now routes Step 2 feature-engineering setup through that helper so the CLI keeps working across mixed-version checkouts.
+  - `tests/test_preprocessing/test_feature_engineer.py` now covers both the current constructor contract and the legacy-ctor fallback path.
+  - `tests/test_training/test_train_entrypoint.py` now guards the `train.py` entrypoint so Step 2 keeps using `build_feature_engineer(...)` instead of drifting back to a direct constructor call.
+  - Latest targeted regression run: `19 passed`.

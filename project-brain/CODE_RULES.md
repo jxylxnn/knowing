@@ -60,6 +60,7 @@
 
 - New engineered features should be added as a `FeatureGroup` in `src/preprocessing/features/` unless there is a strong reason not to.
 - Register new feature groups through the active feature-engineering flow instead of embedding ad hoc feature logic in `train.py`.
+- When `train.py` or notebook launchers need feature-group ablation filters, construct the orchestrator through `build_feature_engineer(...)` instead of passing compatibility-sensitive kwargs like `disable_groups` directly into `FeatureEngineer(...)`.
 - When adding features:
   - document the feature purpose
   - verify column naming consistency

@@ -40,6 +40,7 @@
 - Risk level: high because it defines the artifact contract consumed later by simulation.
 - Current note: success now depends on `TrainingPipeline` validating the full runtime artifact set, so failures here can indicate missing output files rather than only model-fit errors.
 - Current note: `train.py` now performs explicit preflight checks for the writable model/cache directories and required raw CSV inputs before expensive work begins, and it logs stage names so subprocess callers can surface a failure stage clearly.
+- Current note: Step 2 feature-engineering setup should go through `src/preprocessing/feature_engineer.py:build_feature_engineer(...)` so mixed-version checkouts tolerate older constructor signatures; `tests/test_training/test_train_entrypoint.py` statically guards that call shape.
 
 ### `train_colab.ipynb`
 
@@ -148,6 +149,8 @@ Important files:
   - `create_features_chunked`
   - `get_group_columns`
   - `get_diagnostics`
+- Compatibility helper:
+  - `build_feature_engineer(...)` filters constructor kwargs and backfills `disable_groups`/`disable_columns` for older checkouts that do not accept them directly.
 - Owns feature-group registration, diagnostics, and main feature build flow.
 - Risk level: high.
 - Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.

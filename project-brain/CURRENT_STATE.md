@@ -2,13 +2,14 @@
 
 ## Snapshot
 
-- Observed date: 2026-04-02
+- Observed date: 2026-04-03
 - Repository health: mixed
 - Test status in this workspace:
   - baseline audit run: `83 passed, 2 skipped`
   - post-fix targeted regression run: `12 passed`
   - scraper/input-health regression run: `29 passed`
   - preprocessing regression run after the rolling refactor: `14 passed`
+  - train entrypoint / FeatureEngineer compatibility regression run: `19 passed`
   - full suite after the rolling refactor: `94 passed, 2 skipped`
 - Important correction to repo instructions: the AGENTS note claiming `test_registry_initialization` is a known failure is stale in the current repo state; the full test suite passed during this audit.
 
@@ -22,6 +23,8 @@
 - The active training path now persists per-target CatBoost runtime artifacts and validates the required `models/` contract before returning success.
 - `train.py` now preflights writable model/cache directories and required raw CSV inputs before doing expensive work, and it emits stage names so subprocess callers can tell where a failure occurred.
 - `FeatureSchema` is explicitly exported from `src.utils.prediction_utils` and re-exported from `src.utils`, with a clean-process regression test guarding the import contract.
+- `train.py` now routes feature-engineer construction through a compatibility-safe helper that backfills `disable_groups` and related filters for older checkouts that do not accept that keyword directly.
+- The `train.py` Step 2 path now has an entrypoint-level regression test that asserts the CLI uses `build_feature_engineer(...)` for ablation filters instead of passing compatibility-sensitive kwargs directly into `FeatureEngineer(...)`.
 - `train_colab.ipynb` now resolves the repo checkout separately from Drive-backed data/models, captures full stdout/stderr from `train.py`, prints the return code, and fails immediately on nonzero exit instead of hiding the real traceback behind `CalledProcessError`.
 - `ModelManager` now rejects incomplete runtime artifact sets instead of silently loading a partial model directory.
 - `simulate_season.py` now uses `ModelManager.load_models()` for startup validation instead of hard-coding a single `pts_catboost.cbm` existence check.
@@ -36,6 +39,7 @@
 - Query flow supports six stats at the parser/calculator level, but projection exports only appear complete for `PTS`, `REB`, and `AST`.
 - The train-to-simulation artifact contract is covered by focused regression tests, but a true CLI smoke run of `python train.py` could not be completed in this workspace because no raw training CSVs are present and the usable local interpreter crashes when importing `torch`.
 - The Colab notebook launch path has been hardened in code, but a live run against mounted Drive data is still needed to confirm the exact traceback the user was seeing and to verify the full notebook-to-training flow with real CSV inputs and the repo-root detection flow.
+- The `disable_groups` constructor mismatch appears fixed in the active repo checkout; if Step 2 still fails in Colab, the most likely cause is a stale or mixed checkout rather than the current `train.py` call site.
 - Transformer validation inference has been repaired in code, but a live CUDA smoke test is still needed to confirm the exact GPU/runtime combination that previously crashed.
 - Schedule scraping and season simulation features are implemented, and the previously confirmed config/state regressions in schedule/lineup/betting-support scrapers are now fixed in code.
 - Rolling feature generation no longer emits the large pandas fragmentation warning flood; the hot feature groups now batch new columns before concatenating them back into the frame.
@@ -111,6 +115,17 @@
 - Verified on 2026-04-02 after the FeatureSchema import-contract hardening:
   - `./venv/bin/python3.12 -m pytest tests/test_training/test_runtime_artifact_contract.py -q`
   - Result: `4 passed`
+- Verified on 2026-04-03 after the FeatureEngineer compatibility hardening:
+  - `python3 -m py_compile train.py src/preprocessing/feature_engineer.py`
+  - `./venv/bin/python3.12 -m pytest tests/test_preprocessing/test_feature_engineer.py -q`
+  - Result: `16 passed`
+- Verified on 2026-04-03 after guarding the `train.py` entrypoint path:
+  - `./venv/bin/python3.12 -m py_compile train.py src/preprocessing/feature_engineer.py tests/test_training/test_train_entrypoint.py`
+  - `./venv/bin/python3.12 -m pytest tests/test_preprocessing/test_feature_engineer.py tests/test_training/test_training_pipeline_colab.py tests/test_training/test_train_entrypoint.py -q`
+  - Result: `19 passed`
+- Verified on 2026-04-03 during the Colab-launch regression check in this workspace:
+  - `./venv/bin/python3.12 -m pytest tests/test_training/test_training_pipeline_colab.py tests/test_training/test_runtime_artifact_contract.py tests/test_models/test_transformer_model.py -q`
+  - Result: `6 passed, 4 skipped`
 - Synthetic timing check on the rolling feature path with representative 2000-row input:
   - batched implementation: `1.554s`
   - reconstructed old insertion path: `1.543s`
@@ -123,3 +138,4 @@
 - Whether additional scraper modules beyond the identified ones have similar uppercase/lowercase config drift.
 - Whether any local uncommitted changes in this worktree are part of an in-progress fix for the observed regressions.
 - Whether a healthy local runtime with real `data/nba_players.csv` and `data/nba_games.csv` can complete a full `python train.py` smoke run and then start `simulate_season.py` successfully.
+- Whether the user-reported Colab crash reproduces after pulling a checkout that includes the current `train.py` helper path and the notebook repo-root fixes.
