@@ -36,18 +36,19 @@ Important named functions in `update_data.py`:
 3. `src/preprocessing/feature_engineer.py` applies registered `FeatureGroup` modules.
 4. `src/training/pipeline.py` creates chronological train/validation/test splits.
 5. The training pipeline fits:
-   - CatBoost regressors per target
-   - a Transformer sequence model
-   - quantile models
-   - blend weights
-   - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
+    - CatBoost regressors per target
+    - a Transformer sequence model
+    - quantile models
+    - blend weights
+    - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
 6. Training writes the runtime artifact set to `models/`:
-   - per-target CatBoost model files
-   - per-target CatBoost metadata files
-   - `attention_transformer.pkl` when the Transformer is enabled
-   - `feature_schema.pkl`
-   - `feature_cols.pkl`
-   - `blend_weights.pkl`
+    - per-target CatBoost model files
+    - per-target CatBoost metadata files
+    - `attention_transformer.pkl` when the Transformer is enabled
+    - `feature_schema.pkl`
+    - `feature_cols.pkl`
+    - `blend_weights.pkl`
+    - `model_stack_metadata.pkl` recording whether the Transformer was active and the expected model count
 7. Before `TrainingPipeline.train()` returns, it validates that the required runtime files exist and raises instead of reporting a false-success training run.
 8. The Colab notebook wrapper `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage, launches `train.py` as a subprocess, captures stdout/stderr, and stops immediately on nonzero exit so the operator sees the real failure stage instead of only a wrapper exception.
 
@@ -65,6 +66,8 @@ Important current contract:
 
 - `src/training/pipeline.py`, `src/training/catboost_trainer.py`, `src/models/model_manager.py`, and `simulate_season.py` now share one filesystem contract for runtime artifacts.
 - `ModelManager` validates that shared artifacts plus all six per-target CatBoost backbones and metadata exist before simulation loads any models.
+- `ModelManager._validate_blend_contract()` raises when blend weights expect a Transformer model that is missing or failed to load, preventing silently uncalibrated partial-blend predictions.
+- `TrainingPipeline._validate_blend_contract()` enforces the same contract on the pipeline's `load_models()` path.
 - `TrainingPipeline._predict_transformer_batch()` delegates validation inference through `TransformerWrapper.predict_batch()`, which defaults to the eager model path and safe SDPA backend controls on CUDA.
 - `train.py` now performs explicit preflight checks for writable model/cache directories and required raw CSV inputs before expensive work begins, which makes notebook and CLI failures easier to diagnose.
 - `train_colab.ipynb` should not infer `train.py` from the Drive models directory; it now searches the actual repo checkout first and keeps Drive-backed `data/` and `models/` separate from code location.
@@ -275,6 +278,7 @@ Important boundary:
 - `models/feature_schema.pkl`
 - `models/feature_cols.pkl`
 - `models/blend_weights.pkl`
+- `models/model_stack_metadata.pkl`
 
 ### Generated Outputs
 

@@ -76,7 +76,9 @@ Not supported by repo evidence:
   - `feature_schema.pkl`
   - `feature_cols.pkl`
   - `blend_weights.pkl`
+  - `model_stack_metadata.pkl` recording Transformer active status and expected model count
 - Important behavior: the active pipeline now validates this artifact contract before reporting success, so incomplete CatBoost runtime output is treated as a hard failure instead of a silent partial success.
+- Important behavior: `ModelManager._validate_blend_contract()` now raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug where CatBoost-only fallback silently produced uncalibrated predictions.
 - Transformer validation/runtime inference now stays on an eager-safe path by default; `torch.compile` is opt-in rather than the default runtime behavior for this model.
 
 ### 3. Simulate Upcoming Games

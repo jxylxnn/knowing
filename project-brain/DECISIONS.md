@@ -611,3 +611,172 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 ### Revisit Triggers
 
 - If the feature schema ownership changes to a dedicated shared-contract module or package.
+
+---
+
+## DR-015: Wrap FeatureEngineer Construction In A Compatibility-Safe Helper
+
+- Status: active
+- Date: 2026-04-03
+- Confidence: high
+
+### Context
+
+- `train.py` needs to disable feature groups dynamically during feature ablation.
+- Runtime checkouts may differ: current code accepts `disable_groups`, but older or divergent checkouts may not.
+
+### Options Considered
+
+- Keep constructing `FeatureEngineer` directly from `train.py` and accept runtime failures in older checkouts.
+- Remove the ablation-time `disable_groups` flow.
+- Add a compatibility-safe builder that uses supported kwargs and backfills the filter as attributes when needed.
+
+### Decision
+
+- Use a compatibility-safe `build_feature_engineer(...)` helper as the canonical Step 2 construction path in `train.py`.
+
+### Why
+
+- This preserves the existing feature-group disabling behavior while making the training CLI tolerant of older constructor signatures.
+
+### Tradeoffs
+
+- Slightly more indirection in the training script.
+- Better protection against version skew between top-level scripts and feature-engineering internals.
+
+### Consequences
+
+- Future constructor changes in `FeatureEngineer` should be reflected in the helper and its regression test.
+- `train.py` remains the single canonical orchestration path for feature-engineer startup.
+
+### Revisit Triggers
+
+- If feature ablation is removed or the feature-engineering constructor is replaced with a different factory pattern.
+
+---
+
+## DR-016: Enforce The Blend-Weight / Transformer Artifact Contract At Load Time
+
+- Status: active
+- Date: 2026-04-11
+- Confidence: high
+
+### Context
+
+- The hybrid prediction model blends CatBoost and Transformer predictions using `blend_weights.pkl`, which is computed during training under the assumption that both models contribute.
+- When `attention_transformer.pkl` was missing at runtime, `ModelManager` silently fell back to CatBoost-only predictions, effectively computing `0.7 * cat_pred + 0` instead of `0.7 * cat_pred + 0.3 * trans_pred`. This produced systematically biased, uncalibrated results without any operator warning.
+- DR-005 (resilient fallbacks) and DR-007 (artifact contract enforcement) were in tension here: DR-005 prefers resilience, but DR-007 prefers contract correctness. The partial-blend bug demonstrated that silent fallback in the model stack is not mathematically neutral.
+
+### Options Considered
+
+- Option A: Treat `attention_transformer.pkl` as required when blend weights expect it, and fail loudly on missing or corrupt artifacts.
+- Option B: Revert to pure CatBoost predictions (bypassing blend weights entirely), mark the run as degraded, and log a visible warning.
+
+### Decision
+
+- Adopt Option A: enforce the contract. If blend weights contain a non-zero Transformer weight, the Transformer artifact must be present and loadable. Otherwise, `ModelManager.load_models()` and `TrainingPipeline.load_models()` raise a descriptive `FileNotFoundError` or `RuntimeError`.
+
+### Why
+
+- Predictions are only valid if the math matches the training setup. Returning confidently wrong numbers is worse than failing.
+- Option B would preserve resilient fallback behavior but adds complexity in weight re-normalization and still produces a fundamentally different prediction than what was trained.
+- The contract is now explicit: `model_stack_metadata.pkl` records whether the Transformer was active during training.
+
+### Tradeoffs
+
+- Harder failure surface: deployed model directories that lose a Transformer artifact will now error instead of producing degraded output.
+- Better mathematical correctness: the partial-blend bug is eliminated.
+- Simpler code: no dynamic weight re-normalization or degraded-mode tracking is needed.
+
+### Consequences
+
+- Operators must ensure `attention_transformer.pkl` is present when blend weights expect it, or retrain with the Transformer disabled.
+- The blend-weight contract is validated at both training and runtime loading boundaries.
+- `model_stack_metadata.pkl` is now part of the training output artifact set.
+
+### Revisit Triggers
+
+- If the project needs a CatBoost-only degraded mode for deployed environments where Transformer artifacts are unreliable.
+- If the hybrid model stack is simplified to CatBoost-only and the Transformer path is removed entirely.
+
+---
+
+## DR-017: Only Install The Torch Shim When Real PyTorch Is Not Importable
+
+- Status: active
+- Date: 2026-04-11
+- Confidence: high
+
+### Context
+
+- `src/__init__.py` contained a `_install_test_torch_shim()` that installed a minimal NumPy-backed fake `torch` module when pytest was running and `torch` was not yet in `sys.modules`.
+- In a healthy Python 3.12 environment with real PyTorch installed, this shim was installed before any explicit `import torch`, replacing the real package and breaking all transformer tests.
+
+### Options Considered
+
+- Keep the unconditional shim and require explicit `import torch` before importing `src`.
+- Remove the shim entirely.
+- Check whether real torch is importable before installing the shim.
+
+### Decision
+
+- Use `importlib.util.find_spec('torch')` to detect whether real PyTorch is available. Only install the shim when real torch cannot be found.
+
+### Why
+
+- The shim was designed for broken environments where torch crashes on import. It should not interfere with working environments.
+- `find_spec` is lightweight and does not actually import the module, so it does not trigger the crashes the shim was designed to avoid.
+
+### Tradeoffs
+
+- Environments where torch is installed but crashes at import time (the original use case for the shim) will no longer get the fake module. Tests in those environments will need a different fallback or should skip.
+
+### Consequences
+
+- The shim is now opt-in for broken environments rather than opt-out for healthy ones.
+- Environments with working torch will always use real torch, even during test runs.
+
+### Revisit Triggers
+
+- If a new environment pattern emerges where torch is installed but crashes at import, and the shim is still needed for that case.
+
+---
+
+## DR-018: Infer Transformer Architecture From State Dict When Config Is Missing
+
+- Status: active
+- Date: 2026-04-11
+- Confidence: high
+
+### Context
+
+- `TransformerWrapper.load()` reconstructed models using `DEFAULT_CONFIG` when the checkpoint stored an empty config dict. This caused state_dict shape mismatches for checkpoints saved with non-default architectures (e.g., d_model=16 instead of 128).
+- Legacy checkpoints and the test suite both triggered this failure.
+
+### Options Considered
+
+- Load with `strict=False` and ignore shape mismatches.
+- Require all future checkpoints to store complete config.
+- Infer architecture from the state_dict tensor shapes.
+
+### Decision
+
+- Add `_infer_config_from_state()` that extracts `d_model`, `num_layers`, `nhead`, and `dim_feedforward` from the saved state_dict. Use inferred config when the checkpoint config is empty.
+
+### Why
+
+- The state_dict contains sufficient information to reconstruct the correct architecture. Loading with wrong shapes is always a failure; requiring complete config breaks backward compatibility.
+
+### Tradeoffs
+
+- More code in the load path.
+- nhead inference is a heuristic (tries common divisors) and may not match the exact value used during training, though any valid divisor produces a working model.
+
+### Consequences
+
+- Legacy checkpoints with empty config now load correctly.
+- New checkpoints should store complete config for exact reconstruction, but the inference fallback provides safety.
+
+### Revisit Triggers
+
+- If a model is trained with an unusual nhead value that the heuristic cannot infer correctly.

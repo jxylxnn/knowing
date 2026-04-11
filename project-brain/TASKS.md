@@ -87,6 +87,11 @@
   - `python train.py` produces the expected runtime artifacts from real data
   - a fresh process can run `ModelManager.load_models()`
   - `simulate_season.py` gets through startup model loading with that artifact set
+- Progress on 2026-04-11:
+  - venv rebuilt with Python 3.12; all 110 tests pass
+  - data fetched via `update_data.py`
+  - preflight failure modes (missing CSV, unwritable models dir) live-verified
+  - full training run deferred due to runtime length; unit tests confirm artifact contract
 
 ### Audit remaining legacy scraper modules for inactive drift
 
@@ -145,12 +150,14 @@
 ### Full end-to-end validation with live data
 
 - Why it is blocked:
-  - this workspace does not include checked-in raw data or trained models
-  - the checked-in `venv/` is inconsistent: `venv/bin/python` points to Python 3.13 without the installed packages, while `venv/bin/python3.12` has the packages but crashes on `torch` import in this sandbox
+  - a full `python train.py` run takes too long for a quick smoke test; only preflight checks and unit tests were run
 - What is needed:
-  - a controlled run of `update_data.py`
-  - a fresh `train.py` run
+  - a full `train.py` run with real CSV data (data is now available via `update_data.py`)
   - a `simulate_season.py --today` or `--date` run with observed outputs
+- Progress on 2026-04-11:
+  - venv rebuilt with Python 3.12; all 110 tests pass
+  - data fetched successfully; preflight checks verified
+  - remaining blocker is just runtime for the full training loop
 
 ### Confidence in third-party scraper reliability over time
 
@@ -258,3 +265,26 @@
   - `tests/test_preprocessing/test_feature_engineer.py` now covers both the current constructor contract and the legacy-ctor fallback path.
   - `tests/test_training/test_train_entrypoint.py` now guards the `train.py` entrypoint so Step 2 keeps using `build_feature_engineer(...)` instead of drifting back to a direct constructor call.
   - Latest targeted regression run: `19 passed`.
+
+### Fix silently uncalibrated predictions when Transformer artifact is missing
+
+- Completed on 2026-04-11.
+- Delivered:
+  - `src/models/model_manager.py` now includes `_validate_blend_contract()`, which raises `FileNotFoundError` when blend weights expect a Transformer but `attention_transformer.pkl` is missing, and `RuntimeError` when the file exists but failed to load.
+  - `src/training/pipeline.py` now includes `_validate_blend_contract()` on the `load_models()` path and `_save_model_stack_metadata()` to persist `model_stack_metadata.pkl` during training.
+  - `model_stack_metadata.pkl` is now part of the training output artifact set, recording whether the Transformer was active and the expected model count.
+  - `tests/test_models/test_model_manager.py` now has 6 `TestBlendContractEnforcement` tests covering missing-Transformer, corrupt-Transformer, zero-weight, loaded-Transformer, empty-blend-weights, and no-partial-blend scenarios.
+  - `tests/test_training/test_runtime_artifact_contract.py` now verifies that `ModelManager.load_models()` raises on tampered blend weights and that `model_stack_metadata.pkl` is persisted.
+  - Targeted regression run: `21 passed`.
+
+### Fix torch shim clobbering real PyTorch and legacy checkpoint load failure
+
+- Completed on 2026-04-11.
+- Delivered:
+  - `src/__init__.py:_install_test_torch_shim()` now checks `importlib.util.find_spec('torch')` before installing the fake torch module, preventing clobbering of real PyTorch in healthy environments.
+  - `src/models/transformer_model.py:TransformerWrapper.load()` now infers model architecture from state_dict tensor shapes when the checkpoint config is empty, via the new `_infer_config_from_state()` static method.
+  - All 110 tests now pass (previously 4 `test_transformer_model.py` tests failed due to the torch shim).
+  - Preflight failure modes for `train.py` live-verified: missing CSV and unwritable models dir both produce clear stage-specific errors.
+  - venv rebuilt from Python 3.13 to Python 3.12 with all dependencies installing cleanly.
+  - Data fetched via `update_data.py --season 2024-25 --season 2025-26`.
+  - Full regression run: `110 passed, 0 failed`.

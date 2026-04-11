@@ -46,7 +46,9 @@
   - `feature_schema.pkl`
   - `feature_cols.pkl`
   - `blend_weights.pkl`
+  - `model_stack_metadata.pkl`
   - `attention_transformer.pkl` when the Transformer path is enabled
+- If `blend_weights.pkl` contains a non-zero Transformer weight, `attention_transformer.pkl` must be present and loadable. Do not silently fall back to partial-blend predictions.
 
 ### Config naming
 
@@ -76,6 +78,7 @@
 
 - `src/models/model_manager.py` is the runtime model-loading boundary for simulation.
 - New runtime model artifacts should be loaded through `ModelManager` or a clearly documented successor, not by scattering ad hoc file reads across the simulator.
+- The blend-weight / Transformer artifact contract is enforced at load time: if blend weights expect a Transformer and the artifact is missing or unloadable, `ModelManager.load_models()` must raise rather than produce silently uncalibrated predictions.
 - Keep Transformer validation/runtime inference on the eager model path by default. If `torch.compile` is re-enabled for the Transformer, it must stay behind an explicit safety flag and should never be the only validation path.
 - When touching CUDA attention code, prefer math SDPA fallback controls for validation and add regression coverage for the eager path.
 

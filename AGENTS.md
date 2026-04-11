@@ -2,14 +2,14 @@
 
 ## Cursor Cloud specific instructions
 
-This is a pure-Python CLI-based ML project (no web server, no Docker, no database). The virtual environment lives at `/workspace/venv`.
+This is a pure-Python CLI-based ML project (no web server, no Docker, no database). The virtual environment lives in the project root at `venv/` (Python 3.12).
 
 ### Activating the environment
 
 Always activate the venv before running anything:
 
 ```bash
-source /workspace/venv/bin/activate
+source venv/bin/activate
 ```
 
 ### Running tests
@@ -18,7 +18,7 @@ source /workspace/venv/bin/activate
 pytest tests/ -v
 ```
 
-One pre-existing test (`test_registry_initialization`) fails due to a PosixPath vs string assertion mismatch — this is a known issue in the test, not an environment problem.
+All 110 tests pass.
 
 ### Running the application
 

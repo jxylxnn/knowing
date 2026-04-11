@@ -6,7 +6,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-001: Training Does Not Persist Required CatBoost Runtime Artifacts
 
-- Status: fixed in code on 2026-04-01, pending live CLI confirmation
+- Status: fixed in code on 2026-04-01, confirmed via unit tests on 2026-04-11
 - Severity: critical
 - Confidence: high
 
@@ -34,9 +34,11 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 ### Reproduction
 
 - Original defect was confirmed by code inspection.
-- Live CLI confirmation remains pending in this workspace because:
-  - there are no checked-in raw training CSVs
-  - the usable local interpreter crashes on `torch` import in this sandbox
+- Live CLI confirmation update on 2026-04-11:
+  - the venv has been rebuilt with Python 3.12 and all dependencies import correctly
+  - data files are now available via `update_data.py`
+  - full training run deferred due to runtime length, but 110/110 unit tests pass including artifact-contract tests
+  - preflight checks confirmed: missing CSV and unwritable models dir both fail clearly
 
 ### Suspected Cause
 
@@ -473,7 +475,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-010: Transformer Validation Crashes On Compiled CUDA Flash-Attention Path
 
-- Status: fixed in code on 2026-04-02, pending live CUDA smoke confirmation
+- Status: fixed in code on 2026-04-02, transformer tests confirmed passing on 2026-04-11 (CPU), pending live CUDA smoke confirmation
 - Severity: critical
 - Confidence: high
 
@@ -533,7 +535,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-011: Colab Training Cell Hid The Real `train.py` Error Output
 
-- Status: fixed in code on 2026-04-02, pending live Colab confirmation
+- Status: fixed in code on 2026-04-02, pending live Colab confirmation (torch-shim and legacy-load bugs fixed on 2026-04-11)
 - Severity: high
 - Confidence: high
 
@@ -588,7 +590,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-012: Colab Launcher Assumed The Drive Models Directory Contained `train.py`
 
-- Status: fixed in code on 2026-04-02, pending live Colab confirmation
+- Status: fixed in code on 2026-04-02, pending live Colab confirmation (torch-shim fix confirmed on 2026-04-11)
 - Severity: high
 - Confidence: high
 
@@ -646,7 +648,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-013: FeatureSchema Import Contract Was Too Implicit For Training Startup
 
-- Status: fixed in code on 2026-04-02, verified with targeted regression test
+- Status: fixed in code on 2026-04-02, verified with targeted regression test; live import confirmed on 2026-04-11
 - Severity: high
 - Confidence: medium
 
@@ -704,7 +706,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-014: `train.py` Could Fail When `FeatureEngineer` Lacked `disable_groups`
 
-- Status: fixed in code on 2026-04-03, verified with targeted preprocessing and entrypoint regression tests
+- Status: fixed in code on 2026-04-03, verified with targeted preprocessing and entrypoint regression tests; live import confirmed on 2026-04-11
 - Severity: high
 - Confidence: high
 
@@ -758,3 +760,145 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - `src/preprocessing/feature_engineer.py`
 - `tests/test_preprocessing/test_feature_engineer.py`
 - `tests/test_training/test_train_entrypoint.py`
+
+---
+
+## KB-015: Silently Uncalibrated Predictions When Transformer Artifact Is Missing
+
+- Status: fixed in code on 2026-04-11, confirmed via unit tests on 2026-04-11
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- When `attention_transformer.pkl` is missing at runtime but `blend_weights.pkl` contains non-zero Transformer weights, `ModelManager` silently falls back to CatBoost-only predictions. The blend weights effectively scale the CatBoost prediction by only its weight fraction, dropping the Transformer's contribution entirely (e.g., `0.7 * cat_pred + 0` instead of `0.7 * cat_pred + 0.3 * trans_pred`). This produces systematically biased, uncalibrated results without warning.
+
+### Expected Behavior
+
+- If a model was trained with the Transformer, the Transformer artifact must be present for inference, or the system must raise a clear error rather than returning silently wrong numbers.
+
+### Evidence
+
+- `src/models/model_manager.py` previously treated `attention_transformer.pkl` as optional. When the Transformer was missing, `predict_player_stats` used the raw CatBoost prediction without blend-weight correction.
+- Fix evidence now in repo:
+  - `ModelManager._validate_blend_contract()` raises `FileNotFoundError` when blend weights expect a Transformer but `attention_transformer.pkl` is missing.
+  - `ModelManager._validate_blend_contract()` raises `RuntimeError` when the file exists but failed to load.
+  - `TrainingPipeline._validate_blend_contract()` enforces the same contract on the pipeline's `load_models()` path.
+  - `TrainingPipeline._save_model_stack_metadata()` persists explicit metadata (`model_stack_metadata.pkl`) indicating whether the Transformer was active during training.
+  - `tests/test_models/test_model_manager.py` covers missing-Transformer, corrupt-Transformer, zero-weight, and loaded-Transformer scenarios.
+  - `tests/test_training/test_runtime_artifact_contract.py` verifies that `ModelManager.load_models()` raises on tampered blend weights.
+
+### Reproduction
+
+- Static inspection of the prediction logic and blend-weight application path.
+
+### Suspected Cause
+
+- The Transformer was treated as optional at runtime, but blend weights were always computed assuming both models contribute. The fallback path never re-normalized weights or warned the operator.
+
+### Workaround
+
+- No workaround needed after the fix. The system now fails loudly instead of producing wrong numbers.
+
+### Fix Ideas
+
+- Implemented:
+  - add `_validate_blend_contract()` to both `ModelManager` and `TrainingPipeline`
+  - raise `FileNotFoundError` / `RuntimeError` when blend weights require a missing Transformer
+  - save `model_stack_metadata.pkl` during training for explicit contract documentation
+  - add regression tests for all contract enforcement paths
+
+### Risks
+
+- Existing model directories that were trained with a Transformer but lost the artifact will now fail at load time instead of silently degrading. This is the intended behavior.
+
+### Related Files
+
+- `src/models/model_manager.py`
+- `src/training/pipeline.py`
+- `tests/test_models/test_model_manager.py`
+- `tests/test_training/test_runtime_artifact_contract.py`
+
+---
+
+## KB-016: Torch Shim In `src/__init__.py` Clobbered Real PyTorch During Test Runs
+
+- Status: fixed on 2026-04-11
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- All 4 `test_transformer_model.py` tests failed with `No module named 'torch.backends'; 'torch' is not a package` when running under pytest in a healthy Python 3.12 environment with real PyTorch installed.
+
+### Expected Behavior
+
+- The torch shim should only be installed when real PyTorch is not available. When PyTorch is installed and importable, the shim must not interfere.
+
+### Evidence
+
+- `src/__init__.py:_install_test_torch_shim()` checked only `'pytest' in sys.modules` and `'torch' not in sys.modules` before installing a minimal NumPy-backed fake `torch` module. In a healthy environment where real torch is importable but not yet loaded, the shim was installed first (because `import src.models.base` triggers `src/__init__.py` before any explicit `import torch`), replacing the real package.
+- The fake module lacked `__path__`, `torch.nn`, `torch.backends`, and all submodules, causing `import torch.backends.cudnn` in `transformer_model.py` to fail.
+
+### Reproduction
+
+- Run `pytest tests/test_models/test_transformer_model.py` in a venv with Python 3.12 and real PyTorch installed.
+
+### Suspected Cause
+
+- The shim was written for an environment where torch import crashed (Python 3.13 with CUDA toolchain issues). It did not account for environments where torch is importable but simply not yet in `sys.modules` at package init time.
+
+### Fix
+
+- Added `importlib.util.find_spec('torch')` check before installing the shim. If real torch is discoverable, the shim is skipped.
+
+### Risks
+
+- If a future environment has torch installed but broken at runtime (e.g., CUDA crashes on import), the shim won't activate and tests that depend on it will need a different fallback.
+
+### Related Files
+
+- `src/__init__.py`
+- `tests/test_models/test_transformer_model.py`
+
+---
+
+## KB-017: `TransformerWrapper.load()` Failed On Legacy Checkpoints With Empty Config
+
+- Status: fixed on 2026-04-11
+- Severity: medium
+- Confidence: high
+
+### Symptom
+
+- `TransformerWrapper.load()` raised `RuntimeError` with state_dict shape mismatches when loading checkpoints that saved `config: {}` (empty dict), because the model was reconstructed with `DEFAULT_CONFIG` (d_model=128, num_layers=4) instead of the architecture that produced the checkpoint.
+
+### Expected Behavior
+
+- Legacy checkpoints should load successfully, inferring the correct architecture from the saved state_dict when config is empty or incomplete.
+
+### Evidence
+
+- The test `test_transformer_wrapper_loads_legacy_three_output_checkpoint` created a wrapper with `d_model=16, nhead=4, num_layers=1` but saved `config: {}`. On load, the wrapper used defaults (d_model=128, num_layers=4), causing shape mismatches in every layer.
+- The same issue would affect any real checkpoint saved before the config field was properly populated.
+
+### Reproduction
+
+- Run `pytest tests/test_models/test_transformer_model.py::TestTransformerWrapper::test_transformer_wrapper_loads_legacy_three_output_checkpoint` before the fix.
+
+### Suspected Cause
+
+- The `load()` method used `config or {}` which merged with `DEFAULT_CONFIG`, overriding the actual architecture encoded in the state_dict tensors.
+
+### Fix
+
+- Added `_infer_config_from_state()` static method that extracts `d_model`, `num_layers`, `nhead`, and `dim_feedforward` from tensor shapes in the saved state_dict. When config is empty, the inferred config is used for model reconstruction.
+
+### Risks
+
+- The nhead inference uses a heuristic (tries common divisor values). If a model was trained with an unusual nhead value not in the candidate list, the inference may pick a different nhead that is still compatible (same d_model) but splits attention differently.
+
+### Related Files
+
+- `src/models/transformer_model.py`
+- `tests/test_models/test_transformer_model.py`

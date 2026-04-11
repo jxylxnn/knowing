@@ -193,7 +193,9 @@ Important files:
   - `_train_transformer_model`
   - `_save_feature_cols`
   - `_save_blend_weights`
+  - `_save_model_stack_metadata`
   - `_validate_runtime_artifact_contract`
+  - `_validate_blend_contract`
   - `train`
   - `load_models`
 - Risk level: very high.
@@ -244,6 +246,7 @@ Important files:
 - Breakage here can invalidate all simulation output.
 - Risk level: very high.
 - Current note: runtime loading is now intentionally strict about missing per-target CatBoost artifacts and shared metadata files.
+- Current note: `_validate_blend_contract()` raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug.
 - Current note: Transformer predictions flow through `TransformerWrapper.predict()`, which now defaults to eager inference and can force a math SDPA backend on CUDA when backend controls are available.
 
 ### `src/models/transformer_model.py`
