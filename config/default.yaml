@@ -27,6 +27,51 @@ training:
   use_feature_selection: true
   min_samples_per_player: 10
 
+training_presets:
+  full:
+    description: "Full CatBoost + Transformer stack with the complete feature set."
+    default_mode: "standard"
+    default_model_size: "M"
+    transformer_enabled: true
+    recent_seasons: null
+    rolling_windows: [3, 5, 10, 20, 50]
+    feature_engineer:
+      enable_groups:
+        - "rolling"
+        - "efficiency"
+        - "momentum"
+        - "context"
+        - "fatigue"
+        - "minutes_confidence"
+        - "rest_density"
+        - "matchup"
+        - "opponent_strength"
+        - "pace"
+        - "team_role"
+        - "lineup_stability"
+        - "injury_opportunity"
+        - "teammate_usage"
+        - "recency_form"
+        - "archetype"
+        - "defense_position"
+        - "target_encoding"
+        - "league_rank"
+  small:
+    description: "Fast CatBoost-first preset with a reduced feature set and no Transformer."
+    default_mode: "quick"
+    default_model_size: "S"
+    transformer_enabled: false
+    recent_seasons: 2
+    rolling_windows: [3, 5, 10, 20]
+    feature_engineer:
+      enable_groups:
+        - "rolling"
+        - "efficiency"
+        - "momentum"
+        - "pace"
+        - "opponent_strength"
+        - "archetype"
+
 # Feature engineering configuration
 features:
   rolling_windows:

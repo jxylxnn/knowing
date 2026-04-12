@@ -9,6 +9,7 @@ import numpy as np
 from src.config import Config
 from src.models.base import PredictionResult, ModelRegistry
 from src.training.pipeline import TrainingPipeline
+from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,14 @@ class PredictionService:
         
         # Get feature columns
         self.feature_cols = self.pipeline.feature_cols
+        self.feature_schema = getattr(self.pipeline, 'feature_schema', None)
+        self.feature_selector = getattr(self.pipeline, 'feature_selector', FeatureSelector(config.training.targets))
+        if self.feature_schema is None and self.feature_cols:
+            self.feature_schema = FeatureSchema(
+                feature_cols=list(self.feature_cols),
+                categorical_cols=[c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols],
+            )
+            self.feature_selector.feature_schema = self.feature_schema
         self.blend_weights = getattr(self.pipeline, 'blend_weights', {})
         
         # Fallback values
@@ -125,9 +134,7 @@ class PredictionService:
         
         # Prepare features
         try:
-            X = player_context_df[self.feature_cols].apply(
-                pd.to_numeric, errors='coerce'
-            ).fillna(0)
+            X = self.feature_selector.transform(player_context_df, self.feature_schema, strict=False, fill_value=0.0)
             
             if X.empty:
                 logger.warning("Empty feature matrix")
@@ -142,7 +149,8 @@ class PredictionService:
         if transformer_model is not None and history_df is not None and self.feature_cols:
             seq_len = int(getattr(transformer_model, 'seq_len', 0) or 0)
             if seq_len > 0 and len(history_df) >= seq_len:
-                seq_features = history_df[self.feature_cols].tail(seq_len).apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+                seq_frame = self.feature_selector.transform(history_df, self.feature_schema, strict=False, fill_value=0.0)
+                seq_features = seq_frame.tail(seq_len).values.astype(np.float32)
                 try:
                     transformer_preds = transformer_model.predict(seq_features)[0]
                 except Exception as e:

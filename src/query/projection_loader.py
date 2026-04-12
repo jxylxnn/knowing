@@ -36,6 +36,24 @@ class PlayerProjection:
     ast_std: float
     ast_ci_low: float
     ast_ci_high: float
+
+    stl_mean: float
+    stl_mode: float
+    stl_std: float
+    stl_ci_low: float
+    stl_ci_high: float
+
+    blk_mean: float
+    blk_mode: float
+    blk_std: float
+    blk_ci_low: float
+    blk_ci_high: float
+
+    tov_mean: float
+    tov_mode: float
+    tov_std: float
+    tov_ci_low: float
+    tov_ci_high: float
     
     play_probability: float = 1.0
     game_id: Optional[str] = None
@@ -78,6 +96,27 @@ class ProjectionLoader:
             'std': None,
             'ci_low': 'AST_CI_LOW',
             'ci_high': 'AST_CI_HIGH'
+        },
+        'stl': {
+            'mean': 'PROJ_STL_MEAN',
+            'mode': 'PROJ_STL_MODE',
+            'std': None,
+            'ci_low': 'STL_CI_LOW',
+            'ci_high': 'STL_CI_HIGH'
+        },
+        'blk': {
+            'mean': 'PROJ_BLK_MEAN',
+            'mode': 'PROJ_BLK_MODE',
+            'std': None,
+            'ci_low': 'BLK_CI_LOW',
+            'ci_high': 'BLK_CI_HIGH'
+        },
+        'tov': {
+            'mean': 'PROJ_TOV_MEAN',
+            'mode': 'PROJ_TOV_MODE',
+            'std': None,
+            'ci_low': 'TOV_CI_LOW',
+            'ci_high': 'TOV_CI_HIGH'
         }
     }
     
@@ -251,23 +290,36 @@ class ProjectionLoader:
                 return float(val) if pd.notna(val) else default
             except (ValueError, TypeError):
                 return default
+
+        def get_required_float(column: str, default: float = 0.0) -> float:
+            """Get a float from row, returning default if missing/None."""
+            if column not in row.index:
+                return default
+            value = safe_float(row.get(column), default=None)
+            return value if value is not None else default
+
+        def get_required_stat_columns(stat: str) -> Dict[str, float]:
+            """Get all columns for a stat using STAT_COLUMNS mapping."""
+            cols = self.STAT_COLUMNS.get(stat, {})
+            return {
+                'mean': get_required_float(cols.get('mean', f'PROJ_{stat.upper()}_MEAN')),
+                'mode': get_required_float(cols.get('mode', f'PROJ_{stat.upper()}_MODE')),
+                'ci_low': get_required_float(cols.get('ci_low', f'{stat.upper()}_CI_LOW')),
+                'ci_high': get_required_float(cols.get('ci_high', f'{stat.upper()}_CI_HIGH')),
+            }
         
         def estimate_std(mean: float, ci_low: float, ci_high: float) -> float:
             if ci_low and ci_high and ci_high > ci_low:
                 return (ci_high - ci_low) / 3.92
             return max(mean * 0.35, 1.5)
         
-        pts_mean = safe_float(row.get('PROJ_PTS_MEAN'))
-        pts_ci_low = safe_float(row.get('PTS_CI_LOW'))
-        pts_ci_high = safe_float(row.get('PTS_CI_HIGH'))
-        
-        reb_mean = safe_float(row.get('PROJ_REB_MEAN'))
-        reb_ci_low = safe_float(row.get('REB_CI_LOW'))
-        reb_ci_high = safe_float(row.get('REB_CI_HIGH'))
-        
-        ast_mean = safe_float(row.get('PROJ_AST_MEAN'))
-        ast_ci_low = safe_float(row.get('AST_CI_LOW'))
-        ast_ci_high = safe_float(row.get('AST_CI_HIGH'))
+        # Get all stat values using STAT_COLUMNS mapping
+        pts_data = get_required_stat_columns('pts')
+        reb_data = get_required_stat_columns('reb')
+        ast_data = get_required_stat_columns('ast')
+        stl_data = get_required_stat_columns('stl')
+        blk_data = get_required_stat_columns('blk')
+        tov_data = get_required_stat_columns('tov')
         
         return PlayerProjection(
             player_name=str(row.get('PLAYER_NAME', 'Unknown')),
@@ -276,23 +328,41 @@ class ProjectionLoader:
             is_home=bool(row.get('IS_HOME', False)),
             date=str(row.get('DATE', '')),
             
-            pts_mean=pts_mean,
-            pts_mode=safe_float(row.get('PROJ_PTS_MODE')),
-            pts_std=estimate_std(pts_mean, pts_ci_low, pts_ci_high),
-            pts_ci_low=pts_ci_low,
-            pts_ci_high=pts_ci_high,
+            pts_mean=pts_data['mean'],
+            pts_mode=pts_data['mode'],
+            pts_std=estimate_std(pts_data['mean'], pts_data['ci_low'], pts_data['ci_high']),
+            pts_ci_low=pts_data['ci_low'],
+            pts_ci_high=pts_data['ci_high'],
             
-            reb_mean=reb_mean,
-            reb_mode=safe_float(row.get('PROJ_REB_MODE')),
-            reb_std=estimate_std(reb_mean, reb_ci_low, reb_ci_high),
-            reb_ci_low=reb_ci_low,
-            reb_ci_high=reb_ci_high,
+            reb_mean=reb_data['mean'],
+            reb_mode=reb_data['mode'],
+            reb_std=estimate_std(reb_data['mean'], reb_data['ci_low'], reb_data['ci_high']),
+            reb_ci_low=reb_data['ci_low'],
+            reb_ci_high=reb_data['ci_high'],
             
-            ast_mean=ast_mean,
-            ast_mode=safe_float(row.get('PROJ_AST_MODE')),
-            ast_std=estimate_std(ast_mean, ast_ci_low, ast_ci_high),
-            ast_ci_low=ast_ci_low,
-            ast_ci_high=ast_ci_high,
+            ast_mean=ast_data['mean'],
+            ast_mode=ast_data['mode'],
+            ast_std=estimate_std(ast_data['mean'], ast_data['ci_low'], ast_data['ci_high']),
+            ast_ci_low=ast_data['ci_low'],
+            ast_ci_high=ast_data['ci_high'],
+
+            stl_mean=stl_data['mean'],
+            stl_mode=stl_data['mode'],
+            stl_std=estimate_std(stl_data['mean'], stl_data['ci_low'], stl_data['ci_high']),
+            stl_ci_low=stl_data['ci_low'],
+            stl_ci_high=stl_data['ci_high'],
+
+            blk_mean=blk_data['mean'],
+            blk_mode=blk_data['mode'],
+            blk_std=estimate_std(blk_data['mean'], blk_data['ci_low'], blk_data['ci_high']),
+            blk_ci_low=blk_data['ci_low'],
+            blk_ci_high=blk_data['ci_high'],
+
+            tov_mean=tov_data['mean'],
+            tov_mode=tov_data['mode'],
+            tov_std=estimate_std(tov_data['mean'], tov_data['ci_low'], tov_data['ci_high']),
+            tov_ci_low=tov_data['ci_low'],
+            tov_ci_high=tov_data['ci_high'],
             
             play_probability=safe_float(row.get('PLAY_PROBABILITY', 1.0)),
             game_id=str(row.get('GAME_ID', ''))
@@ -573,33 +643,43 @@ class ProjectionLoader:
         matchup_history = self.get_matchup_history(player_name, opponent, n=5)
         opponent_defense = self.get_opponent_defense_profile(opponent)
         
-        recent_avg = {'pts': 0, 'reb': 0, 'ast': 0, 'min': 0}
+        recent_avg = {'pts': 0, 'reb': 0, 'ast': 0, 'stl': 0, 'blk': 0, 'tov': 0, 'min': 0}
         if recent_games:
             for game in recent_games:
                 recent_avg['pts'] += game['pts']
                 recent_avg['reb'] += game['reb']
                 recent_avg['ast'] += game['ast']
+                recent_avg['stl'] += game['stl']
+                recent_avg['blk'] += game['blk']
+                recent_avg['tov'] += game['tov']
                 recent_avg['min'] += game['min']
             n = len(recent_games)
             recent_avg = {k: v / n for k, v in recent_avg.items()}
+        recent_sample_size = len(recent_games) if recent_games else 0
         
-        matchup_avg = {'pts': 0, 'reb': 0, 'ast': 0, 'min': 0}
+        matchup_avg = {'pts': 0, 'reb': 0, 'ast': 0, 'stl': 0, 'blk': 0, 'tov': 0, 'min': 0}
         if matchup_history:
             for game in matchup_history:
                 matchup_avg['pts'] += game['pts']
                 matchup_avg['reb'] += game['reb']
                 matchup_avg['ast'] += game['ast']
+                matchup_avg['stl'] += game.get('stl', 0)
+                matchup_avg['blk'] += game.get('blk', 0)
+                matchup_avg['tov'] += game.get('tov', 0)
                 matchup_avg['min'] += game['min']
             n = len(matchup_history)
             matchup_avg = {k: v / n for k, v in matchup_avg.items()}
+        matchup_sample_size = len(matchup_history) if matchup_history else 0
         
         trend = self._calculate_trend(recent_games, stat)
         
         result = {
             'recent_games': recent_games,
             'recent_avg': recent_avg,
+            'recent_sample_size': recent_sample_size,
             'matchup_history': matchup_history,
             'matchup_avg': matchup_avg,
+            'matchup_sample_size': matchup_sample_size,
             'opponent_defense': opponent_defense,
             'trend': trend
         }

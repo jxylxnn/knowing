@@ -1,0 +1,858 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold >>
+endobj
+3 0 obj
+<< /Length 2058 >>
+stream
+BT
+/F2 16 Tf
+1 0 0 1 195.60 718.00 Tm
+(Feature Pipeline Report) Tj
+/F1 10 Tf
+1 0 0 1 54.00 699.00 Tm
+(NBA Player Stats Prediction System Generated: 2026-03-27) Tj
+/F1 10 Tf
+1 0 0 1 54.00 673.00 Tm
+(This report describes the preprocessing feature pipeline used by the project. It) Tj
+/F1 10 Tf
+1 0 0 1 54.00 661.00 Tm
+(covers raw data ingestion, feature engineering, feature selection, and the handoff) Tj
+/F1 10 Tf
+1 0 0 1 54.00 649.00 Tm
+(into the active CatBoost + Transformer training stack.) Tj
+/F2 12 Tf
+1 0 0 1 54.00 613.00 Tm
+(Executive Summary) Tj
+/F1 10 Tf
+1 0 0 1 54.00 594.00 Tm
+(- Raw player and team CSVs are merged into a single player-game table.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 582.00 Tm
+(- FeatureEngineer builds a leakage-safe feature set using 15 phases.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 570.00 Tm
+(- The active path is chronological, shifted, and training-only where needed.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 558.00 Tm
+(- GPU feature engineering exists, but the default constructors use CPU mode.) Tj
+/F2 12 Tf
+1 0 0 1 54.00 529.00 Tm
+(One-Line Flow) Tj
+/F1 9 Tf
+1 0 0 1 54.00 504.00 Tm
+(data/nba_players.csv) Tj
+/F1 9 Tf
+1 0 0 1 54.00 493.00 Tm
+(data/nba_games.csv) Tj
+/F1 9 Tf
+1 0 0 1 54.00 482.00 Tm
+(        |) Tj
+/F1 9 Tf
+1 0 0 1 54.00 471.00 Tm
+(        v) Tj
+/F1 9 Tf
+1 0 0 1 54.00 460.00 Tm
+(DataLoader.merge_datasets\(\)) Tj
+/F1 9 Tf
+1 0 0 1 54.00 449.00 Tm
+(        |) Tj
+/F1 9 Tf
+1 0 0 1 54.00 438.00 Tm
+(        v) Tj
+/F1 9 Tf
+1 0 0 1 54.00 427.00 Tm
+(FeatureEngineer.create_features\(\)) Tj
+/F1 9 Tf
+1 0 0 1 54.00 416.00 Tm
+(        |) Tj
+/F1 9 Tf
+1 0 0 1 54.00 405.00 Tm
+(        v) Tj
+/F1 9 Tf
+1 0 0 1 54.00 394.00 Tm
+(feature selection and cleaning) Tj
+/F1 9 Tf
+1 0 0 1 54.00 383.00 Tm
+(        |) Tj
+/F1 9 Tf
+1 0 0 1 54.00 372.00 Tm
+(        v) Tj
+/F1 9 Tf
+1 0 0 1 54.00 361.00 Tm
+(TrainingPipeline.prepare_data\(\)) Tj
+/F1 9 Tf
+1 0 0 1 54.00 350.00 Tm
+(        |) Tj
+/F1 9 Tf
+1 0 0 1 54.00 339.00 Tm
+(        v) Tj
+/F1 9 Tf
+1 0 0 1 54.00 328.00 Tm
+(CatBoost + Transformer models) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 1 of 8) Tj
+ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 3 0 R >>
+endobj
+5 0 obj
+<< /Length 2078 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Source Map) Tj
+/F1 10 Tf
+1 0 0 1 54.00 704.00 Tm
+(- src/preprocessing/data_loader.py: CSV loading, minutes parsing, merge logic,) Tj
+/F1 10 Tf
+1 0 0 1 54.00 692.00 Tm
+(and opponent defense derivation.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 673.00 Tm
+(- src/preprocessing/feature_engineer.py: main 15-phase feature pipeline and the) Tj
+/F1 10 Tf
+1 0 0 1 54.00 661.00 Tm
+(optional GPU rolling helper.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 642.00 Tm
+(- src/pipeline/data_pipeline.py: validation wrapper, target capping, sample) Tj
+/F1 10 Tf
+1 0 0 1 54.00 630.00 Tm
+(weights, and leakage-safe feature selection.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 611.00 Tm
+(- src/training/pipeline.py: active training orchestration used by train.py.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 599.00 Tm
+(- src/preprocessing/features/base.py and src/preprocessing/features/rolling.py:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 587.00 Tm
+(modular feature-group scaffold.) Tj
+/F2 12 Tf
+1 0 0 1 54.00 551.00 Tm
+(Data Ingestion and Normalization) Tj
+/F1 10 Tf
+1 0 0 1 54.00 532.00 Tm
+(DataLoader does the following:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 513.00 Tm
+(- loads data/nba_players.csv and data/nba_games.csv) Tj
+/F1 10 Tf
+1 0 0 1 54.00 501.00 Tm
+(- coerces numeric stat columns such as PTS, REB, AST, FGA, FTA, and TOV) Tj
+/F1 10 Tf
+1 0 0 1 54.00 489.00 Tm
+(- parses MIN values from either decimal or MM:SS formats) Tj
+/F1 10 Tf
+1 0 0 1 54.00 477.00 Tm
+(- converts GAME_DATE to datetime) Tj
+/F1 10 Tf
+1 0 0 1 54.00 465.00 Tm
+(- drops rows missing PTS, REB, AST, or MIN) Tj
+/F1 10 Tf
+1 0 0 1 54.00 453.00 Tm
+(- sorts player rows by PLAYER_ID and GAME_DATE) Tj
+/F1 10 Tf
+1 0 0 1 54.00 434.00 Tm
+(It then self-joins the team game table on GAME_ID to infer opponent stats and to) Tj
+/F1 10 Tf
+1 0 0 1 54.00 422.00 Tm
+(build rolling team defense fields such as TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10. Those) Tj
+/F1 10 Tf
+1 0 0 1 54.00 410.00 Tm
+(team-level fields are merged back into each player row together with an OPPONENT_ID) Tj
+/F1 10 Tf
+1 0 0 1 54.00 398.00 Tm
+(mapping.) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 2 of 8) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 2629 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(FeatureEngineer Control Flow) Tj
+/F1 10 Tf
+1 0 0 1 54.00 704.00 Tm
+(The active feature builder is a single class rather than the modular FeatureGroup) Tj
+/F1 10 Tf
+1 0 0 1 54.00 692.00 Tm
+(API. The group classes in src/preprocessing/features/ are present, but they are not) Tj
+/F1 10 Tf
+1 0 0 1 54.00 680.00 Tm
+(wired into the main pipeline.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 654.00 Tm
+(The control flow is:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 635.00 Tm
+(- validate PLAYER_ID and GAME_DATE) Tj
+/F1 10 Tf
+1 0 0 1 54.00 623.00 Tm
+(- sort by PLAYER_ID and GAME_DATE) Tj
+/F1 10 Tf
+1 0 0 1 54.00 611.00 Tm
+(- convert GAME_DATE to datetime and drop invalid dates) Tj
+/F1 10 Tf
+1 0 0 1 54.00 599.00 Tm
+(- run the 15 feature phases) Tj
+/F1 10 Tf
+1 0 0 1 54.00 587.00 Tm
+(- drop duplicate columns, temporary _tmp_ columns, inf values, and NaNs) Tj
+/F1 10 Tf
+1 0 0 1 54.00 575.00 Tm
+(- drop rows that still lack ROLL_PTS_AVG_5) Tj
+/F1 10 Tf
+1 0 0 1 54.00 563.00 Tm
+(- execute league-ranking and target-encoding phases only when is_training=True) Tj
+/F1 10 Tf
+1 0 0 1 54.00 544.00 Tm
+(The pipeline has two rolling implementations:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 525.00 Tm
+(- GPU rolling via PyTorch when use_gpu=True and the frame is large enough) Tj
+/F1 10 Tf
+1 0 0 1 54.00 513.00 Tm
+(- vectorized CPU rolling with joblib threads in the normal path) Tj
+/F1 10 Tf
+1 0 0 1 54.00 494.00 Tm
+(create_features_chunked keeps an entire player's history in one chunk so rolling) Tj
+/F1 10 Tf
+1 0 0 1 54.00 482.00 Tm
+(statistics remain chronological inside each player group.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 456.00 Tm
+(Phase map:) Tj
+/F1 9 Tf
+1 0 0 1 54.00 431.00 Tm
+(1  Rolling features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 420.00 Tm
+(2  Efficiency features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 409.00 Tm
+(3  Momentum features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 398.00 Tm
+(4  Contextual features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 387.00 Tm
+(5  Matchup history) Tj
+/F1 9 Tf
+1 0 0 1 54.00 376.00 Tm
+(6  Advanced scoring) Tj
+/F1 9 Tf
+1 0 0 1 54.00 365.00 Tm
+(7  Pace adjusted stats) Tj
+/F1 9 Tf
+1 0 0 1 54.00 354.00 Tm
+(8  Teammate features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 343.00 Tm
+(9  Opponent strength) Tj
+/F1 9 Tf
+1 0 0 1 54.00 332.00 Tm
+(9b Defensive matchup features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 321.00 Tm
+(10 Interaction features) Tj
+/F1 9 Tf
+1 0 0 1 54.00 310.00 Tm
+(11 Bayesian estimates) Tj
+/F1 9 Tf
+1 0 0 1 54.00 299.00 Tm
+(12 Seasonality) Tj
+/F1 9 Tf
+1 0 0 1 54.00 288.00 Tm
+(13 Advanced custom) Tj
+/F1 9 Tf
+1 0 0 1 54.00 277.00 Tm
+(14 League ranking) Tj
+/F1 9 Tf
+1 0 0 1 54.00 266.00 Tm
+(15 Target encoding) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 3 of 8) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 2319 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Phases 1-5) Tj
+/F2 10 Tf
+1 0 0 1 54.00 703.00 Tm
+(1. Rolling Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 691.00 Tm
+(Rolling stats are built on shifted history so the current game is never part of the) Tj
+/F1 10 Tf
+1 0 0 1 54.00 679.00 Tm
+(input. Windows: 3, 5, 10, 20, 50. Stats: mean, std, min, max. Range features are) Tj
+/F1 10 Tf
+1 0 0 1 54.00 667.00 Tm
+(added for 10- and 20-game windows.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 640.00 Tm
+(2. Efficiency Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 628.00 Tm
+(- TS%, eFG%, 3PT%, AST/TOV) Tj
+/F1 10 Tf
+1 0 0 1 54.00 616.00 Tm
+(- per-minute outputs for PTS, REB, AST) Tj
+/F1 10 Tf
+1 0 0 1 54.00 604.00 Tm
+(These are computed from shifted rolling sums over the player's prior games.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 577.00 Tm
+(3. Momentum Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 565.00 Tm
+(- EWMA spans: 3, 5, 10, 20) Tj
+/F1 10 Tf
+1 0 0 1 54.00 553.00 Tm
+(- season-to-date expanding mean) Tj
+/F1 10 Tf
+1 0 0 1 54.00 541.00 Tm
+(- short-minus-long trends) Tj
+/F1 10 Tf
+1 0 0 1 54.00 529.00 Tm
+(- hot/cold streak flags) Tj
+/F1 10 Tf
+1 0 0 1 54.00 517.00 Tm
+(The code uses the same shifted history, so momentum is always backward-looking.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 490.00 Tm
+(4. Contextual Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 478.00 Tm
+(- IS_HOME from MATCHUP) Tj
+/F1 10 Tf
+1 0 0 1 54.00 466.00 Tm
+(- DAYS_SINCE_LAST, REST_DAYS, IS_B2B) Tj
+/F1 10 Tf
+1 0 0 1 54.00 454.00 Tm
+(- MINS_LAST_3 and MINS_LAST_7) Tj
+/F1 10 Tf
+1 0 0 1 54.00 442.00 Tm
+(- FATIGUE_SCORE from rest and recent minutes) Tj
+/F1 10 Tf
+1 0 0 1 54.00 430.00 Tm
+(The fatigue score is a simple weighted blend of recent load, back-to-backs, and) Tj
+/F1 10 Tf
+1 0 0 1 54.00 418.00 Tm
+(short rest.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 392.00 Tm
+(FATIGUE_SCORE:) Tj
+/F1 9 Tf
+1 0 0 1 54.00 367.00 Tm
+(0.4 * MINS_LAST_3 / 100 + 0.3 * IS_B2B + 0.3 * \(4 - REST_DAYS\)) Tj
+/F2 10 Tf
+1 0 0 1 54.00 340.00 Tm
+(5. Matchup History) Tj
+/F1 10 Tf
+1 0 0 1 54.00 328.00 Tm
+(For each PLAYER_ID and OPPONENT_ID pair the code adds:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 309.00 Tm
+(- VS_OPP_{stat}_AVG) Tj
+/F1 10 Tf
+1 0 0 1 54.00 297.00 Tm
+(- VS_OPP_{stat}_RECENT) Tj
+/F1 10 Tf
+1 0 0 1 54.00 285.00 Tm
+(This creates career and recent performance context against the current opponent.) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 4 of 8) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 3105 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Phases 6-10) Tj
+/F2 10 Tf
+1 0 0 1 54.00 703.00 Tm
+(6. Advanced Scoring Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 691.00 Tm
+(This phase pushes the feature set beyond generic rolling stats:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 672.00 Tm
+(- ROLL_USG_PCT_10 from shifted possession share) Tj
+/F1 10 Tf
+1 0 0 1 54.00 660.00 Tm
+(- ROLL_REB_OPPORTUNITY_* from opponent misses) Tj
+/F1 10 Tf
+1 0 0 1 54.00 648.00 Tm
+(- ROLL_3PT_FREQ_* and ROLL_FT_RATE_10 from shot profile) Tj
+/F1 10 Tf
+1 0 0 1 54.00 636.00 Tm
+(- ROLL_PTS_SHARE_10 from player versus team scoring share) Tj
+/F1 10 Tf
+1 0 0 1 54.00 624.00 Tm
+(- ROLL_TS_PCT_MOMENTUM_* from recent true shooting) Tj
+/F2 10 Tf
+1 0 0 1 54.00 604.00 Tm
+(7. Pace Adjusted Stats) Tj
+/F1 10 Tf
+1 0 0 1 54.00 592.00 Tm
+(- EST_POSS estimates team possessions from team box-score components) Tj
+/F1 10 Tf
+1 0 0 1 54.00 580.00 Tm
+(- TEAM_PACE_10 is a 10-game shifted team pace average) Tj
+/F1 10 Tf
+1 0 0 1 54.00 568.00 Tm
+(- PACE_FACTOR scales the context to a league-average 100 pace baseline) Tj
+/F2 10 Tf
+1 0 0 1 54.00 548.00 Tm
+(8. Teammate Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 536.00 Tm
+(- STAR_TEAMMATE_OUT is a default availability flag) Tj
+/F1 10 Tf
+1 0 0 1 54.00 524.00 Tm
+(- TEAM_{stat}_AVG_10 captures shifted team context) Tj
+/F1 10 Tf
+1 0 0 1 54.00 512.00 Tm
+(- PLAYER_{stat}_SHARE tracks share of team production) Tj
+/F1 10 Tf
+1 0 0 1 54.00 500.00 Tm
+(These features let the model distinguish a player's role from the team total.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 473.00 Tm
+(9. Opponent Strength) Tj
+/F1 10 Tf
+1 0 0 1 54.00 461.00 Tm
+(RELATIVE_OPP_DEF_{stat} normalizes opponent defense against league averages. If the) Tj
+/F1 10 Tf
+1 0 0 1 54.00 449.00 Tm
+(defensive column is missing, the code falls back to 1.0 so the feature pipeline) Tj
+/F1 10 Tf
+1 0 0 1 54.00 437.00 Tm
+(keeps moving.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 410.00 Tm
+(9b. Defensive Matchup Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 398.00 Tm
+(The defensive matchup block is one of the richest parts of the pipeline. It adds:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 379.00 Tm
+(- DEF_MATCHUP_{stat}_IMPACT) Tj
+/F1 10 Tf
+1 0 0 1 54.00 367.00 Tm
+(- OPP_DEF_RATING and DEF_DIFFICULTY) Tj
+/F1 10 Tf
+1 0 0 1 54.00 355.00 Tm
+(- DEF_OVERAGE_{stat}) Tj
+/F1 10 Tf
+1 0 0 1 54.00 343.00 Tm
+(- DEF_MATCHUP_TREND_{stat}) Tj
+/F1 10 Tf
+1 0 0 1 54.00 331.00 Tm
+(- DEF_MATCHUP_HOME_ADJ and DEF_MATCHUP_AWAY_ADJ) Tj
+/F1 10 Tf
+1 0 0 1 54.00 319.00 Tm
+(- OPP_DEF_RANK and QUALITY_DEF_AVOIDANCE) Tj
+/F1 10 Tf
+1 0 0 1 54.00 307.00 Tm
+(This block turns opponent defense into a direct, player-specific signal.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 280.00 Tm
+(10. Interaction Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 268.00 Tm
+(- stat potential = rolling production times opponent defense) Tj
+/F1 10 Tf
+1 0 0 1 54.00 256.00 Tm
+(- B2B_IMPACT_FACTOR blends rest and recent scoring) Tj
+/F1 10 Tf
+1 0 0 1 54.00 244.00 Tm
+(- B2B_MIN_IMPACT uses recent minutes on back-to-backs) Tj
+/F1 10 Tf
+1 0 0 1 54.00 232.00 Tm
+(These are lightweight interaction terms built from already safe inputs.) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 5 of 8) Tj
+ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 2382 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Phases 11-15) Tj
+/F2 10 Tf
+1 0 0 1 54.00 703.00 Tm
+(11. Bayesian Estimates) Tj
+/F1 10 Tf
+1 0 0 1 54.00 691.00 Tm
+(Each target stat gets a shrinkage estimate:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 672.00 Tm
+(- player expanding mean) Tj
+/F1 10 Tf
+1 0 0 1 54.00 660.00 Tm
+(- global mean) Tj
+/F1 10 Tf
+1 0 0 1 54.00 648.00 Tm
+(- weight based on games played) Tj
+/F1 10 Tf
+1 0 0 1 54.00 636.00 Tm
+(The result is a stabilized prior-like estimate that is less noisy early in the) Tj
+/F1 10 Tf
+1 0 0 1 54.00 624.00 Tm
+(season.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 597.00 Tm
+(12. Seasonality) Tj
+/F1 10 Tf
+1 0 0 1 54.00 585.00 Tm
+(Fourier features encode day-of-year seasonality:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 566.00 Tm
+(- SEASON_SIN_1, SEASON_COS_1) Tj
+/F1 10 Tf
+1 0 0 1 54.00 554.00 Tm
+(- SEASON_SIN_2, SEASON_COS_2) Tj
+/F1 10 Tf
+1 0 0 1 54.00 542.00 Tm
+(These let the model learn year-round trends without a hard calendar bucket.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 515.00 Tm
+(13. Advanced Custom Features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 503.00 Tm
+(This block adds several higher-signal features:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 484.00 Tm
+(- ROLL_USG_PCT_10 and PACE_ADJ_USAGE) Tj
+/F1 10 Tf
+1 0 0 1 54.00 472.00 Tm
+(- SOS_OPP_DEF_5 for strength of schedule) Tj
+/F1 10 Tf
+1 0 0 1 54.00 460.00 Tm
+(- EFF_Z_SCORE for hot-hand or slump detection) Tj
+/F1 10 Tf
+1 0 0 1 54.00 448.00 Tm
+(- ROLL_FANTASY_PTS_10 when fantasy points are available) Tj
+/F2 10 Tf
+1 0 0 1 54.00 428.00 Tm
+(14. League Ranking) Tj
+/F1 10 Tf
+1 0 0 1 54.00 416.00 Tm
+(League percentile features are only added in training mode. The code uses a trailing) Tj
+/F1 10 Tf
+1 0 0 1 54.00 404.00 Tm
+(global window of 2000 rows with 500 minimum periods and computes LEAGUE_PCT_{stat}) Tj
+/F1 10 Tf
+1 0 0 1 54.00 392.00 Tm
+(as the current stat's percentile in that window.) Tj
+/F2 10 Tf
+1 0 0 1 54.00 365.00 Tm
+(15. Target Encoding) Tj
+/F1 10 Tf
+1 0 0 1 54.00 353.00 Tm
+(Target encodings are also training-only. The code builds player and team encodings) Tj
+/F1 10 Tf
+1 0 0 1 54.00 341.00 Tm
+(with smoothing and expanding history, producing features such as PTS_PLAYER_TE and) Tj
+/F1 10 Tf
+1 0 0 1 54.00 329.00 Tm
+(PTS_TEAM_TE. This is one of the main leakage-sensitive stages, so it is never run) Tj
+/F1 10 Tf
+1 0 0 1 54.00 317.00 Tm
+(for inference-only feature generation.) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 6 of 8) Tj
+ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 2932 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Feature Selection, Cleaning, and Handoff) Tj
+/F1 10 Tf
+1 0 0 1 54.00 704.00 Tm
+(DataPipeline and TrainingPipeline both protect against leakage, but they do it with) Tj
+/F1 10 Tf
+1 0 0 1 54.00 692.00 Tm
+(slightly different selectors.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 666.00 Tm
+(DataPipeline.select_features\(\):) Tj
+/F1 10 Tf
+1 0 0 1 54.00 647.00 Tm
+(- excludes IDs, dates, targets, and obvious leak columns) Tj
+/F1 10 Tf
+1 0 0 1 54.00 635.00 Tm
+(- keeps only numeric columns) Tj
+/F1 10 Tf
+1 0 0 1 54.00 623.00 Tm
+(- then whitelists safe prefixes, suffixes, and explicit contextual features) Tj
+/F1 10 Tf
+1 0 0 1 54.00 604.00 Tm
+(TrainingPipeline._select_features\(\):) Tj
+/F1 10 Tf
+1 0 0 1 54.00 585.00 Tm
+(- uses the same exclusions) Tj
+/F1 10 Tf
+1 0 0 1 54.00 573.00 Tm
+(- accepts the same rolling, EWMA, matchup, pace, Bayesian, and defense families) Tj
+/F1 10 Tf
+1 0 0 1 54.00 561.00 Tm
+(- also accepts generic numeric columns that survive the exclude list) Tj
+/F1 10 Tf
+1 0 0 1 54.00 549.00 Tm
+(This is the selector used by train.py.) Tj
+/F1 10 Tf
+1 0 0 1 54.00 523.00 Tm
+(Target preprocessing:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 504.00 Tm
+(- preprocess_targets caps each target at the configured percentile per player) Tj
+/F1 10 Tf
+1 0 0 1 54.00 492.00 Tm
+(- missing player caps fall back to the global percentile) Tj
+/F1 10 Tf
+1 0 0 1 54.00 480.00 Tm
+(- cleaned targets are written to *_CLEAN columns) Tj
+/F1 10 Tf
+1 0 0 1 54.00 461.00 Tm
+(Temporal weighting:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 442.00 Tm
+(- sample weights are computed as exp\(-lambda * days_ago\)) Tj
+/F1 10 Tf
+1 0 0 1 54.00 430.00 Tm
+(- values are clipped to the [0.1, 1.0] range) Tj
+/F1 10 Tf
+1 0 0 1 54.00 411.00 Tm
+(Training handoff:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 392.00 Tm
+(- train.py loads and merges raw data) Tj
+/F1 10 Tf
+1 0 0 1 54.00 380.00 Tm
+(- FeatureEngineer.create_features\(\) builds the full feature table) Tj
+/F1 10 Tf
+1 0 0 1 54.00 368.00 Tm
+(- TrainingPipeline.prepare_data\(\) sorts by GAME_DATE and splits) Tj
+/F1 10 Tf
+1 0 0 1 54.00 356.00 Tm
+(  fit/validation/test) Tj
+/F1 10 Tf
+1 0 0 1 54.00 344.00 Tm
+(- TrainingPipeline.train\(\) saves feature_cols.pkl and blend_weights.pkl) Tj
+/F1 10 Tf
+1 0 0 1 54.00 332.00 Tm
+(- ModelManager and the simulator reload feature_cols.pkl for inference) Tj
+/F1 10 Tf
+1 0 0 1 54.00 313.00 Tm
+(Config values that shape the pipeline:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 294.00 Tm
+(- training.targets = PTS, REB, AST, STL, BLK, TOV) Tj
+/F1 10 Tf
+1 0 0 1 54.00 282.00 Tm
+(- training.test_split_date = 2025-01-01) Tj
+/F1 10 Tf
+1 0 0 1 54.00 270.00 Tm
+(- training.temporal_decay_lambda = 0.023) Tj
+/F1 10 Tf
+1 0 0 1 54.00 258.00 Tm
+(- training.outlier_percentile = 0.99) Tj
+/F1 10 Tf
+1 0 0 1 54.00 246.00 Tm
+(- features.rolling_windows = 3, 5, 10, 20, 50) Tj
+/F1 10 Tf
+1 0 0 1 54.00 234.00 Tm
+(- features_ext.target_encoding_smoothing = 20) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 7 of 8) Tj
+ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Length 2382 >>
+stream
+BT
+/F2 12 Tf
+1 0 0 1 54.00 723.00 Tm
+(Validation and Observations) Tj
+/F1 10 Tf
+1 0 0 1 54.00 704.00 Tm
+(Tests currently cover:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 685.00 Tm
+(- FeatureEngineer import, initialization, custom windows, empty input, missing) Tj
+/F1 10 Tf
+1 0 0 1 54.00 673.00 Tm
+(columns, and a leakage smoke check) Tj
+/F1 10 Tf
+1 0 0 1 54.00 654.00 Tm
+(- DataPipeline initialization, temporal weights, target preprocessing, and) Tj
+/F1 10 Tf
+1 0 0 1 54.00 642.00 Tm
+(feature selection) Tj
+/F1 10 Tf
+1 0 0 1 54.00 623.00 Tm
+(- configuration loading and the training pipeline path) Tj
+/F1 10 Tf
+1 0 0 1 54.00 604.00 Tm
+(Operational observations:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 585.00 Tm
+(- The FeatureGroup layer is a useful scaffold, but it is not part of the active) Tj
+/F1 10 Tf
+1 0 0 1 54.00 573.00 Tm
+(pipeline yet) Tj
+/F1 10 Tf
+1 0 0 1 54.00 554.00 Tm
+(- GPU feature engineering is optional and off by default in the main) Tj
+/F1 10 Tf
+1 0 0 1 54.00 542.00 Tm
+(constructors) Tj
+/F1 10 Tf
+1 0 0 1 54.00 523.00 Tm
+(- Some phases fall back to safe defaults when a supporting column is missing) Tj
+/F1 10 Tf
+1 0 0 1 54.00 511.00 Tm
+(- The pipeline is strong on leakage control, but the implementation is) Tj
+/F1 10 Tf
+1 0 0 1 54.00 499.00 Tm
+(monolithic and could later be decomposed through the FeatureGroup abstraction) Tj
+/F1 10 Tf
+1 0 0 1 54.00 473.00 Tm
+(Relevant files:) Tj
+/F1 10 Tf
+1 0 0 1 54.00 454.00 Tm
+(- src/preprocessing/data_loader.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 442.00 Tm
+(- src/preprocessing/feature_engineer.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 430.00 Tm
+(- src/pipeline/data_pipeline.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 418.00 Tm
+(- src/training/pipeline.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 406.00 Tm
+(- src/preprocessing/features/base.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 394.00 Tm
+(- src/preprocessing/features/rolling.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 382.00 Tm
+(- tests/test_preprocessing/test_feature_engineer.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 370.00 Tm
+(- tests/test_pipeline/test_data_pipeline.py) Tj
+/F1 10 Tf
+1 0 0 1 54.00 351.00 Tm
+(Conclusion: The feature pipeline is a carefully layered, leakage-aware preprocessing) Tj
+/F1 10 Tf
+1 0 0 1 54.00 339.00 Tm
+(stack that turns raw NBA player and team logs into a rich tabular feature space for) Tj
+/F1 10 Tf
+1 0 0 1 54.00 327.00 Tm
+(the active CatBoost + Transformer models.) Tj
+/F1 8 Tf
+1 0 0 1 505.20 28.00 Tm
+(Page 8 of 8) Tj
+ET
+endstream
+endobj
+18 0 obj
+<< /Type /Page /Parent 19 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R >> >> /Contents 17 0 R >>
+endobj
+19 0 obj
+<< /Type /Pages /Kids [ 4 0 R 6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R 18 0 R ] /Count 8 >>
+endobj
+20 0 obj
+<< /Type /Catalog /Pages 19 0 R >>
+endobj
+21 0 obj
+<< /Title (Feature Pipeline Report) /Author (Codex) /Subject (NBA feature engineering pipeline) /CreationDate (D:20260327112428) >>
+endobj
+xref
+0 22
+0000000000 65535 f 
+0000000015 00000 n 
+0000000083 00000 n 
+0000000156 00000 n 
+0000002266 00000 n 
+0000002403 00000 n 
+0000004533 00000 n 
+0000004670 00000 n 
+0000007351 00000 n 
+0000007488 00000 n 
+0000009859 00000 n 
+0000009997 00000 n 
+0000013155 00000 n 
+0000013294 00000 n 
+0000015729 00000 n 
+0000015868 00000 n 
+0000018853 00000 n 
+0000018992 00000 n 
+0000021427 00000 n 
+0000021566 00000 n 
+0000021673 00000 n 
+0000021724 00000 n 
+trailer
+<< /Size 22 /Root 20 0 R /Info 21 0 R >>
+startxref
+21872
+%%EOF

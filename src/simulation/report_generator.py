@@ -439,26 +439,49 @@ class ReportGenerator:
                     'TEAM': p['team'],
                     'OPPONENT': opponent,
                     'IS_HOME': is_home,
+                    # Points
                     'PROJ_PTS_MODE': p.get('pts_mode', p['pts']),
                     'PROJ_PTS_MEAN': p['pts'],
-                    'PROJ_REB_MODE': p.get('reb_mode', p['reb']),
-                    'PROJ_REB_MEAN': p['reb'],
-                    'PROJ_AST_MODE': p.get('ast_mode', p['ast']),
-                    'PROJ_AST_MEAN': p['ast'],
                     'PTS_CI_LOW': p.get('pts_95_ci', [0, 0])[0],
                     'PTS_CI_HIGH': p.get('pts_95_ci', [0, 0])[1],
-                    'REB_CI_LOW': p.get('reb_95_ci', [0, 0])[0],
-                    'REB_CI_HIGH': p.get('reb_95_ci', [0, 0])[1],
-                    'AST_CI_LOW': p.get('ast_95_ci', [0, 0])[0],
-                    'AST_CI_HIGH': p.get('ast_95_ci', [0, 0])[1],
-                    # --- NEW 99% CI COLUMNS ---
                     'PTS_99_CI_LOW': p.get('pts_99_ci', [0, 0])[0],
                     'PTS_99_CI_HIGH': p.get('pts_99_ci', [0, 0])[1],
+                    # Rebounds
+                    'PROJ_REB_MODE': p.get('reb_mode', p['reb']),
+                    'PROJ_REB_MEAN': p['reb'],
+                    'REB_CI_LOW': p.get('reb_95_ci', [0, 0])[0],
+                    'REB_CI_HIGH': p.get('reb_95_ci', [0, 0])[1],
                     'REB_99_CI_LOW': p.get('reb_99_ci', [0, 0])[0],
                     'REB_99_CI_HIGH': p.get('reb_99_ci', [0, 0])[1],
+                    # Assists
+                    'PROJ_AST_MODE': p.get('ast_mode', p['ast']),
+                    'PROJ_AST_MEAN': p['ast'],
+                    'AST_CI_LOW': p.get('ast_95_ci', [0, 0])[0],
+                    'AST_CI_HIGH': p.get('ast_95_ci', [0, 0])[1],
                     'AST_99_CI_LOW': p.get('ast_99_ci', [0, 0])[0],
                     'AST_99_CI_HIGH': p.get('ast_99_ci', [0, 0])[1],
-                    # --------------------------
+                    # Steals
+                    'PROJ_STL_MODE': p.get('stl_mode', p.get('stl', 0)),
+                    'PROJ_STL_MEAN': p.get('stl', 0),
+                    'STL_CI_LOW': p.get('stl_95_ci', [0, 0])[0],
+                    'STL_CI_HIGH': p.get('stl_95_ci', [0, 0])[1],
+                    'STL_99_CI_LOW': p.get('stl_99_ci', [0, 0])[0],
+                    'STL_99_CI_HIGH': p.get('stl_99_ci', [0, 0])[1],
+                    # Blocks
+                    'PROJ_BLK_MODE': p.get('blk_mode', p.get('blk', 0)),
+                    'PROJ_BLK_MEAN': p.get('blk', 0),
+                    'BLK_CI_LOW': p.get('blk_95_ci', [0, 0])[0],
+                    'BLK_CI_HIGH': p.get('blk_95_ci', [0, 0])[1],
+                    'BLK_99_CI_LOW': p.get('blk_99_ci', [0, 0])[0],
+                    'BLK_99_CI_HIGH': p.get('blk_99_ci', [0, 0])[1],
+                    # Turnovers
+                    'PROJ_TOV_MODE': p.get('tov_mode', p.get('tov', 0)),
+                    'PROJ_TOV_MEAN': p.get('tov', 0),
+                    'TOV_CI_LOW': p.get('tov_95_ci', [0, 0])[0],
+                    'TOV_CI_HIGH': p.get('tov_95_ci', [0, 0])[1],
+                    'TOV_99_CI_LOW': p.get('tov_99_ci', [0, 0])[0],
+                    'TOV_99_CI_HIGH': p.get('tov_99_ci', [0, 0])[1],
+                    # Common
                     'PLAY_PROBABILITY': p.get('play_probability', 1.0),
                     'SIM_TIMESTAMP': datetime.now().isoformat()
                 })

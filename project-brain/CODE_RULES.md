@@ -18,6 +18,8 @@
 - Treat filesystem artifact names and locations as API contracts unless you update every consumer in the same change.
 - Update `/project-brain` after every meaningful code change.
 - Do not silently change target-stat semantics, query names, or exported CSV schemas.
+- Keep the named training presets in `config/default.yaml`, `src/training/presets.py`, and `train.py` synchronized; preset drift across those files is a contract bug, not a cosmetic difference.
+- Do not change the canonical six-target training contract when adding presets. `small` may change stack breadth, but it must still train `PTS`, `REB`, `AST`, `STL`, `BLK`, and `TOV`.
 
 ## Naming And Data Conventions
 
@@ -63,16 +65,19 @@
 - New engineered features should be added as a `FeatureGroup` in `src/preprocessing/features/` unless there is a strong reason not to.
 - Register new feature groups through the active feature-engineering flow instead of embedding ad hoc feature logic in `train.py`.
 - When `train.py` or notebook launchers need feature-group ablation filters, construct the orchestrator through `build_feature_engineer(...)` instead of passing compatibility-sensitive kwargs like `disable_groups` directly into `FeatureEngineer(...)`.
+- When `FeatureEngineer` is used for ablation benchmarking, use `build_feature_engineer(...)` there as well; the benchmark path is part of the compatibility boundary and should not assume every checkout accepts `disable_groups`.
 - When adding features:
   - document the feature purpose
   - verify column naming consistency
   - consider inference compatibility
+- Keep player-style archetype outputs in `PlayerArchetypeFeatureGroup` and keep them numeric (`ARCHETYPE_*` / `SIMILARITY_TO_*`) so `FeatureSelector` can persist them cleanly; if the template set changes materially, bump the feature schema version and update the contract tests together.
 
 ### Training
 
 - Keep `src/training/pipeline.py` as the primary training orchestration path unless a deliberate redesign is documented.
 - Avoid duplicating training entry logic in new modules without a clear ownership split.
 - Heavy training imports should remain lazy when practical to keep non-training commands lightweight.
+- If a preset needs a recent-history window, prefer the existing `SEASON_ID` column when it is present and skip the trim rather than inventing a new date heuristic.
 
 ### Models And Inference
 
@@ -81,6 +86,7 @@
 - The blend-weight / Transformer artifact contract is enforced at load time: if blend weights expect a Transformer and the artifact is missing or unloadable, `ModelManager.load_models()` must raise rather than produce silently uncalibrated predictions.
 - Keep Transformer validation/runtime inference on the eager model path by default. If `torch.compile` is re-enabled for the Transformer, it must stay behind an explicit safety flag and should never be the only validation path.
 - When touching CUDA attention code, prefer math SDPA fallback controls for validation and add regression coverage for the eager path.
+- `model_stack_metadata.pkl` is part of the shared runtime contract and may now include the selected training preset and feature-group list; keep it in sync with any preset changes.
 
 ### Simulation
 

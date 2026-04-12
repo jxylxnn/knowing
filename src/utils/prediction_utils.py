@@ -34,7 +34,7 @@ class FeatureSchema:
     categorical_cols: List[str] = field(default_factory=list)
     group_columns: Dict[str, List[str]] = field(default_factory=dict)
     dtype_map: Dict[str, str] = field(default_factory=dict)
-    version: str = 'feature_schema_v2'
+    version: str = 'feature_schema_v3'
     schema_hash: str = ''
 
     def __post_init__(self) -> None:
@@ -223,6 +223,15 @@ class FeatureSelector:
         'VS_OPP_',
         'RAW_',
         'LEAGUE_PCT_',
+        'ARCHETYPE_',
+        'SIMILARITY_TO_',
+        'MIN_CONF_',
+        'RECENCY_',
+        'LINEUP_',
+        'INJURY_OPP_',
+        'TEAMMATE_',
+        'DEF_POS_',
+        'SCHED_',
     )
     SAFE_KEYWORDS = (
         'TREND',

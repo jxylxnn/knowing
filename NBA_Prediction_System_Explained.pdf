@@ -1,0 +1,1332 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 2889 >>
+stream
+0 0 0 rg
+1.2 w
+54.00 706.00 m 558.00 706.00 l S
+BT
+/F2 24.00 Tf
+1 0 0 1 77.52 712.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F3 12.00 Tf
+1 0 0 1 128.16 684.00 Tm
+(Detailed explanation of how the project works, end to end) Tj
+ET
+BT
+/F1 9.50 Tf
+1 0 0 1 241.88 666.00 Tm
+(Generated on March 29, 2026) Tj
+ET
+0.96 0.97 0.99 rg
+54.00 560.00 504.00 80.00 re f
+0 0 0 RG
+0.8 w
+54.00 560.00 504.00 80.00 re S
+BT
+/F2 12 Tf
+1 0 0 1 66.00 616.00 Tm
+(What this project does) Tj
+ET
+BT
+/F1 10.2 Tf
+1 0 0 1 66.00 598.00 Tm
+(It ingests NBA data, engineers leakage-safe features, trains CatBoost and Transformer models,) Tj
+ET
+BT
+/F1 10.2 Tf
+1 0 0 1 66.00 584.00 Tm
+(simulates games with Monte Carlo methods, and turns the outputs into over/under probabilities.) Tj
+ET
+BT
+/F2 12 Tf
+1 0 0 1 54.00 520.00 Tm
+(End-to-end flow) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 243.00 500.00 Tm
+(update_data.py / scrapers) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 490.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 480.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 273.24 470.00 Tm
+(   data/*.csv) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 460.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 450.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 182.52 440.00 Tm
+(DataLoader -> FeatureEngineer -> TrainingPipeline) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 430.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 420.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 187.56 410.00 Tm
+( models/ \(CatBoost, Transformer, blend weights\)) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 400.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 390.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 177.48 380.00 Tm
+(GameSimulator -> SeasonSimulator -> ReportGenerator) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 370.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 360.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 248.04 350.00 Tm
+( data/sim_results/*.csv) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 340.00 Tm
+(        |) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 283.32 330.00 Tm
+(        v) Tj
+ET
+BT
+/F4 8.4 Tf
+1 0 0 1 230.40 320.00 Tm
+(query_prob.py / InteractiveCLI) Tj
+ET
+BT
+/F2 12 Tf
+1 0 0 1 54.00 320.00 Tm
+(At a glance) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 300.00 Tm
+(- The main entry points are update_data.py, train.py, simulate_season.py, and) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 287.00 Tm
+(  query_prob.py.) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 272.00 Tm
+(- The data model is player-game centric, with team and opponent context attached to) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 259.00 Tm
+(  each row.) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 244.00 Tm
+(- The simulator uses injuries, lineups, defense, pace, correlations, and betting) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 231.00 Tm
+(  context.) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 216.00 Tm
+(- The query layer reuses cached projections and falls back to live simulation when) Tj
+ET
+BT
+/F1 10.0 Tf
+1 0 0 1 54.00 203.00 Tm
+(  needed.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 4916 >>
+stream
+0 0 0 rg
+0.6 w
+54.00 760.00 m 558.00 760.00 l S
+BT
+/F2 11 Tf
+1 0 0 1 54.00 768.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 714.00 Tm
+(1. What the project does) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 687.00 Tm
+(This project is an NBA player stat prediction system. It estimates points, rebounds, assists,) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 672.83 Tm
+(steals, blocks, and turnovers for future games, then uses those projections to answer) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 658.65 Tm
+(over/under questions and simulate entire slates. The repository is designed as a pipeline, not) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 644.48 Tm
+(as one monolithic model. Each stage has a single job and a clear output that the next stage) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 630.30 Tm
+(consumes.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 614.13 Tm
+(- Raw data is collected from NBA Stats, injury feeds, betting lines, and lineup sources.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 599.87 Tm
+(- Historical rows are converted into leakage-safe features that only use information) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 586.61 Tm
+(  available before the game being predicted.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 572.35 Tm
+(- Per-stat machine learning models produce the core player projections.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 558.09 Tm
+(- A simulation layer turns projections into game-level outcomes and player projection) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 544.83 Tm
+(  CSVs.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 530.57 Tm
+(- A query layer lets you ask for over/under probabilities from the command line or) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 517.31 Tm
+(  interactively.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 503.05 Tm
+(Key files) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 483.05 Tm
+(- update_data.py downloads and appends raw player and team logs.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 469.05 Tm
+(- train.py drives the model training pipeline.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 455.05 Tm
+(- simulate_season.py runs matchup and slate simulations.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 441.05 Tm
+(- query_prob.py exposes the player probability CLI.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 427.05 Tm
+(- src/preprocessing/data_loader.py merges player and team tables.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 413.05 Tm
+(- src/preprocessing/feature_engineer.py builds the engineered feature set.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 399.05 Tm
+(- src/training/pipeline.py trains CatBoost and Transformer models.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 385.05 Tm
+(- src/models/model_manager.py loads models for inference and simulation.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 371.05 Tm
+(- src/simulation/game_simulator.py performs Monte Carlo simulation.) Tj
+ET
+BT
+/F1 10.00 Tf
+1 0 0 1 54.00 357.05 Tm
+(- src/query/interactive_cli.py handles natural-language style queries.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 343.05 Tm
+(Why the architecture matters) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 323.05 Tm
+(The system is split this way so the expensive jobs happen once and the cheap jobs happen) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 308.87 Tm
+(repeatedly. Training runs offline on historical data. Simulation reuses saved models and) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 294.70 Tm
+(cached context. Querying reuses exported projection files or can fall back to live simulation) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 280.52 Tm
+(if a cached projection is missing. That separation keeps the workflow fast and makes the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 266.35 Tm
+(outputs easier to reason about.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 250.17 Tm
+(2. Data ingestion and storage) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 223.17 Tm
+(The raw data pipeline starts in update_data.py and the scrapers under src/data/. The updater) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 209.00 Tm
+(uses nba_api to fetch player game logs and team game logs, with rate limiting so NBA.com does) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 194.82 Tm
+(not get hammered. It can work on the current season, a date range, the last ten seasons, or a) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 180.65 Tm
+(full historical scrape. The script normalizes dates and computes fantasy points when that) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 166.47 Tm
+(column is not already present.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 150.30 Tm
+(- The code determines the current NBA season from the calendar month, so the default) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 137.04 Tm
+(  season changes automatically as the year changes.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 122.78 Tm
+(- Existing CSVs in data/ are read and merged with new rows so incremental updates do not) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 109.52 Tm
+(  require a full reload.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 95.26 Tm
+(- Raw player logs land in data/nba_players.csv and game-level logs land in) Tj
+ET
+BT
+/F1 9 Tf
+1 0 0 1 281.25 28.00 Tm
+(Page 2 of 6) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 4970 >>
+stream
+0 0 0 rg
+0.6 w
+54.00 760.00 m 558.00 760.00 l S
+BT
+/F2 11 Tf
+1 0 0 1 54.00 768.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 714.00 Tm
+(  data/nba_games.csv.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 699.74 Tm
+(- The scrapers for injuries, lineups, betting lines, and defense are used later by the) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 686.48 Tm
+(  simulator and query flow.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 672.22 Tm
+(DataLoader) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 652.22 Tm
+(src/preprocessing/data_loader.py is the bridge from raw CSVs to a merged player-game table. It) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 638.05 Tm
+(parses minutes, sorts by player and date, and builds safe team-level rolling context. It also) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 623.87 Tm
+(self-joins the team games table so the model can see opponent defense statistics that were) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 609.70 Tm
+(available before the game.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 593.52 Tm
+(- Minutes are normalized from either decimal or mm:ss formats.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 579.26 Tm
+(- Team rolling features are computed with shift\(1\) so the current game never leaks into) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 566.00 Tm
+(  the past.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 551.74 Tm
+(- The merge creates a single row per player game with the team context, opponent context,) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 538.48 Tm
+(  and game outcome fields attached.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 524.22 Tm
+(- This is the row shape that the feature engineer and model training code expect.) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 509.96 Tm
+(The result is a consistent tabular dataset where each row represents a player in one game,) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 495.79 Tm
+(with team and opponent context already aligned. That makes downstream feature engineering and) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 481.61 Tm
+(model training much simpler.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 465.44 Tm
+(3. Feature engineering) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 438.44 Tm
+(src/preprocessing/feature_engineer.py orchestrates the feature groups. It does not just add) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 424.26 Tm
+(rolling averages. It combines a set of modular feature groups that capture recent form,) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 410.09 Tm
+(efficiency, momentum, context, fatigue, matchup history, opponent strength, pace, role, target) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 395.91 Tm
+(encoding, and league ranking. The file is built to keep the feature generation leakage-safe) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 381.74 Tm
+(and diagnosable.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 365.56 Tm
+(- Rolling windows use multiple horizons such as 3, 5, 10, 20, and 50 games.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 351.30 Tm
+(- Momentum and fatigue features capture hot streaks, cold streaks, and rest patterns.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 337.04 Tm
+(- Matchup features compare the player against the specific opponent.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 322.78 Tm
+(- Opponent strength and pace features help the model understand game environment.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 308.52 Tm
+(- Target encoding and league-ranking features add smoothed historical context without) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 295.26 Tm
+(  hard-coding raw identity effects.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 281.00 Tm
+(Feature safety) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 261.00 Tm
+(The feature engineer sorts by PLAYER_ID and GAME_DATE, drops invalid dates, and tracks) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 246.83 Tm
+(diagnostics about missing required and optional inputs. If the missingness is too high, the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 232.65 Tm
+(pipeline fails rather than silently training on broken data. That behavior is important) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 218.48 Tm
+(because feature drift is one of the easiest ways for a sports model to become unreliable.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 202.30 Tm
+(- FeatureSelector and FeatureSchema freeze the exact feature columns used during training) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 189.04 Tm
+(  so inference sees the same schema.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 174.78 Tm
+(- Categorical columns such as PLAYER_ID, TEAM_ID, and OPPONENT_ID are tracked explicitly.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 160.52 Tm
+(- The pipeline can save the feature schema to disk and reload it later for inference) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 147.26 Tm
+(  parity.) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 133.00 Tm
+(The training and prediction paths both depend on the same feature schema. That keeps the model) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 118.83 Tm
+(from seeing a different column order or a different set of inputs after it is saved.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 102.65 Tm
+(4. Training the models) Tj
+ET
+BT
+/F1 9 Tf
+1 0 0 1 281.25 28.00 Tm
+(Page 3 of 6) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 5135 >>
+stream
+0 0 0 rg
+0.6 w
+54.00 760.00 m 558.00 760.00 l S
+BT
+/F2 11 Tf
+1 0 0 1 54.00 768.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 714.00 Tm
+(train.py is the CLI front end for src/training/pipeline.py. The training pipeline splits the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 699.83 Tm
+(engineered dataset chronologically into fit, validation, and test partitions. It then trains) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 685.65 Tm
+(one CatBoost regressor per target stat and optionally trains a Transformer sequence model on) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 671.48 Tm
+(player histories. The quick, standard, and full modes mainly change iteration counts and epoch) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 657.30 Tm
+(counts.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 641.13 Tm
+(- CatBoost is the primary tabular learner because it handles mixed feature types well and) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 627.87 Tm
+(  is strong on structured sports data.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 613.61 Tm
+(- Target-specific CatBoost profiles tune depth, learning rate, and regularization per stat) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 600.35 Tm
+(  instead of forcing one global setting.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 586.09 Tm
+(- Quantile companions are trained so the system can estimate uncertainty, not just a point) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 572.83 Tm
+(  prediction.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 558.57 Tm
+(- A second CatBoost model can act as an MAE companion for some targets.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 544.31 Tm
+(- The Transformer learns from player sequences and contributes a second view of the same) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 531.05 Tm
+(  prediction problem.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 516.79 Tm
+(Training flow) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 496.79 Tm
+(python update_data.py) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 485.79 Tm
+(python train.py --mode standard --parallel) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 474.79 Tm
+(python train.py --mode quick --no-gpu) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 463.79 Tm
+(python train.py --mode full --model-size large) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 452.79 Tm
+(TrainingPipeline first prepares the temporal split, then trains CatBoost across targets, then) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 438.61 Tm
+(trains the Transformer if enabled. After validation, it builds inverse-MAE blend weights so) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 424.44 Tm
+(the better model for a target gets more influence. The pipeline saves the feature schema,) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 410.26 Tm
+(blend weights, per-target CatBoost artifacts, and the Transformer checkpoint into models/.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 394.09 Tm
+(- models/feature_schema.pkl and models/feature_cols.pkl store the training schema.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 379.83 Tm
+(- models/blend_weights.pkl stores the per-target CatBoost and Transformer blend ratios.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 365.57 Tm
+(- models/attention_transformer.pkl stores the sequence model.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 351.31 Tm
+(- Per-target CatBoost artifacts are saved with names like pts_catboost.cbm and supporting) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 338.05 Tm
+(  metadata files.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 323.79 Tm
+(Compatibility note) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 303.79 Tm
+(src/pipeline/training_pipeline.py is only a compatibility shim. The active implementation) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 289.61 Tm
+(lives in src/training/pipeline.py. That matters because older imports still work, but the real) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 275.44 Tm
+(training logic is in the newer stack.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 259.26 Tm
+(5. Simulation and reporting) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 232.26 Tm
+(simulate_season.py is the top-level entry point for game and slate simulation. It checks that) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 218.09 Tm
+(trained models exist, builds a ModelManager, then wires together GameSimulator,) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 203.91 Tm
+(ScheduleScraper, SeasonSimulator, and ReportGenerator. The simulation code is the part of the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 189.74 Tm
+(project that turns static projections into game outcomes.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 173.56 Tm
+(- GameSimulator loads injuries, lineups, defense profiles, betting context, minutes) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 160.30 Tm
+(  estimates, and error calibration.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 146.04 Tm
+(- The simulator uses a stat correlation matrix and a Cholesky factor so player stat) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 132.78 Tm
+(  outcomes move together realistically.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 118.52 Tm
+(- Home court advantage, fatigue, clutch adjustments, and overtime logic are all modeled in) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 105.26 Tm
+(  the simulation layer.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 91.00 Tm
+(- Roster context is cached because the same team context gets reused across many Monte) Tj
+ET
+BT
+/F1 9 Tf
+1 0 0 1 281.25 28.00 Tm
+(Page 4 of 6) Tj
+ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 4993 >>
+stream
+0 0 0 rg
+0.6 w
+54.00 760.00 m 558.00 760.00 l S
+BT
+/F2 11 Tf
+1 0 0 1 54.00 768.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 714.00 Tm
+(  Carlo runs.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 699.74 Tm
+(SeasonSimulator and ReportGenerator) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 679.74 Tm
+(SeasonSimulator batches games by date or slate and can use a thread pool on CPU, although GPU) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 665.57 Tm
+(runs are intentionally kept single-threaded to avoid CUDA contention. ReportGenerator then) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 651.39 Tm
+(summarizes the simulations, computes means, modes, and confidence ranges, and exports two) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 637.22 Tm
+(CSVs: a game-level result file and a player projection file.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 621.04 Tm
+(- simulate_season.py --today simulates all games for the current date.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 606.78 Tm
+(- simulate_season.py --date YYYY-MM-DD targets a specific slate.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 592.52 Tm
+(- simulate_season.py --week covers the next seven days.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 578.26 Tm
+(- simulate_season.py --season simulates the remaining season schedule.) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 564.00 Tm
+(The player projection CSV is especially important because the query system reads it back) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 549.83 Tm
+(later. That means a query can use a cached, precomputed projection rather than recomputing the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 535.65 Tm
+(whole simulation every time.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 519.48 Tm
+(6. Query and probability calculation) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 492.48 Tm
+(query_prob.py is the user-facing CLI for over/under questions. In one-shot mode it loads the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 478.30 Tm
+(latest projections, finds the player, and calculates the probability of going over or under a) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 464.13 Tm
+(betting line. In interactive mode, src/query/interactive_cli.py can also interpret) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 449.95 Tm
+(natural-language style prompts and run a live simulation if the player is not in the cached) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 435.78 Tm
+(file.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 419.60 Tm
+(- QueryParser recognizes over/under phrasing, projection requests, compare commands,) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 406.34 Tm
+(  player listing, and exit/help commands.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 392.08 Tm
+(- ProjectionLoader finds the latest player_projections_*.csv file and maps each row into a) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 378.82 Tm
+(  PlayerProjection object.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 364.56 Tm
+(- ProbabilityCalculator converts a mean and standard deviation into over and under) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 351.30 Tm
+(  probabilities with a normal distribution.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 337.04 Tm
+(- If a play probability is below 100 percent, the query result is adjusted to reflect the) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 323.78 Tm
+(  chance that the player actually plays.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 309.52 Tm
+(Example queries) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 289.52 Tm
+(python query_prob.py -p "LeBron James" -s pts -l 25.5) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 278.52 Tm
+(python query_prob.py -p "Jokic" -s reb -l 12.5 --opponent DEN) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 267.52 Tm
+(python query_prob.py --compare "Curry" "Luka Doncic" --stat pts) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 256.52 Tm
+(python query_prob.py --list-players) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 245.52 Tm
+(The interactive CLI goes a step further than the simple probability calculator. It adjusts the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 231.35 Tm
+(projection mean based on recent form, minutes, matchup history, opponent defense, home or away) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 217.17 Tm
+(context, and a rough player archetype. Then it runs a Monte Carlo draw so the final answer is) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 203.00 Tm
+(not just a static percentage, but a distribution-aware estimate.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 186.82 Tm
+(7. Configuration, outputs, and run order) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 159.82 Tm
+(config/default.yaml is the central place to inspect or tune behavior. It controls training) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 145.65 Tm
+(targets, rolling windows, test split dates, simulation parameters, cache lifetimes, API) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 131.47 Tm
+(endpoints, and default league averages. If you want to change how the project behaves without) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 117.30 Tm
+(editing code, this is the first file to inspect.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 101.12 Tm
+(- training.targets defines the six modeled stats: PTS, REB, AST, STL, BLK, and TOV.) Tj
+ET
+BT
+/F1 9 Tf
+1 0 0 1 281.25 28.00 Tm
+(Page 5 of 6) Tj
+ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 3192 >>
+stream
+0 0 0 rg
+0.6 w
+54.00 760.00 m 558.00 760.00 l S
+BT
+/F2 11 Tf
+1 0 0 1 54.00 768.00 Tm
+(NBA Player Stats Prediction System) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 714.00 Tm
+(- features and features_ext define rolling windows, EWMA spans, matchup history, and) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 700.74 Tm
+(  target encoding behavior.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 686.48 Tm
+(- simulation controls the Monte Carlo engine, correlation settings, home edge, and) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 673.22 Tm
+(  overtime rules.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 658.96 Tm
+(- cache controls how long schedule, betting, defense, lineup, and injury data stay fresh.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 644.70 Tm
+(- api contains the NBA, Basketball Reference, ESPN, Action Network, and RotoWire endpoints) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 631.44 Tm
+(  used by the scrapers.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 617.18 Tm
+(Common outputs) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 597.18 Tm
+(- data/nba_players.csv and data/nba_games.csv are the main raw inputs.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 582.92 Tm
+(- models/ contains the trained CatBoost models, Transformer checkpoint, feature schema,) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 569.66 Tm
+(  and blend weights.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 555.40 Tm
+(- data/sim_results/sim_results_*.csv stores slate or game summaries.) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 541.14 Tm
+(- data/sim_results/player_projections_*.csv stores player-level projection rows used by) Tj
+ET
+BT
+/F1 10.20 Tf
+1 0 0 1 54.00 527.88 Tm
+(  query_prob.py.) Tj
+ET
+BT
+/F2 12.50 Tf
+1 0 0 1 54.00 513.62 Tm
+(Recommended run order) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 493.62 Tm
+(python update_data.py) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 482.62 Tm
+(python train.py --mode standard --parallel) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 471.62 Tm
+(python simulate_season.py --today) Tj
+ET
+BT
+/F4 8.80 Tf
+1 0 0 1 68.00 460.62 Tm
+(python query_prob.py -p "Player Name" -s pts -l 22.5) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 449.62 Tm
+(That sequence is the intended loop: refresh data, train models, simulate the slate, then query) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 435.45 Tm
+(the exported projections. The repo is built so each stage can be rerun independently, but the) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 421.27 Tm
+(outputs are most useful when they are executed in that order.) Tj
+ET
+BT
+/F2 16.00 Tf
+1 0 0 1 54.00 405.10 Tm
+(8. Mental model for the whole system) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 378.10 Tm
+(A useful way to think about the project is as a cascade of narrowing uncertainty. Raw logs) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 363.92 Tm
+(become a clean merged dataset. The merged dataset becomes engineered features. The features) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 349.75 Tm
+(become model predictions. The predictions become simulation draws. The simulation draws become) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 335.57 Tm
+(game summaries and over/under probabilities. Every file and class in the repo exists to move) Tj
+ET
+BT
+/F1 10.50 Tf
+1 0 0 1 54.00 321.40 Tm
+(information cleanly from one stage to the next.) Tj
+ET
+BT
+/F1 9 Tf
+1 0 0 1 281.25 28.00 Tm
+(Page 6 of 6) Tj
+ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 17 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Type /Pages /Kids [ 6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R ] /Count 6 >>
+endobj
+18 0 obj
+<< /Type /Catalog /Pages 17 0 R >>
+endobj
+xref
+0 19
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000000238 00000 n 
+0000000306 00000 n 
+0000003247 00000 n 
+0000003404 00000 n 
+0000008372 00000 n 
+0000008529 00000 n 
+0000013551 00000 n 
+0000013709 00000 n 
+0000018897 00000 n 
+0000019056 00000 n 
+0000024102 00000 n 
+0000024261 00000 n 
+0000027506 00000 n 
+0000027665 00000 n 
+0000027759 00000 n 
+trailer
+<< /Size 19 /Root 18 0 R >>
+startxref
+27810
+%%EOF

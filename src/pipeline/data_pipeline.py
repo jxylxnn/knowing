@@ -10,6 +10,7 @@ import numpy as np
 from src.config import DataConfig, TrainingConfig
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
+from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ class DataPipeline:
         self.training_config = training_config
         self.feature_engineer = FeatureEngineer()
         self._feature_cols: Optional[List[str]] = None
+        self.feature_schema: Optional[FeatureSchema] = None
+        self.feature_selector = FeatureSelector(self.training_config.targets)
         
     @property
     def feature_cols(self) -> Optional[List[str]]:
@@ -207,46 +210,10 @@ class DataPipeline:
         Returns:
             List of safe feature column names
         """
-        targets = self.training_config.targets
-        
-        # Exclude IDs, dates, and targets
-        exclude_cols = [
-            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
-            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
-            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE'
-        ] + targets
-        
-        # Initial selection of candidate features
-        feature_cols = [
-            c for c in df.columns
-            if c not in exclude_cols and
-            (df[c].dtype in ['int64', 'float64', 'int32', 'float32', 'float', 'int'])
-        ]
-        
-        # Check for potential leakage
-        leaky_suspects = [c for c in feature_cols if any(t.lower() in c.lower() for t in targets)]
-        if leaky_suspects:
-            logger.warning(f"Potential leaky features detected: {leaky_suspects[:10]}...")
-        
-        # Keep only safe features
-        safe_feature_cols = [
-            c for c in feature_cols
-            if c.startswith('ROLL') or c.startswith('EWMA_') or c.startswith('VS_OPP_')
-            or 'TREND' in c or 'BAYESIAN' in c or 'PROJ_' in c or 'PACE' in c
-            or c in ['IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
-                     'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK', 'CLOSE_GAME', 'EXP_MARGIN']
-            or '_TE' in c or '_SHARE_' in c or 'ROLE_INDEX' in c
-        ]
-        
-        # Filter out raw team stats (leaks)
-        safe_feature_cols = [
-            c for c in safe_feature_cols 
-            if not (c.endswith('_TEAM') and c.replace('_TEAM', '') in targets)
-        ]
-        
-        self._feature_cols = safe_feature_cols
-        logger.info(f"Selected {len(safe_feature_cols)} features for training")
-        return safe_feature_cols
+        self.feature_schema = self.feature_selector.fit(df, group_columns=self.feature_engineer.get_group_columns())
+        self._feature_cols = self.feature_schema.feature_cols
+        logger.info(f"Selected {len(self._feature_cols)} features for training")
+        return self._feature_cols
     
     def get_categorical_columns(self, df: pd.DataFrame) -> List[str]:
         """Get list of categorical columns for models that support them.

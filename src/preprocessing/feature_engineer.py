@@ -14,17 +14,25 @@ from sklearn.metrics import mean_absolute_error
 
 from src.models.gpu_utils import check_gpu_compatibility
 from src.preprocessing.features import (
+    PlayerArchetypeFeatureGroup,
     ContextualFeatureGroup,
+    DefensePositionFeatureGroup,
     EfficiencyFeatureGroup,
     FatigueFeatureGroup,
+    InjuryAdjustedOpportunityFeatureGroup,
     LeagueRankingFeatureGroup,
+    LineupStabilityFeatureGroup,
     MatchupFeatureGroup,
+    MinutesConfidenceFeatureGroup,
     MomentumFeatureGroup,
     OpponentStrengthFeatureGroup,
     PaceFeatureGroup,
+    RecencyFormFeatureGroup,
+    RestGameDensityFeatureGroup,
     RollingFeatureGroup,
     TargetEncodingFeatureGroup,
     TeamRoleFeatureGroup,
+    TeammateUsageFeatureGroup,
 )
 from src.preprocessing.features.base import FeatureContext, FeatureDiagnostics, FeatureGroup
 from src.utils.prediction_utils import FeatureSelector
@@ -77,10 +85,18 @@ class FeatureEngineer:
             MomentumFeatureGroup(target_cols=self.target_cols),
             ContextualFeatureGroup(),
             FatigueFeatureGroup(),
+            MinutesConfidenceFeatureGroup(target_cols=self.target_cols),
+            RestGameDensityFeatureGroup(),
             MatchupFeatureGroup(target_cols=self.target_cols, recent_window=5),
             OpponentStrengthFeatureGroup(target_cols=self.target_cols),
             PaceFeatureGroup(),
             TeamRoleFeatureGroup(),
+            LineupStabilityFeatureGroup(),
+            InjuryAdjustedOpportunityFeatureGroup(),
+            TeammateUsageFeatureGroup(),
+            RecencyFormFeatureGroup(target_cols=self.target_cols),
+            PlayerArchetypeFeatureGroup(),
+            DefensePositionFeatureGroup(),
             TargetEncodingFeatureGroup(target_cols=self.target_cols, smoothing=20),
             LeagueRankingFeatureGroup(target_cols=self.target_cols, window=2000, min_periods=500),
         ]
@@ -235,7 +251,7 @@ class FeatureEngineer:
         scores: Dict[str, Dict[str, float]] = {}
         for variant_name, cfg in variants.items():
             try:
-                variant_engineer = FeatureEngineer(
+                variant_engineer = build_feature_engineer(
                     rolling_windows=self.rolling_windows,
                     use_gpu=self.use_gpu,
                     enable_groups=self.enable_groups,

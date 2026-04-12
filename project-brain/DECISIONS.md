@@ -1,8 +1,44 @@
 # Decisions
 
-This file records confirmed or strongly inferred architectural decisions visible in the repository as of 2026-04-01.
+This file records confirmed or strongly inferred architectural decisions visible in the repository as of 2026-04-12.
 
 When a decision is labeled "inferred", it means the repo shows a clear implementation choice but does not contain explicit historical rationale.
+
+---
+
+## DR-020: Batch-1 Feature Groups — Minutes Confidence, Recency Form, Lineup Stability, Rest Density
+
+- Status: active
+- Date: 2026-04-12
+- Confidence: high
+
+### Context
+
+- The existing feature groups (rolling, efficiency, momentum, context, fatigue, matchup, opponent_strength, pace, team_role, archetype, target_encoding) cover core box-score signals but lack explicit schedule-density, minutes-confidence, recency-form, and lineup-stability features.
+- These four feature categories were identified as high-value additions for predicting NBA player props because they capture role stability, schedule load, and recent-form signals that the existing groups do not.
+
+### Options Considered
+
+1. Add all four groups as separate `FeatureGroup` subclasses following the existing batched-column pattern.
+2. Merge some of these signals into existing groups (e.g., rest density into fatigue).
+3. Add them as a single monolithic group.
+
+### Decision
+
+- Option 1: four separate `FeatureGroup` subclasses, each in its own module under `src/preprocessing/features/`.
+- This keeps each group independently testable, independently disableable via `FeatureContext.enabled_groups`/`disabled_groups`, and consistent with the existing architecture.
+
+### Tradeoffs
+
+- More files to maintain, but each file is small and single-purpose.
+- `LineupStabilityFeatureGroup` and `RestGameDensityFeatureGroup` use row-level iteration for Jaccard similarity and game-count windows, which may be slower on very large datasets than vectorized alternatives. This is acceptable for the current data scale but should be revisited if performance becomes an issue.
+
+### Consequences
+
+- Four new modules: `minutes_confidence.py`, `recency_form.py`, `lineup_stability.py`, `rest_density.py`.
+- All seven are registered in `src/preprocessing/features/__init__.py`.
+- All seven are now wired into `FeatureEngineer._build_groups()`, the `full` training preset, and `FeatureSelector.SAFE_PREFIXES`; see CURRENT_STATE.md for details.
+- No existing tests were broken by this addition.
 
 ---
 
@@ -780,3 +816,96 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 ### Revisit Triggers
 
 - If a model is trained with an unusual nhead value that the heuristic cannot infer correctly.
+
+---
+
+## DR-019: Keep The Small Training Preset CatBoost-First Without Changing Runtime Artifacts
+
+- Status: active
+- Date: 2026-04-11
+- Confidence: high
+
+### Context
+
+- The repo already treats CatBoost as the core per-target backbone and the Transformer as an optional blended component.
+- The new `small` preset in `src/training/presets.py` was added to make iteration faster without changing the downstream artifact names, canonical target list, or simulator/query load path.
+- A recent-history trim was requested as an optional speedup, but the codebase did not have a general season-window abstraction. The current training data does include `SEASON_ID`, so the preset can trim safely when that field exists.
+
+### Options Considered
+
+- Redesign the training architecture around a smaller model family.
+- Change artifact filenames for the smaller preset.
+- Add a named preset layer that only changes stack breadth and training window behavior.
+
+### Decision
+
+- Add named presets in `config/default.yaml` and `src/training/presets.py`, wire `train.py` to resolve them, keep the six canonical targets, and keep the runtime artifact contract unchanged.
+- Use `SEASON_ID` for the recent-history trim when available; if it is missing, skip the trim instead of inventing a heuristic fallback.
+
+### Why
+
+- This preserves the existing simulator/query contract and keeps the training path aligned with the current file-based architecture.
+- The smaller preset can now be used regularly without introducing a separate model family or a second runtime loader path.
+
+### Tradeoffs
+
+- Faster iteration with less code churn.
+- The preset layer adds another moving part that must stay synchronized across config, CLI, and tests.
+- The recent-history trim is intentionally conservative and may do nothing in older datasets without `SEASON_ID`.
+
+### Consequences
+
+- `model_stack_metadata.pkl` now records the selected preset and feature groups when available.
+- Preset changes must be coordinated across `config/default.yaml`, `src/training/presets.py`, `train.py`, and the preset-focused tests.
+
+### Revisit Triggers
+
+- If live training benchmarks show the small preset is still too slow for routine iteration.
+- If future data sources lose `SEASON_ID` and the project needs a more general recent-history abstraction.
+
+---
+
+## DR-020: Use Deterministic Playstyle Templates For Player Archetype Features
+
+- Status: active
+- Date: 2026-04-11
+- Confidence: high
+
+### Context
+
+- The new player-archetype feature family needs to help with cold-start and low-sample players without introducing another learned-model artifact that would have to be trained, saved, and reloaded separately.
+- The active preprocessing stack already has stable rolling and role features that can describe a player with enough history to compare them against a few fixed style buckets.
+- The training/runtime contract in this repo is file- and schema-driven, so adding another learned artifact would increase the risk of mismatched persistence or runtime load failures.
+
+### Options Considered
+
+- Fit a separate clustering model and persist the centroids as another training artifact.
+- Use ad hoc rule-based labels in `train.py` or `ModelManager`.
+- Build a dedicated feature group that computes deterministic similarities against a fixed template set.
+
+### Decision
+
+- Implement player archetype features in `src/preprocessing/features/archetype.py` as a deterministic `FeatureGroup` that emits hard labels and soft similarities against fixed playstyle templates.
+
+### Why
+
+- This keeps the feature logic in the existing preprocessing boundary.
+- Training and inference will always use the same templates as long as they run the same code revision, without requiring a separate learned clustering artifact to be persisted or loaded.
+- The soft similarity scores are more flexible than a single hard cluster assignment for sparse players.
+
+### Tradeoffs
+
+- Simpler runtime contract and no extra model artifact.
+- Less expressive than a fully learned clustering pipeline.
+- Template tuning now lives in code, so changes to archetype definitions require a conscious schema/preset update instead of being learned automatically from data.
+
+### Consequences
+
+- `FeatureSelector` must keep the archetype outputs in the safe engineered-feature set.
+- Preset definitions now need to include the archetype group explicitly so the default stack remains aligned with the feature contract.
+- If the archetype template set changes materially, the feature schema version and tests should be updated together.
+
+### Revisit Triggers
+
+- If live benchmarking shows the deterministic templates are too coarse for the desired cold-start lift.
+- If the repo later gains a proper persisted feature-store or clustering artifact boundary that can absorb a learned archetype model cleanly.

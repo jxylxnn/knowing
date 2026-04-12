@@ -61,7 +61,7 @@ QUERY FORMATS
       • sims 1000
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks
+STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnovers
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -788,7 +788,7 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks
             print(f"\n{'Stat':<12} {'Mean':>8} {'Mode':>8} {'95% CI':>18}")
             print(f"{'─' * 50}")
             
-            for s in ['pts', 'reb', 'ast']:
+            for s in ['pts', 'reb', 'ast', 'stl', 'blk', 'tov']:
                 mean = projection.get_stat_mean(s)
                 mode = getattr(projection, f'{s}_mode', mean)
                 ci = projection.get_stat_ci(s)
@@ -924,6 +924,21 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks
                         ast_std=player_avg.get('ast_std', 2.0),
                         ast_ci_low=player_avg.get('ast_95_ci', [0, 0])[0],
                         ast_ci_high=player_avg.get('ast_95_ci', [0, 0])[1],
+                        stl_mean=player_avg.get('stl', 0.0),
+                        stl_mode=player_avg.get('stl_mode', player_avg.get('stl', 0.0)),
+                        stl_std=player_avg.get('stl_std', 0.8),
+                        stl_ci_low=player_avg.get('stl_95_ci', [0, 0])[0],
+                        stl_ci_high=player_avg.get('stl_95_ci', [0, 0])[1],
+                        blk_mean=player_avg.get('blk', 0.0),
+                        blk_mode=player_avg.get('blk_mode', player_avg.get('blk', 0.0)),
+                        blk_std=player_avg.get('blk_std', 0.6),
+                        blk_ci_low=player_avg.get('blk_95_ci', [0, 0])[0],
+                        blk_ci_high=player_avg.get('blk_95_ci', [0, 0])[1],
+                        tov_mean=player_avg.get('tov', 0.0),
+                        tov_mode=player_avg.get('tov_mode', player_avg.get('tov', 0.0)),
+                        tov_std=player_avg.get('tov_std', 1.0),
+                        tov_ci_low=player_avg.get('tov_95_ci', [0, 0])[0],
+                        tov_ci_high=player_avg.get('tov_95_ci', [0, 0])[1],
                         play_probability=player_avg.get('play_probability', 1.0)
                     )
             
@@ -966,6 +981,32 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks
         
         if projection is None:
             return None
+
+        if opponent:
+            context = self.loader.get_player_context(
+                player_name=projection.player_name,
+                opponent=projection.opponent,
+                stat=stat
+            )
+        else:
+            recent_games = self.loader.get_recent_games(projection.player_name, n=5)
+            recent_avg = {'pts': 0, 'reb': 0, 'ast': 0, 'stl': 0, 'blk': 0, 'tov': 0, 'min': 0}
+            if recent_games:
+                for game in recent_games:
+                    for key in recent_avg:
+                        recent_avg[key] += float(game.get(key, 0) or 0)
+                count = len(recent_games)
+                recent_avg = {k: v / count for k, v in recent_avg.items()}
+            context = {
+                'recent_games': recent_games,
+                'recent_avg': recent_avg,
+                'recent_sample_size': len(recent_games),
+                'matchup_history': [],
+                'matchup_avg': {},
+                'matchup_sample_size': 0,
+                'opponent_defense': {},
+                'trend': {},
+            }
         
         return self.calculator.calculate_from_projection(
             player_name=projection.player_name,
@@ -978,5 +1019,13 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks
             opponent=projection.opponent,
             date=projection.date,
             play_probability=projection.play_probability,
-            num_sims=self.num_sims
+            num_sims=self.num_sims,
+            team=projection.team,
+            is_home=projection.is_home,
+            recent_games=context.get('recent_games'),
+            recent_avg=context.get('recent_avg'),
+            matchup_history=context.get('matchup_history'),
+            matchup_avg=context.get('matchup_avg'),
+            opponent_defense=context.get('opponent_defense'),
+            trend=context.get('trend'),
         )

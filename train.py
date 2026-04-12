@@ -26,9 +26,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
+    from src.config import load_config
     from src.training.pipeline import TrainingPipeline, create_pipeline
     from src.preprocessing.data_loader import DataLoader
     from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
+    from src.training.presets import apply_recent_history_window, resolve_training_preset
     from src.training.training_logger import get_training_logger, RichTrainingLogger
     from src.models.gpu_utils import (
         check_gpu_compatibility,
@@ -62,6 +64,13 @@ except ModuleNotFoundError:
 
     def setup_logging():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    def load_config(path):
+        class _FallbackConfig:
+            def __init__(self):
+                self.training_presets = {}
+
+        return _FallbackConfig()
 
     def build_feature_engineer(
         rolling_windows=None,
@@ -100,6 +109,145 @@ except ModuleNotFoundError:
         if enable_groups is not None and 'enable_groups' not in supported_kwargs:
             engineer.enable_groups = set(enable_groups)
         return engineer
+
+    def resolve_training_preset(preset_name, preset_overrides=None):
+        """Minimal fallback preset resolver for legacy checkouts."""
+        preset_name = str(preset_name).strip().lower()
+        if preset_name == 'small':
+            return type(
+                'TrainingPreset',
+                (),
+                {
+                    'name': 'small',
+                    'description': 'Fast CatBoost-first preset with a reduced feature set and no Transformer.',
+                    'default_mode': 'quick',
+                    'default_model_size': 'S',
+                    'transformer_enabled': False,
+                    'recent_seasons': 2,
+                    'rolling_windows': (3, 5, 10, 20),
+                    'enable_groups': (
+                        'rolling',
+                        'efficiency',
+                        'momentum',
+                        'pace',
+                        'opponent_strength',
+                    ),
+                    'disable_groups': (),
+                    'targets': ('PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'),
+                    'feature_engineer_kwargs': lambda self=None: {
+                        'rolling_windows': [3, 5, 10, 20],
+                        'enable_groups': [
+                            'rolling',
+                            'efficiency',
+                            'momentum',
+                            'pace',
+                            'opponent_strength',
+                        ],
+                        'disable_groups': [],
+                    },
+                    'as_dict': lambda self=None: {
+                        'name': 'small',
+                        'description': 'Fast CatBoost-first preset with a reduced feature set and no Transformer.',
+                        'default_mode': 'quick',
+                        'default_model_size': 'S',
+                        'transformer_enabled': False,
+                        'recent_seasons': 2,
+                        'rolling_windows': [3, 5, 10, 20],
+                        'enable_groups': [
+                            'rolling',
+                            'efficiency',
+                            'momentum',
+                            'pace',
+                            'opponent_strength',
+                        ],
+                        'disable_groups': [],
+                        'targets': ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'],
+                    },
+                },
+            )()
+        return type(
+            'TrainingPreset',
+            (),
+            {
+                'name': 'full',
+                'description': 'Full CatBoost + Transformer stack with the complete feature set.',
+                'default_mode': 'standard',
+                'default_model_size': 'M',
+                'transformer_enabled': True,
+                'recent_seasons': None,
+                'rolling_windows': (3, 5, 10, 20, 50),
+                'enable_groups': (
+                    'rolling',
+                    'efficiency',
+                    'momentum',
+                    'context',
+                    'fatigue',
+                    'matchup',
+                    'opponent_strength',
+                    'pace',
+                    'team_role',
+                    'target_encoding',
+                    'league_rank',
+                ),
+                'disable_groups': (),
+                'targets': ('PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'),
+                'feature_engineer_kwargs': lambda self=None: {
+                    'rolling_windows': [3, 5, 10, 20, 50],
+                    'enable_groups': [
+                        'rolling',
+                        'efficiency',
+                        'momentum',
+                        'context',
+                        'fatigue',
+                        'matchup',
+                        'opponent_strength',
+                        'pace',
+                        'team_role',
+                        'target_encoding',
+                        'league_rank',
+                    ],
+                    'disable_groups': [],
+                },
+                'as_dict': lambda self=None: {
+                    'name': 'full',
+                    'description': 'Full CatBoost + Transformer stack with the complete feature set.',
+                    'default_mode': 'standard',
+                    'default_model_size': 'M',
+                    'transformer_enabled': True,
+                    'recent_seasons': None,
+                    'rolling_windows': [3, 5, 10, 20, 50],
+                    'enable_groups': [
+                        'rolling',
+                        'efficiency',
+                        'momentum',
+                        'context',
+                        'fatigue',
+                        'matchup',
+                        'opponent_strength',
+                        'pace',
+                        'team_role',
+                        'target_encoding',
+                        'league_rank',
+                    ],
+                    'disable_groups': [],
+                    'targets': ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'],
+                },
+            },
+        )()
+
+    def apply_recent_history_window(df, recent_seasons, **kwargs):
+        if recent_seasons is None:
+            return df
+        if recent_seasons <= 0:
+            raise ValueError("recent_seasons must be positive when provided")
+        if df is None or df.empty or 'SEASON_ID' not in df.columns:
+            return df
+        ordered = df.sort_values('GAME_DATE') if 'GAME_DATE' in df.columns else df
+        seasons = list(dict.fromkeys(ordered['SEASON_ID'].astype(str).tolist()))
+        if len(seasons) <= recent_seasons:
+            return df
+        keep = set(seasons[-recent_seasons:])
+        return df[df['SEASON_ID'].astype(str).isin(keep)].copy()
 
 setup_logging()
 
@@ -262,14 +410,23 @@ Examples:
         help='Directory to save trained models (default: models)'
     )
     parser.add_argument(
-        '--mode', type=str, default='standard',
-        choices=['quick', 'standard', 'full'],
-        help='Training mode (default: standard)'
+        '--config', type=str, default='config/default.yaml',
+        help='Path to the YAML config file used for preset resolution (default: config/default.yaml)'
     )
     parser.add_argument(
-        '--model-size', type=normalize_model_size, default='M',
+        '--preset', type=str, default='full',
+        choices=['small', 'full'],
+        help='Training preset controlling feature groups, Transformer use, and recent-history trimming (default: full)'
+    )
+    parser.add_argument(
+        '--mode', type=str, default=None,
+        choices=['quick', 'standard', 'full'],
+        help='Training mode override; defaults come from the selected preset'
+    )
+    parser.add_argument(
+        '--model-size', type=normalize_model_size, default=None,
         choices=['auto', 'S', 'M', 'L', 'XL'],
-        help='Model size preset (default: M)'
+        help='Model size override; defaults come from the selected preset'
     )
     parser.add_argument(
         '--parallel', action='store_true',
@@ -298,17 +455,26 @@ Examples:
     
     args = parser.parse_args()
 
+    config_path = Path(args.config).expanduser()
+    runtime_config = load_config(config_path)
+    preset = resolve_training_preset(args.preset, getattr(runtime_config, 'training_presets', {}))
+
+    resolved_mode = args.mode or preset.default_mode
+    resolved_model_size = args.model_size or preset.default_model_size
+
     data_dir = resolve_runtime_path(args.data_dir, 'data')
     models_dir = resolve_runtime_path(args.models_dir, 'models')
     cache_dir = resolve_runtime_path(args.cache_dir, 'cache/training')
 
     logger.info(
-        "Training CLI starting: data_dir=%s models_dir=%s cache_dir=%s mode=%s model_size=%s parallel=%s max_workers=%s no_gpu=%s",
+        "Training CLI starting: data_dir=%s models_dir=%s cache_dir=%s config=%s preset=%s mode=%s model_size=%s parallel=%s max_workers=%s no_gpu=%s",
         data_dir,
         models_dir,
         cache_dir,
-        args.mode,
-        args.model_size,
+        config_path,
+        preset.name,
+        resolved_mode,
+        resolved_model_size,
         args.parallel,
         args.max_workers,
         args.no_gpu,
@@ -387,25 +553,51 @@ Examples:
         else:
             print("\nStep 2: Engineering features...")
         
-        disable_groups = []
+        feature_engineer_kwargs = dict(preset.feature_engineer_kwargs())
         disable_columns = []
         if args.feature_ablation:
-            ablation_probe = FeatureEngineer()
+            ablation_probe = build_feature_engineer(**preset.feature_engineer_kwargs())
             ablation_report = ablation_probe.benchmark_feature_variants(merged_df, target='PTS')
             logger.info("Feature ablation report: %s", ablation_report)
             best_variant = ablation_report.get('best', {}).get('variant')
             if best_variant == 'no_matchup':
-                disable_groups = ['matchup', 'opponent_strength']
+                feature_engineer_kwargs['disable_groups'] = ['matchup', 'opponent_strength']
             elif best_variant == 'no_context':
-                disable_groups = ['context', 'fatigue']
+                feature_engineer_kwargs['disable_groups'] = ['context', 'fatigue']
             elif best_variant == 'no_target_encoding':
-                disable_groups = ['target_encoding', 'league_rank']
+                feature_engineer_kwargs['disable_groups'] = ['target_encoding', 'league_rank']
             elif best_variant == 'formula_raw_only':
                 disable_columns = ablation_probe._formula_columns_hint()
 
+        if disable_columns:
+            feature_engineer_kwargs['disable_columns'] = disable_columns
+
+        if preset.recent_seasons is not None:
+            current_stage = "preset history trimming"
+            logger.info("Step 1.5/5: %s", current_stage.title())
+            if console and RICH_AVAILABLE:
+                console.print(
+                    f"\n[bold cyan]Applying preset recent-history window: last {preset.recent_seasons} seasons...[/bold cyan]"
+                )
+            trimmed_df = apply_recent_history_window(merged_df, preset.recent_seasons)
+            if len(trimmed_df) != len(merged_df):
+                logger.info(
+                    "Recent-history preset trimmed merged data from %s to %s rows",
+                    len(merged_df),
+                    len(trimmed_df),
+                )
+                merged_df = trimmed_df
+            elif 'SEASON_ID' not in merged_df.columns:
+                logger.warning(
+                    "Preset %s requested a recent-history window, but SEASON_ID is unavailable; training on full history.",
+                    preset.name,
+                )
+
         feature_engineer = build_feature_engineer(
-            disable_groups=disable_groups,
-            disable_columns=disable_columns,
+            rolling_windows=feature_engineer_kwargs.get('rolling_windows'),
+            enable_groups=feature_engineer_kwargs.get('enable_groups'),
+            disable_groups=feature_engineer_kwargs.get('disable_groups'),
+            disable_columns=feature_engineer_kwargs.get('disable_columns'),
         )
         full_df = feature_engineer.create_features(merged_df)
         
@@ -418,21 +610,29 @@ Examples:
         current_stage = "pipeline initialization"
         logger.info("Step 3/5: %s", current_stage.title())
         if console and RICH_AVAILABLE:
-            console.print(f"\n[bold cyan]Step 3: Initializing training pipeline ({args.mode} mode)...[/bold cyan]")
+            console.print(
+                f"\n[bold cyan]Step 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...[/bold cyan]"
+            )
         else:
-            print(f"\nStep 3: Initializing training pipeline ({args.mode} mode)...")
+            print(f"\nStep 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...")
         
         pipeline = create_pipeline(
-            mode=args.mode,
+            mode=resolved_mode,
             data_dir=data_dir,
             models_dir=models_dir,
             cache_dir=cache_dir,
-            model_size=args.model_size,
+            model_size=resolved_model_size,
             parallel=args.parallel,
             max_workers=args.max_workers,
             use_gpu=gpu_available,
             experiment_name=args.experiment_name,
         )
+        pipeline.training_preset = preset.name
+        pipeline.feature_group_selection = list(preset.enable_groups)
+        pipeline.model_config["transformer"]["enabled"] = bool(preset.transformer_enabled)
+        pipeline.model_config.setdefault("metadata", {})
+        pipeline.model_config["metadata"]["training_preset"] = preset.name
+        pipeline.model_config["metadata"]["recent_seasons"] = preset.recent_seasons
         
         # Print hardware info
         print_hardware_info(pipeline.hw_info, console)
@@ -473,6 +673,7 @@ Examples:
             summary_table.add_column("Value", style="white")
             
             summary_table.add_row("Experiment", summary['experiment_name'])
+            summary_table.add_row("Preset", summary.get('training_preset') or preset.name)
             summary_table.add_row("Models trained", str(len(summary['models_trained'])))
             summary_table.add_row("Features used", str(summary['feature_count']))
             
@@ -512,6 +713,7 @@ Examples:
             
             summary = pipeline.get_summary()
             print(f"\nExperiment: {summary['experiment_name']}")
+            print(f"Preset: {summary.get('training_preset') or preset.name}")
             print(f"Models trained: {len(summary['models_trained'])}")
             print(f"Features used: {summary['feature_count']}")
             

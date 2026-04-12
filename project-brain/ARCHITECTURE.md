@@ -31,9 +31,10 @@ Important named functions in `update_data.py`:
 
 ### Flow 2: Training
 
-1. `train.py` loads config from `config/default.yaml`.
+1. `train.py` loads `config/default.yaml`, resolves a named preset from `training_presets`, and selects the matching feature-group/Transformer configuration.
 2. `src/preprocessing/data_loader.py` reads the raw CSVs and joins player/team context.
-3. `src/preprocessing/feature_engineer.py` applies registered `FeatureGroup` modules.
+3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming.
+   - When `--feature-ablation` is enabled, the Step 2 benchmark probe also goes through `build_feature_engineer(...)` so the ablation search stays compatible with older constructors that may reject `disable_groups`.
 4. `src/training/pipeline.py` creates chronological train/validation/test splits.
 5. The training pipeline fits:
     - CatBoost regressors per target
@@ -41,6 +42,7 @@ Important named functions in `update_data.py`:
     - quantile models
     - blend weights
     - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
+    - deterministic player archetype similarity features, computed from past-only rolling/context signals rather than from a separate learned clustering artifact
 6. Training writes the runtime artifact set to `models/`:
     - per-target CatBoost model files
     - per-target CatBoost metadata files
@@ -48,7 +50,7 @@ Important named functions in `update_data.py`:
     - `feature_schema.pkl`
     - `feature_cols.pkl`
     - `blend_weights.pkl`
-    - `model_stack_metadata.pkl` recording whether the Transformer was active and the expected model count
+    - `model_stack_metadata.pkl` recording whether the Transformer was active, the expected model count, and optionally the selected preset / feature groups
 7. Before `TrainingPipeline.train()` returns, it validates that the required runtime files exist and raises instead of reporting a false-success training run.
 8. The Colab notebook wrapper `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage, launches `train.py` as a subprocess, captures stdout/stderr, and stops immediately on nonzero exit so the operator sees the real failure stage instead of only a wrapper exception.
 
@@ -66,10 +68,12 @@ Important current contract:
 
 - `src/training/pipeline.py`, `src/training/catboost_trainer.py`, `src/models/model_manager.py`, and `simulate_season.py` now share one filesystem contract for runtime artifacts.
 - `ModelManager` validates that shared artifacts plus all six per-target CatBoost backbones and metadata exist before simulation loads any models.
+- `src/models/model_manager.py` now requires `model_stack_metadata.pkl` as part of the shared runtime set so the training-side contract stays aligned with what the loader considers valid.
 - `ModelManager._validate_blend_contract()` raises when blend weights expect a Transformer model that is missing or failed to load, preventing silently uncalibrated partial-blend predictions.
 - `TrainingPipeline._validate_blend_contract()` enforces the same contract on the pipeline's `load_models()` path.
 - `TrainingPipeline._predict_transformer_batch()` delegates validation inference through `TransformerWrapper.predict_batch()`, which defaults to the eager model path and safe SDPA backend controls on CUDA.
 - `train.py` now performs explicit preflight checks for writable model/cache directories and required raw CSV inputs before expensive work begins, which makes notebook and CLI failures easier to diagnose.
+- `train.py` now also resolves training presets, passes the preset feature-group selection through `build_feature_engineer(...)`, and records the selected preset in `model_stack_metadata.pkl`.
 - `train_colab.ipynb` should not infer `train.py` from the Drive models directory; it now searches the actual repo checkout first and keeps Drive-backed `data/` and `models/` separate from code location.
 
 ### Flow 3: Simulation
@@ -150,16 +154,24 @@ Do not change casually:
 - `data_loader.py` merges raw player/team inputs and creates the base frame used by training.
 - `feature_engineer.py` is the coordination layer for modular feature groups.
 - `features/` contains the main feature logic.
-- The active feature-group stack assembled in `FeatureEngineer._build_groups()` is:
+- The active feature-group stack assembled in `FeatureEngineer._build_groups()` is (19 groups, in dependency order):
   - `RollingFeatureGroup`
   - `EfficiencyFeatureGroup`
   - `MomentumFeatureGroup`
   - `ContextualFeatureGroup`
   - `FatigueFeatureGroup`
+  - `MinutesConfidenceFeatureGroup`
+  - `RestGameDensityFeatureGroup`
   - `MatchupFeatureGroup`
   - `OpponentStrengthFeatureGroup`
   - `PaceFeatureGroup`
   - `TeamRoleFeatureGroup`
+  - `LineupStabilityFeatureGroup`
+  - `InjuryAdjustedOpportunityFeatureGroup`
+  - `TeammateUsageFeatureGroup`
+  - `RecencyFormFeatureGroup`
+  - `PlayerArchetypeFeatureGroup`
+  - `DefensePositionFeatureGroup`
   - `TargetEncodingFeatureGroup`
   - `LeagueRankingFeatureGroup`
 
@@ -167,12 +179,14 @@ Key invariant:
 
 - Training and inference rely on stable feature-column semantics. Adding or renaming columns without updating saved schema expectations is risky.
 - `rolling.py` now materializes its wide rolling/efficiency/momentum outputs in temporary structures and appends them with a single concat per group to avoid pandas fragmentation.
+- `archetype.py` computes hard labels plus soft similarities to a fixed playstyle template set, which means cold-start players can still be mapped to a nearby bucket without a separate clustering fit artifact.
 
 ### `src/training/`
 
 - Owns model fitting, experiment logging, and training orchestration.
 - `pipeline.py` is the active end-to-end training pipeline.
 - `catboost_trainer.py` owns CatBoost training and per-target artifact persistence behavior.
+- `presets.py` is the named preset boundary for the CLI: it defines the small/full stack shape, rolling-window defaults, optional recent-history trimming, and the feature-group allowlist used by `train.py`.
 - `experiment.py` writes experiment summaries under `experiments/`.
 - `feature_cache.py` contains reusable cache infrastructure but is not clearly wired into the active top-level training flow.
 

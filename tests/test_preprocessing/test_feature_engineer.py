@@ -71,6 +71,27 @@ class TestFeatureEngineer:
 
         assert fe.disable_groups == {'matchup', 'opponent_strength'}
 
+    def test_feature_engineer_enable_groups_limits_active_groups(self, sample_player_data):
+        """FeatureEngineer should only run the requested feature groups."""
+        from src.preprocessing.feature_engineer import FeatureEngineer
+
+        fe = FeatureEngineer(
+            enable_groups=['rolling', 'efficiency', 'momentum', 'pace', 'opponent_strength']
+        )
+        result = fe.create_features(sample_player_data, is_training=True)
+
+        assert isinstance(result, pd.DataFrame)
+        assert set(fe.get_group_columns()) == {
+            'rolling',
+            'efficiency',
+            'momentum',
+            'pace',
+            'opponent_strength',
+        }
+        assert 'context' not in fe.get_group_columns()
+        assert 'fatigue' not in fe.get_group_columns()
+        assert 'team_role' not in fe.get_group_columns()
+
     def test_build_feature_engineer_backfills_disable_groups_for_legacy_ctor(self, monkeypatch):
         """The training helper should adapt to older constructors without disable_groups."""
         import src.preprocessing.feature_engineer as feature_engineer_module
@@ -103,6 +124,39 @@ class TestFeatureEngineer:
         assert fe.disable_groups == {'matchup', 'opponent_strength'}
         assert fe.disable_columns == {'PACE_ADJ_USAGE'}
 
+    def test_benchmark_feature_variants_uses_compatibility_helper_for_legacy_ctor(self, monkeypatch):
+        """Ablation benchmarking should survive older constructors that reject disable_groups."""
+        import src.preprocessing.feature_engineer as feature_engineer_module
+
+        probe = feature_engineer_module.FeatureEngineer()
+
+        class LegacyFeatureEngineer(feature_engineer_module.FeatureEngineer):
+            def __init__(
+                self,
+                rolling_windows=None,
+                use_gpu=None,
+                enable_groups=None,
+                disable_columns=None,
+                max_missing_rate=0.35,
+                max_imputed_rate=0.40,
+            ):
+                super().__init__(
+                    rolling_windows=rolling_windows,
+                    use_gpu=use_gpu,
+                    enable_groups=enable_groups,
+                    disable_columns=disable_columns,
+                    max_missing_rate=max_missing_rate,
+                    max_imputed_rate=max_imputed_rate,
+                )
+
+        monkeypatch.setattr(feature_engineer_module, "FeatureEngineer", LegacyFeatureEngineer)
+
+        scores = probe.benchmark_feature_variants(_build_single_player_history(rows=30), target="PTS")
+
+        assert "best" in scores
+        assert scores["best"]["variant"] in scores
+        assert scores["best"]["mae"] >= 0
+
     def test_feature_engineer_create_features(self, sample_player_data):
         """Test that create_features returns a DataFrame with new columns."""
         from src.preprocessing.feature_engineer import FeatureEngineer
@@ -113,6 +167,46 @@ class TestFeatureEngineer:
         assert isinstance(result, pd.DataFrame)
         assert len(result) > 0
         assert len(result.columns) > len(sample_player_data.columns)
+        assert "ARCHETYPE_ID" in result.columns
+        assert "SIMILARITY_TO_PLAYMAKER" in result.columns
+
+    def test_player_archetype_feature_group_assigns_cold_start_style(self):
+        """The archetype group should map sparse rows to the closest template."""
+        from src.preprocessing.features.archetype import PlayerArchetypeFeatureGroup
+
+        group = PlayerArchetypeFeatureGroup()
+        df = pd.DataFrame(
+            {
+                "PLAYER_ID": [1, 2],
+                "GAME_DATE": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+                "ROLL_MIN_AVG_10": [35.0, 31.0],
+                "PACE_ADJ_USAGE": [0.29, 0.12],
+                "ROLL_PTS_PER_MIN_10": [0.42, 0.30],
+                "ROLL_REB_PER_MIN_10": [0.10, 0.42],
+                "ROLL_AST_PER_MIN_10": [0.32, 0.07],
+                "ROLL_STL_AVG_10": [0.9, 0.7],
+                "ROLL_BLK_AVG_10": [0.2, 1.2],
+                "ROLL_TOV_AVG_10": [2.0, 1.0],
+                "ROLL_3PT_FREQ_10": [0.34, 0.08],
+                "ROLL_EFG_PCT_10": [0.56, 0.58],
+                "ROLL_FT_RATE_10": [0.36, 0.22],
+                "TEAM_PACE_10": [102.0, 98.0],
+                "RAW_USAGE": [0.29, 0.12],
+                "RAW_PTS_SHARE": [0.28, 0.14],
+                "RAW_REB_OPPORTUNITY": [0.25, 0.58],
+            }
+        )
+
+        result = group.create(df)
+
+        assert list(result["ARCHETYPE_ID"]) == [0, 2]
+        assert result.loc[0, "SIMILARITY_TO_PLAYMAKER"] == result.loc[
+            0, [f"SIMILARITY_TO_{name.upper()}" for name in group.ARCHETYPE_NAMES]
+        ].max()
+        assert result.loc[1, "SIMILARITY_TO_REBOUND_BIG"] == result.loc[
+            1, [f"SIMILARITY_TO_{name.upper()}" for name in group.ARCHETYPE_NAMES]
+        ].max()
+        assert result["ARCHETYPE_CONFIDENCE"].between(0.0, 1.0).all()
 
     def test_feature_engineer_avoids_fragmentation_warnings(self, sample_player_data):
         """Batch column assembly should not emit pandas fragmentation warnings."""

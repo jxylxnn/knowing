@@ -2,18 +2,22 @@
 
 ## NOW
 
-### Export complete projection stats for query-time use
+### Wire new feature groups into FeatureEngineer and training presets — DONE
 
-- Why it matters: the query CLI claims support for `stl`, `blk`, and `tov`, but exported projection CSVs currently appear incomplete for those stats.
+- Completed 2026-04-12. All seven new feature groups are now wired into `FeatureEngineer._build_groups()`, the `full` training preset in both `config/default.yaml` and `src/training/presets.py`, and `FeatureSelector.SAFE_PREFIXES` in `src/utils/prediction_utils.py`. The `small` preset is unchanged. Preprocessing tests pass (19/19). `FeatureEngineer()` instantiates with 19 groups total.
+
+### Add unit tests for the seven new feature groups
+
+- Why it matters: the new groups are import-tested and smoke-tested with synthetic data but have no dedicated unit tests covering edge cases (cold start, single-game players, missing optional columns, NaN propagation). The three newest groups (`InjuryAdjustedOpportunityFeatureGroup`, `TeammateUsageFeatureGroup`, `DefensePositionFeatureGroup`) use row-level iteration for teammate-set and opponent-position lookups, which may be slow on large datasets and should be tested for correctness.
 - Likely files:
-  - `src/simulation/report_generator.py`
-  - `src/query/projection_loader.py`
-  - `src/query/interactive_cli.py`
-  - `tests/test_query/`
+  - `tests/test_preprocessing/test_feature_engineer.py` (or a new test file)
 - Done when:
-  - projection exports include all six target stats
-  - loader code reads them consistently
-  - cached query results for those stats are non-default and tested
+  - each group has tests for: empty input, missing optional columns, single-player single-game, multi-player multi-game, NaN fill behavior
+  - all tests pass
+
+### Export complete projection stats for query-time use — DONE
+
+- Completed 2026-04-12. All six target stats (PTS, REB, AST, STL, BLK, TOV) are now exported from `report_generator.py::export_player_projections()` with proper column names (`PROJ_STL_MEAN/MODE`, `STL_CI_LOW/HIGH`, `STL_99_CI_LOW/HIGH`, etc.). `projection_loader.py::STAT_COLUMNS` now maps all six stats consistently, and `_row_to_projection()` uses this mapping uniformly instead of fallback `get_first_float()` logic. `interactive_cli.py::HELP_TEXT` now includes `tov/turnovers` in the stats list.
 
 ### Remove or clearly quarantine dead code in `GameSimulator`
 
@@ -39,6 +43,35 @@
   - a missing `train.py` produces the new path-diagnostic error
 
 ## NEXT
+
+### Benchmark the archetype feature group on live CSVs
+
+- Why it matters: the deterministic player-style features are now wired into the default stack, but the actual cold-start lift still needs a live measurement on current data.
+- Likely files:
+  - `src/preprocessing/features/archetype.py`
+  - `src/preprocessing/feature_engineer.py`
+  - `src/training/presets.py`
+  - `train.py`
+  - `data/nba_players.csv`
+  - `data/nba_games.csv`
+- Done when:
+  - `python train.py` or `python train.py --preset small` completes with the archetype group active
+  - baseline and archetype-enabled runs are compared on the current dataset
+  - any unexpected schema or loading mismatch is documented
+
+### Benchmark the new `small` training preset on live CSVs
+
+- Why it matters: the preset is implemented and test-covered, but the real speedup versus the full stack still needs a live measurement on the current data files.
+- Likely files:
+  - `train.py`
+  - `src/training/presets.py`
+  - `src/training/pipeline.py`
+  - `data/nba_players.csv`
+  - `data/nba_games.csv`
+- Done when:
+  - `python train.py --preset small` completes on the current dataset
+  - runtime and artifact output are compared against the full preset
+  - any unexpected artifact or load mismatch is documented
 
 ### Add a strict simulation mode for optional scraper degradation
 
@@ -168,6 +201,44 @@
 
 ## DONE
 
+### Stabilize the Step 2 feature-ablation compatibility path
+
+- Completed on 2026-04-11.
+- Delivered:
+  - `train.py` now creates the ablation probe through `build_feature_engineer(...)` instead of a raw `FeatureEngineer()` call.
+  - `src/preprocessing/feature_engineer.py` now uses `build_feature_engineer(...)` inside `benchmark_feature_variants()` so the ablation benchmark itself can tolerate older constructors that lack `disable_groups`.
+  - `tests/test_preprocessing/test_feature_engineer.py` now simulates a legacy constructor without `disable_groups` and verifies the ablation benchmark still completes.
+  - `tests/test_training/test_train_entrypoint.py` now guards both the helper call and the absence of a bare Step 2 `FeatureEngineer()` instantiation.
+- Note:
+  - The compatibility-safe Step 2 path now covers both the final feature-engineering setup and the ablation benchmark probe.
+
+### Add deterministic player archetype similarity features
+
+- Completed on 2026-04-11.
+- Delivered:
+  - `src/preprocessing/features/archetype.py` adds a dedicated `PlayerArchetypeFeatureGroup` that builds past-only style profiles and compares them against fixed playstyle templates.
+  - The group emits `ARCHETYPE_ID`, `ARCHETYPE_CONFIDENCE`, `ARCHETYPE_SIMILARITY_PRIMARY`, `ARCHETYPE_SIMILARITY_SECONDARY`, and `SIMILARITY_TO_*` columns for playmaker/shot-creator/big/wing/rim-runner/bench-scorer style buckets.
+  - `FeatureEngineer` now runs the archetype group as part of the default preprocessing flow.
+  - `src/training/presets.py` and `config/default.yaml` now include `archetype` in both the `full` and `small` preset group lists.
+  - `FeatureSelector` now treats `ARCHETYPE_` and `SIMILARITY_TO_` columns as safe engineered features.
+  - Regression tests now cover archetype column creation, schema compatibility, and cold-start style assignment.
+- Note:
+  - The live performance gain against the current CSVs is still pending and has been promoted to `NEXT`.
+
+### Add a small CatBoost-first training preset
+
+- Completed on 2026-04-11.
+- Delivered:
+  - `src/training/presets.py` defines `small` and `full` presets plus the recent-history trim helper.
+  - `config/default.yaml` now carries YAML preset definitions for CLI/config resolution.
+  - `src/config/config.py` now loads `training_presets` as raw config data.
+  - `train.py` now resolves presets, passes the preset feature-group allowlist into `build_feature_engineer(...)`, disables the Transformer for the small preset, and trims to the most recent two seasons when `SEASON_ID` is present.
+  - `src/training/pipeline.py` now records preset/feature-group metadata in `model_stack_metadata.pkl` when available.
+  - `src/models/model_manager.py` now treats `model_stack_metadata.pkl` as part of the shared runtime artifact set.
+  - Regression tests now cover preset resolution, recent-history trimming, feature-group allowlists, and CatBoost-only artifact loading.
+- Note:
+  - The live real-data timing comparison is still pending and has been promoted to `NEXT`.
+
 ### Stabilize Transformer validation inference on CUDA
 
 - Completed on 2026-04-02 in code and unit tests.
@@ -288,3 +359,20 @@
   - venv rebuilt from Python 3.13 to Python 3.12 with all dependencies installing cleanly.
   - Data fetched via `update_data.py --season 2024-25 --season 2025-26`.
   - Full regression run: `110 passed, 0 failed`.
+
+### Add regression tests for the 6-stat export/load contract
+
+- Completed on 2026-04-12.
+- Delivered:
+  - `tests/test_query/test_six_stat_contract.py` with 15 regression tests covering:
+    - Export contains all 6 stat columns (PTS, REB, AST, STL, BLK, TOV)
+    - Export values match input values
+    - Loader reads all 6 stats correctly
+    - `get_stat_mean()` works for all 6 stats
+    - `get_stat_ci()` works for all 6 stats
+    - `STAT_COLUMNS` mapping contains all 6 stats with correct keys
+    - Missing TOV columns loads with defaults (graceful degradation)
+    - HELP_TEXT includes `tov/turnovers`
+    - All 6 stats return real values, not 0.0 defaults
+    - `STAT_DISPLAY_NAMES` contains all 6 stats
+  - Full regression run: `132 passed, 0 failed`.

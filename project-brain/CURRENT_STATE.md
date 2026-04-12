@@ -2,16 +2,20 @@
 
 ## Snapshot
 
-- Observed date: 2026-04-11
+- Observed date: 2026-04-12
 - Repository health: good
 - Test status in this workspace:
+  - full suite after adding 6-stat export/load regression tests: `132 passed, 0 failed`
+  - preprocessing tests after wiring 7 new feature groups into pipeline: `19 passed, 0 failed`
+  - full suite after the player archetype feature-group implementation: `116 passed, 0 failed`
+  - full suite after the small-preset implementation: `115 passed, 0 failed`
   - full suite after environment fix and torch-shim fix: `110 passed, 0 failed`
   - prior full suite after blend-contract fix: `106 passed, 4 failed` (4 torch import failures now resolved)
   - baseline audit run: `83 passed, 2 skipped`
   - post-fix targeted regression run: `12 passed`
   - scraper/input-health regression run: `29 passed`
   - preprocessing regression run after the rolling refactor: `14 passed`
-  - train entrypoint / FeatureEngineer compatibility regression run: `19 passed`
+  - train entrypoint / FeatureEngineer compatibility regression run: `20 passed, 1 warning`
   - full suite after the rolling refactor: `94 passed, 2 skipped`
   - blend-contract enforcement regression run: `21 passed` (model-manager + runtime-artifact tests)
 - The venv has been rebuilt with Python 3.12 and all dependencies install cleanly. `torch`, `catboost`, `sklearn`, and all project modules import without error.
@@ -25,9 +29,13 @@
 - Training internals for CatBoost/Transformer components are implemented and testable in isolation.
 - Transformer validation and runtime inference now default to an eager path with a safe SDPA backend fallback; `torch.compile` is disabled by default for this model path.
 - The active training path now persists per-target CatBoost runtime artifacts and validates the required `models/` contract before returning success.
+- `train.py` now supports named presets from `config/default.yaml` and `src/training/presets.py`; the new `small` preset disables the Transformer, keeps all six targets, trims the feature stack to six high-value groups, and can optionally limit training to the two most recent seasons when `SEASON_ID` exists.
+- Feature engineering now includes deterministic player archetype/similarity features that map sparse players to a stable style bucket using past-only rolling/context signals.
 - `train.py` now preflights writable model/cache directories and required raw CSV inputs before doing expensive work, and it emits stage names so subprocess callers can tell where a failure occurred.
 - `FeatureSchema` is explicitly exported from `src.utils.prediction_utils` and re-exported from `src.utils`, with a clean-process regression test guarding the import contract.
 - `train.py` now routes feature-engineer construction through a compatibility-safe helper that backfills `disable_groups` and related filters for older checkouts that do not accept that keyword directly.
+- The Step 2 ablation benchmark in `FeatureEngineer.benchmark_feature_variants()` now uses the same compatibility-safe helper, so older constructors that reject `disable_groups` no longer crash during the benchmark probe itself.
+- The training pipeline now records `model_stack_metadata.pkl` with the selected preset and feature-group list when the CLI provides them; `ModelManager.validate_runtime_artifacts()` now treats that metadata file as part of the shared runtime contract.
 - The `train.py` Step 2 path now has an entrypoint-level regression test that asserts the CLI uses `build_feature_engineer(...)` for ablation filters instead of passing compatibility-sensitive kwargs directly into `FeatureEngineer(...)`.
 - `train_colab.ipynb` now resolves the repo checkout separately from Drive-backed data/models, captures full stdout/stderr from `train.py`, prints the return code, and fails immediately on nonzero exit instead of hiding the real traceback behind `CalledProcessError`.
 - `ModelManager` now rejects incomplete runtime artifact sets instead of silently loading a partial model directory.
@@ -36,6 +44,9 @@
 - `TrainingPipeline._save_model_stack_metadata()` persists explicit metadata (`model_stack_metadata.pkl`) indicating whether the Transformer was active during training and the expected model count.
 - `simulate_season.py` now uses `ModelManager.load_models()` for startup validation instead of hard-coding a single `pts_catboost.cbm` existence check.
 - Rolling feature generation now batches wide feature columns before concatenating them back into the frame, which removed the prior pandas fragmentation warning flood.
+- Seven new feature groups are implemented, import-tested, and **wired into the active pipeline**: `MinutesConfidenceFeatureGroup` (minutes variance, trend, starter rate, cold start), `RecencyFormFeatureGroup` (recent-vs-season deltas, form ratios, volatility, usage/efficiency/min deltas), `LineupStabilityFeatureGroup` (starter rate, teammate Jaccard continuity, rotation size variance, minutes rank), `RestGameDensityFeatureGroup` (schedule density, B2B detection, rest advantage, composite density score), `InjuryAdjustedOpportunityFeatureGroup` (missing high-usage teammate detection, same-minutes-position missing count, MIN/usage boost, team absence rolling count), `TeammateUsageFeatureGroup` (top-usage teammate active flag, missing teammate FGA/AST/REB shares, missing shot volume, active scoring depth), and `DefensePositionFeatureGroup` (opponent defensive stats allowed by position group — guard/wing/big — including PTS/REB/AST/STL/BLK/TOV allowed, defensive rank, recent PTS allowed). All follow the batched-column pattern, use `shift(1)` for leakage prevention, and are registered in `__init__.py`.
+- `FeatureEngineer._build_groups()` now returns 19 groups (12 original + 7 new). The `full` training preset in both `config/default.yaml` and `src/training/presets.py` includes all 19 groups. The `small` preset is unchanged and does not include the new groups by default.
+- `FeatureSelector.SAFE_PREFIXES` in `src/utils/prediction_utils.py` now includes 7 new prefixes (`MIN_CONF_`, `RECENCY_`, `LINEUP_`, `INJURY_OPP_`, `TEAMMATE_`, `DEF_POS_`, `SCHED_`) so the new feature columns pass the safe-column filter during training and inference.
 - The query subsystem in `src/query/` is structurally complete and supported by tests.
 - Many unit tests around preprocessing, model wrappers, and probability math are green.
 - Cleanup tooling in `clear_cache.py` is clear and conservative about preserving raw data.
@@ -44,8 +55,10 @@
 
 - Simulation stack is feature-rich and still depends on volatile third-party scrapers, but degraded optional inputs are now surfaced explicitly in per-game metadata and CLI output.
 - The blend-weight/Transformer artifact contract is now enforced at load time, but existing model directories trained with a Transformer that later lose the `attention_transformer.pkl` artifact will fail loudly instead of silently degrading — which is the intended behavior.
- - Query flow supports six stats at the parser/calculator level, but projection exports only appear complete for `PTS`, `REB`, and `AST`.
-- The train-to-simulation artifact contract is covered by focused regression tests. A live `python train.py` smoke test was not completed due to training runtime length, but preflight checks and all 110 unit tests pass.
+- Query flow supports all six stats (PTS, REB, AST, STL, BLK, TOV) at the parser/calculator level, and projection exports are now complete for all six stats.
+- The train-to-simulation artifact contract is covered by focused regression tests. A live `python train.py` smoke test was not completed due to training runtime length, but preflight checks and all 116 unit tests pass.
+- The archetype feature group is implemented and test-covered, but a live benchmark against the current CSVs is still pending, so the real cold-start lift is not yet measured in this workspace.
+- The new small preset is test-covered and loads successfully with CatBoost-only artifacts, but a live runtime measurement on the current CSVs is still pending.
 - The Colab notebook launch path has been hardened in code, but a live run against mounted Drive data is still needed to confirm the exact traceback the user was seeing and to verify the full notebook-to-training flow with real CSV inputs and the repo-root detection flow.
  - The `disable_groups` constructor mismatch appears fixed in the active repo checkout; if Step 2 still fails in Colab, the most likely cause is a stale or mixed checkout rather than the current `train.py` call site.
  - Transformer validation inference has been repaired in code, but a live CUDA smoke test is still needed to confirm the exact GPU/runtime combination that previously crashed.
@@ -71,11 +84,12 @@
 - The concrete config/state regressions previously identified in `ScheduleScraper`, `LineupScraper`, and `BasketballRefScraper` are fixed.
 - Live upstream changes can still degrade optional context inputs, but the simulator now reports those conditions explicitly instead of silently masking them.
 
-### Projection export/query mismatch
+### Projection export/query mismatch — FIXED
 
-- `src/simulation/report_generator.py` exports `PTS`, `REB`, and `AST` projection columns.
-- `src/query/projection_loader.py` and the CLI support `STL`, `BLK`, and `TOV`, but those values are not fully exported from simulation output.
-- Cached queries for those stats therefore degrade to incomplete or default behavior.
+- `src/simulation/report_generator.py` now exports all 6 stat columns (PTS, REB, AST, STL, BLK, TOV) with MEAN/MODE/CI for each.
+- `src/query/projection_loader.py::STAT_COLUMNS` now maps all 6 stats and `_row_to_projection()` uses this mapping uniformly.
+- `src/query/interactive_cli.py::HELP_TEXT` now includes `tov/turnovers`.
+- Regression tests in `tests/test_query/test_six_stat_contract.py` cover the full export/load contract.
 
 ## Current Limitations
 
@@ -102,12 +116,13 @@
 
 ## Immediate Priorities
 
-1. Export `STL`, `BLK`, and `TOV` projection columns and align `ProjectionLoader` expectations with the report schema.
-2. Remove or reconcile dead simulation code in `src/simulation/game_simulator.py` to reduce maintenance ambiguity.
-3. Run one live `train.py` -> `ModelManager.load_models()` -> `simulate_season.py` smoke test in a healthy local environment with real CSV inputs (preflight checks and unit tests confirmed; full training run deferred due to runtime length).
-4. Decide whether to add a strict fail-fast mode for optional scraper degradation on top of the new default warn-and-continue behavior.
-5. If a Transformer-trained model directory is deployed where the Transformer artifact may be unavailable, decide whether to retrain with the Transformer disabled or provide the artifact.
-5. If needed, collect a real-data performance profile for the rolling feature path to compare against the synthetic benchmark.
+1. Benchmark `python train.py --preset small` against the full preset on live CSVs, now that archetype features are part of the default stack, to confirm the intended iteration-speed improvement and quantify any cold-start gain.
+2. ~~Export `STL`, `BLK`, and `TOV` projection columns and align `ProjectionLoader` expectations with the report schema.~~ DONE — completed 2026-04-12 with regression tests.
+3. Remove or reconcile dead simulation code in `src/simulation/game_simulator.py` to reduce maintenance ambiguity.
+4. Run one live `train.py` -> `ModelManager.load_models()` -> `simulate_season.py` smoke test in a healthy local environment with real CSV inputs (preflight checks and unit tests confirmed; full training run deferred due to runtime length).
+5. Decide whether to add a strict fail-fast mode for optional scraper degradation on top of the new default warn-and-continue behavior.
+6. If a Transformer-trained model directory is deployed where the Transformer artifact may be unavailable, decide whether to retrain with the Transformer disabled or provide the artifact.
+7. If needed, collect a real-data performance profile for the rolling feature path to compare against the synthetic benchmark.
 
 ## Testing Status
 
@@ -157,6 +172,10 @@
   - `./venv/bin/python3.12 -m py_compile train.py src/preprocessing/feature_engineer.py tests/test_training/test_train_entrypoint.py`
   - `./venv/bin/python3.12 -m pytest tests/test_preprocessing/test_feature_engineer.py tests/test_training/test_training_pipeline_colab.py tests/test_training/test_train_entrypoint.py -q`
   - Result: `19 passed`
+- Verified on 2026-04-11 after closing the ablation-benchmark compatibility gap:
+  - `python -m py_compile train.py src/preprocessing/feature_engineer.py tests/test_training/test_train_entrypoint.py`
+  - `pytest tests/test_preprocessing/test_feature_engineer.py tests/test_training/test_train_entrypoint.py -q`
+  - Result: `20 passed, 1 warning`
 - Verified on 2026-04-03 during the Colab-launch regression check in this workspace:
   - `./venv/bin/python3.12 -m pytest tests/test_training/test_training_pipeline_colab.py tests/test_training/test_runtime_artifact_contract.py tests/test_models/test_transformer_model.py -q`
   - Result: `6 passed, 4 skipped`
@@ -164,6 +183,10 @@
   - batched implementation: `1.554s`
   - reconstructed old insertion path: `1.543s`
   - result: roughly parity runtime while eliminating the fragmentation warnings from the new path
+- Verified on 2026-04-12 after adding 6-stat export/load regression tests:
+  - `pytest tests/ -v`
+  - Result: `132 passed, 0 failed`
+  - New tests in `tests/test_query/test_six_stat_contract.py` cover the full export/load contract for all 6 stats (PTS, REB, AST, STL, BLK, TOV)
 - Two tests are skipped by design around Transformer runtime constraints.
 - The earlier 1612-warning flood from pandas `PerformanceWarning` messages in `src/preprocessing/features/rolling.py` is no longer present in the post-refactor test runs.
 

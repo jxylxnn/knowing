@@ -706,7 +706,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-014: `train.py` Could Fail When `FeatureEngineer` Lacked `disable_groups`
 
-- Status: fixed in code on 2026-04-03, verified with targeted preprocessing and entrypoint regression tests; live import confirmed on 2026-04-11
+- Status: fixed in code on 2026-04-03; ablation-benchmark path also verified with targeted preprocessing and entrypoint regression tests on 2026-04-11
 - Severity: high
 - Confidence: high
 
@@ -725,14 +725,16 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - The current repository already accepts `disable_groups`, but the user-reported failure indicates a stale or divergent runtime checkout where that constructor keyword was missing.
 - Fix evidence now in repo:
   - `src/preprocessing/feature_engineer.py` now exposes `build_feature_engineer(...)`, which filters supported constructor kwargs and backfills `disable_groups`/`disable_columns` attributes when necessary.
-  - `train.py` now uses that helper for Step 2 feature-engineering setup.
-  - `tests/test_preprocessing/test_feature_engineer.py` covers both the current constructor contract and a simulated legacy constructor without `disable_groups`.
-  - `tests/test_training/test_train_entrypoint.py` statically verifies that the entrypoint keeps calling `build_feature_engineer(...)` with the ablation filters instead of passing them directly into `FeatureEngineer(...)`.
+  - `train.py` now uses that helper for Step 2 feature-engineering setup and for the ablation probe.
+  - `src/preprocessing/feature_engineer.py::benchmark_feature_variants()` now uses the same helper for the internal variant engineers, so the benchmark path itself stays compatible with older constructors.
+  - `tests/test_preprocessing/test_feature_engineer.py` covers both the current constructor contract and a simulated legacy constructor without `disable_groups`, including the ablation benchmark path.
+  - `tests/test_training/test_train_entrypoint.py` statically verifies that the entrypoint keeps calling `build_feature_engineer(...)` with the ablation filters instead of passing them directly into `FeatureEngineer(...)`, and it rejects a bare Step 2 `FeatureEngineer()` instantiation.
 
 ### Reproduction
 
 - Compatibility regression test simulates an older constructor without `disable_groups` and verifies the helper still applies the requested group filter.
-- Entrypoint regression test parses `train.py` and verifies the active Step 2 call site routes the ablation filters through `build_feature_engineer(...)`.
+- Entrypoint regression test parses `train.py` and verifies the active Step 2 call site routes the ablation filters through `build_feature_engineer(...)` without a bare constructor call in the runtime path.
+- The same regression set also exercises `FeatureEngineer.benchmark_feature_variants()` against a simulated legacy constructor, proving the ablation benchmark can no longer crash on the missing keyword.
 
 ### Suspected Cause
 

@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -134,6 +135,15 @@ def test_training_pipeline_persists_runtime_artifact_contract(tmp_path, monkeypa
     from src.models.model_manager import ModelManager
 
     pipeline = _build_pipeline(tmp_path, monkeypatch)
+    pipeline.training_preset = "small"
+    pipeline.feature_group_selection = [
+        "rolling",
+        "efficiency",
+        "momentum",
+        "pace",
+        "opponent_strength",
+        "archetype",
+    ]
     fit_df, val_df = _build_contract_frames()
 
     monkeypatch.setattr(
@@ -155,6 +165,21 @@ def test_training_pipeline_persists_runtime_artifact_contract(tmp_path, monkeypa
     assert (pipeline.models_dir / "feature_schema.pkl").exists()
     assert (pipeline.models_dir / "feature_cols.pkl").exists()
     assert (pipeline.models_dir / "blend_weights.pkl").exists()
+    assert (pipeline.models_dir / "model_stack_metadata.pkl").exists()
+    assert not (pipeline.models_dir / "attention_transformer.pkl").exists()
+
+    metadata = joblib.load(pipeline.models_dir / "model_stack_metadata.pkl")
+    assert metadata["transformer_enabled"] is False
+    assert metadata["model_count"] == 1
+    assert metadata["training_preset"] == "small"
+    assert metadata["feature_groups"] == [
+        "rolling",
+        "efficiency",
+        "momentum",
+        "pace",
+        "opponent_strength",
+        "archetype",
+    ]
 
     manager = ModelManager(
         data_dir=str(tmp_path / "data"),
@@ -168,7 +193,9 @@ def test_training_pipeline_persists_runtime_artifact_contract(tmp_path, monkeypa
     assert set(manager.blend_weights) == set(pipeline.TARGETS)
 
 
-def test_training_pipeline_fails_loudly_when_runtime_artifacts_are_missing(tmp_path, monkeypatch):
+def test_training_pipeline_fails_loudly_when_runtime_artifacts_are_missing(
+    tmp_path, monkeypatch
+):
     pipeline = _build_pipeline(tmp_path, monkeypatch)
     fit_df, val_df = _build_contract_frames()
 
@@ -182,7 +209,9 @@ def test_training_pipeline_fails_loudly_when_runtime_artifacts_are_missing(tmp_p
         pipeline.train(fit_df, val_df)
 
 
-def test_transformer_validation_batch_prediction_delegates_to_wrapper(tmp_path, monkeypatch):
+def test_transformer_validation_batch_prediction_delegates_to_wrapper(
+    tmp_path, monkeypatch
+):
     from src.training.pipeline import TrainingPipeline
 
     pipeline = TrainingPipeline(
@@ -199,7 +228,9 @@ def test_transformer_validation_batch_prediction_delegates_to_wrapper(tmp_path, 
 
         def predict_batch(self, sequences):
             self.calls += 1
-            return np.full((len(sequences), len(pipeline.TARGETS)), 2.0, dtype=np.float32)
+            return np.full(
+                (len(sequences), len(pipeline.TARGETS)), 2.0, dtype=np.float32
+            )
 
     transformer = DummyTransformer()
     sequences = np.zeros((3, 4, 5), dtype=np.float32)
@@ -270,3 +301,38 @@ def test_feature_schema_import_contract_survives_clean_process(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "FeatureSchema" in result.stdout
     assert "TrainingPipeline" in result.stdout
+
+
+def test_model_manager_rejects_missing_transformer_when_blend_weights_expect_it(
+    tmp_path, monkeypatch
+):
+    from src.models.model_manager import ModelManager
+    from src.training import catboost_trainer as catboost_module
+
+    monkeypatch.setattr(catboost_module, "CatBoostRegressor", FakeCatBoostModel)
+
+    pipeline = _build_pipeline(tmp_path, monkeypatch)
+    fit_df, val_df = _build_contract_frames()
+
+    monkeypatch.setattr(
+        pipeline,
+        "_train_catboost_parallel",
+        lambda fit, val: _make_fake_catboost_results(pipeline),
+    )
+
+    pipeline.train(fit_df, val_df)
+
+    import joblib
+
+    blend_weights = joblib.load(pipeline.models_dir / "blend_weights.pkl")
+    blend_weights["PTS"]["transformer"] = 0.3
+    blend_weights["PTS"]["catboost"] = 0.7
+    joblib.dump(blend_weights, pipeline.models_dir / "blend_weights.pkl")
+
+    manager = ModelManager(
+        data_dir=str(tmp_path / "data"),
+        models_dir=str(pipeline.models_dir),
+    )
+
+    with pytest.raises(FileNotFoundError, match="attention_transformer.pkl"):
+        manager.load_models()

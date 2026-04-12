@@ -20,6 +20,7 @@ from src.models.base import ModelRegistry
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
 from src.training.catboost_trainer import CatBoostTrainer
+from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
 
@@ -34,23 +35,23 @@ def _load_transformer_wrapper():
 class ModelManager:
     """Bridge between saved models and the live simulator/query code."""
 
-    TARGETS = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
-    CORE_TARGETS = ['PTS', 'REB', 'AST']
+    TARGETS = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+    CORE_TARGETS = ["PTS", "REB", "AST"]
 
     _FALLBACK_VALUES = {
-        'PTS': 10.0,
-        'REB': 4.5,
-        'AST': 2.5,
-        'STL': 0.8,
-        'BLK': 0.6,
-        'TOV': 1.5,
+        "PTS": 10.0,
+        "REB": 4.5,
+        "AST": 2.5,
+        "STL": 0.8,
+        "BLK": 0.6,
+        "TOV": 1.5,
     }
 
     def __init__(
         self,
-        data_dir: str = 'data',
-        models_dir: str = 'models',
-        model_size: str = 'M',
+        data_dir: str = "data",
+        models_dir: str = "models",
+        model_size: str = "M",
         model_config: Optional[Dict[str, Any]] = None,
         registry: Optional[ModelRegistry] = None,
     ):
@@ -64,7 +65,7 @@ class ModelManager:
         Path(self.models_dir).mkdir(parents=True, exist_ok=True)
 
         self.core_targets = list(self.CORE_TARGETS)
-        self.secondary_targets = ['STL', 'BLK', 'TOV']
+        self.secondary_targets = ["STL", "BLK", "TOV"]
         self.targets = list(self.TARGETS)
 
         self.models: Dict[str, Any] = {}
@@ -74,18 +75,20 @@ class ModelManager:
         self.blend_weights: Dict[str, Dict[str, float]] = {}
         self.feature_cols: Optional[List[str]] = None
         self.cat_features: List[str] = []
+        self.feature_schema: Optional[FeatureSchema] = None
 
         self.use_gpu = False
         self.device = None
-        self.feature_engineer = FeatureEngineer(use_gpu=False)
+        self.feature_engineer = FeatureEngineer()
+        self.feature_selector = FeatureSelector(self.targets)
 
         if model_config is not None:
             self.model_config = model_config
-            self.hw_info = model_config.get('metadata', {})
+            self.hw_info = model_config.get("metadata", {})
         else:
             normalized_size = normalize_model_size(model_size)
             self.model_config, self.hw_info = get_model_config(
-                force_size=normalized_size if normalized_size is not None else 'M'
+                force_size=normalized_size if normalized_size is not None else "M"
             )
 
         self.registry = registry or ModelRegistry(Path(self.models_dir))
@@ -93,14 +96,46 @@ class ModelManager:
             "ModelManager initialized (data_dir=%s, models_dir=%s, tier=%s)",
             self.data_dir,
             self.models_dir,
-            self.hw_info.get('tier', model_size),
+            self.hw_info.get("tier", model_size),
         )
+
+    def validate_runtime_artifacts(self) -> None:
+        """Raise when the on-disk runtime artifact contract is incomplete."""
+        shared_required = [
+            Path(self.models_dir) / "feature_schema.pkl",
+            Path(self.models_dir) / "feature_cols.pkl",
+            Path(self.models_dir) / "blend_weights.pkl",
+            Path(self.models_dir) / "model_stack_metadata.pkl",
+        ]
+        missing: List[str] = [
+            str(path) for path in shared_required if not path.exists()
+        ]
+
+        per_target_missing: Dict[str, List[str]] = {}
+        for target in self.targets:
+            target_missing = CatBoostTrainer.missing_runtime_artifacts(
+                self.models_dir, target
+            )
+            if target_missing:
+                per_target_missing[target] = target_missing
+
+        if per_target_missing:
+            missing.extend(
+                f"{target}: {', '.join(paths)}"
+                for target, paths in sorted(per_target_missing.items())
+            )
+
+        if missing:
+            raise FileNotFoundError(
+                "Incomplete runtime model artifact set in "
+                f"{self.models_dir}. Missing: {' | '.join(missing)}"
+            )
 
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load raw CSVs and build the feature-engineered train/test split."""
         data_dir = Path(self.data_dir)
-        players_file = data_dir / 'nba_players.csv'
-        games_file = data_dir / 'nba_games.csv'
+        players_file = data_dir / "nba_players.csv"
+        games_file = data_dir / "nba_games.csv"
 
         if not players_file.exists():
             raise ValueError(f"Players file not found: {players_file}")
@@ -116,15 +151,25 @@ class ModelManager:
         if full_df.empty:
             raise ValueError("Feature engineering resulted in empty dataset")
 
-        required_cols = ['PLAYER_ID', 'GAME_DATE'] + self.core_targets
+        required_cols = ["PLAYER_ID", "GAME_DATE"] + self.core_targets
         missing_cols = [c for c in required_cols if c not in full_df.columns]
         if missing_cols:
-            raise ValueError(f"Missing required columns after feature engineering: {missing_cols}")
+            raise ValueError(
+                f"Missing required columns after feature engineering: {missing_cols}"
+            )
 
-        split_date_str = self.model_config.get('training', {}).get('test_split_date', '2024-03-01')
+        self.feature_schema = self.feature_selector.fit(
+            full_df, group_columns=self.feature_engineer.get_group_columns()
+        )
+        self.feature_cols = self.feature_schema.feature_cols
+        self.cat_features = list(self.feature_schema.categorical_cols)
+
+        split_date_str = self.model_config.get("training", {}).get(
+            "test_split_date", "2024-03-01"
+        )
         split_date = pd.to_datetime(split_date_str)
-        train_df = full_df[full_df['GAME_DATE'] < split_date].copy()
-        test_df = full_df[full_df['GAME_DATE'] >= split_date].copy()
+        train_df = full_df[full_df["GAME_DATE"] < split_date].copy()
+        test_df = full_df[full_df["GAME_DATE"] >= split_date].copy()
 
         if train_df.empty:
             raise ValueError("Training set is empty after split")
@@ -136,150 +181,161 @@ class ModelManager:
 
     def _select_features(self, df: pd.DataFrame) -> List[str]:
         """Select leakage-safe numeric features."""
-        targets = set(self.targets)
-        exclude = {
-            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME',
-            'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
-            'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
-        }
-        exclude.update(targets)
-
-        safe_prefixes = ('ROLL_', 'EWMA_', 'VS_OPP_', 'PROJ_', 'LEAGUE_PCT_')
-        safe_substrings = (
-            'TREND', 'BAYESIAN', 'PACE', '_TE', '_SHARE_', 'ROLE_INDEX',
-            'SEASON_AVG', 'SEASON_SIN', 'SEASON_COS', 'HOT_STREAK', 'COLD_STREAK',
-            'POTENTIAL', 'B2B_IMPACT', 'FATIGUE', 'EFF_Z_SCORE', 'FANTASY',
-            'SOS_', 'PACE_ADJ', 'DEF_MATCHUP', 'OPP_DEF',
-        )
-        safe_exact = {
-            'IS_HOME', 'REST_DAYS', 'IS_B2B', 'FATIGUE_SCORE', 'MONTH', 'DAY_OF_WEEK',
-            'EXP_PACE', 'EXP_TEAM_PTS', 'EXP_GAME_TOTAL', 'BLOWOUT_RISK',
-            'CLOSE_GAME', 'EXP_MARGIN', 'DAYS_SINCE_LAST', 'MINS_LAST_3',
-            'MINS_LAST_7', 'EST_POSS', 'TEAM_PACE_10', 'PACE_FACTOR',
-            'STAR_TEAMMATE_OUT',
-        }
-
-        features: List[str] = []
-        for col in df.columns:
-            if col in exclude:
-                continue
-            if df[col].dtype not in ('int64', 'float64', 'int32', 'float32'):
-                continue
-            if col in safe_exact or any(col.startswith(p) for p in safe_prefixes) or any(s in col for s in safe_substrings):
-                features.append(col)
-                continue
-            if (
-                col.startswith('STATS_') or col.startswith('ADV_')
-                or col.startswith('MATCHUP_') or col.startswith('PACE_')
-                or col.startswith('CONTEXT_')
-            ):
-                features.append(col)
-
-        if not features:
-            numeric_cols = [
-                c for c in df.columns
-                if c not in exclude and pd.api.types.is_numeric_dtype(df[c])
-            ]
-            features = numeric_cols
-
-        return features
+        return self.feature_selector.fit(df).feature_cols
 
     def _load_feature_cols(self) -> Optional[List[str]]:
         """Load saved feature column names from disk."""
-        path = Path(self.models_dir) / 'feature_cols.pkl'
-        if not path.exists():
+        schema_path = Path(self.models_dir) / "feature_schema.pkl"
+        legacy_path = Path(self.models_dir) / "feature_cols.pkl"
+
+        schema = self.feature_selector.load_schema(schema_path)
+        if schema is None and legacy_path.exists():
+            legacy_cols = joblib.load(legacy_path)
+            schema = FeatureSchema(feature_cols=list(legacy_cols))
+            self.feature_selector.feature_schema = schema
+
+        if schema is None:
             return None
 
-        try:
-            self.feature_cols = joblib.load(path)
-            self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
-            logger.info("Loaded %s feature columns", len(self.feature_cols))
-        except Exception as exc:
-            logger.warning("Failed to load feature columns: %s", exc)
-            self.feature_cols = None
-
+        self.feature_schema = schema
+        self.feature_cols = schema.feature_cols
+        self.cat_features = list(schema.categorical_cols)
+        logger.info("Loaded %s feature columns", len(self.feature_cols))
         return self.feature_cols
 
     def _load_models(self) -> Dict[str, int]:
         """Load CatBoost and Transformer models from disk."""
+        self.validate_runtime_artifacts()
         self._load_feature_cols()
         self.models = {}
         self.catboost_mae_models = {}
         self.catboost_quantile_models = {}
         self.transformer_model = None
 
-        counts = {'catboost': 0, 'transformer': 0, 'failed': 0}
+        counts = {"catboost": 0, "transformer": 0, "failed": 0}
 
         for target in self.targets:
             try:
                 trainer = CatBoostTrainer.load(self.models_dir, target)
             except Exception as exc:
-                logger.debug("Failed to load CatBoost trainer for %s: %s", target, exc)
-                counts['failed'] += 1
-                continue
+                raise RuntimeError(
+                    f"Failed to load CatBoost runtime artifacts for {target} from {self.models_dir}"
+                ) from exc
 
             if trainer.primary_model is not None:
                 self.models[target] = trainer.primary_model
-                counts['catboost'] += 1
+                counts["catboost"] += 1
 
             if trainer.mae_model is not None:
                 self.catboost_mae_models[target] = trainer.mae_model
 
-            if trainer.quantile_low_model is not None or trainer.quantile_high_model is not None:
+            if (
+                trainer.quantile_low_model is not None
+                or trainer.quantile_high_model is not None
+            ):
                 self.catboost_quantile_models[target] = {
-                    k: v for k, v in {
-                        'low': trainer.quantile_low_model,
-                        'high': trainer.quantile_high_model,
-                    }.items() if v is not None
+                    k: v
+                    for k, v in {
+                        "low": trainer.quantile_low_model,
+                        "high": trainer.quantile_high_model,
+                    }.items()
+                    if v is not None
                 }
 
         if self.feature_cols is None and self.models:
             for model in self.models.values():
-                if hasattr(model, 'feature_names_') and model.feature_names_:
+                if hasattr(model, "feature_names_") and model.feature_names_:
                     self.feature_cols = list(model.feature_names_)
-                    self.cat_features = [c for c in ['PLAYER_ID', 'TEAM_ID', 'OPPONENT_ID'] if c in self.feature_cols]
+                    self.cat_features = [
+                        c
+                        for c in ["PLAYER_ID", "TEAM_ID", "OPPONENT_ID"]
+                        if c in self.feature_cols
+                    ]
+                    self.feature_schema = FeatureSchema(
+                        feature_cols=self.feature_cols,
+                        categorical_cols=list(self.cat_features),
+                    )
+                    self.feature_selector.feature_schema = self.feature_schema
                     break
 
-        transformer_path = Path(self.models_dir) / 'attention_transformer.pkl'
+        transformer_path = Path(self.models_dir) / "attention_transformer.pkl"
         if transformer_path.exists():
             try:
                 TransformerWrapper = _load_transformer_wrapper()
                 self.transformer_model = TransformerWrapper.load(str(transformer_path))
-                counts['transformer'] = 1
+                counts["transformer"] = 1
                 logger.info("Loaded Transformer model")
             except Exception as exc:
                 logger.warning("Failed to load Transformer model: %s", exc)
 
-        blend_path = Path(self.models_dir) / 'blend_weights.pkl'
+        blend_path = Path(self.models_dir) / "blend_weights.pkl"
         if blend_path.exists():
             try:
                 self.blend_weights = joblib.load(blend_path)
             except Exception as exc:
                 logger.warning("Failed to load blend weights: %s", exc)
 
+        self._validate_blend_contract()
+
         logger.info(
             "Loaded %s CatBoost models, %s MAE companions, %s quantile sets",
-            counts['catboost'],
+            counts["catboost"],
             len(self.catboost_mae_models),
             len(self.catboost_quantile_models),
         )
+
+        if counts["catboost"] != len(self.targets):
+            raise RuntimeError(
+                f"Expected {len(self.targets)} CatBoost targets but loaded {counts['catboost']}"
+            )
         return counts
+
+    def _validate_blend_contract(self) -> None:
+        """Raise when blend weights require a model that is not loaded.
+
+        Blend weights are computed during training under the assumption that all
+        models referenced by non-zero weights will contribute at runtime.  If a
+        model is missing, the remaining predictions are scaled incorrectly,
+        producing silently uncalibrated output.
+        """
+        if not self.blend_weights:
+            return
+
+        has_transformer_weight = any(
+            float(weights.get("transformer", 0.0)) > 0.0
+            for weights in self.blend_weights.values()
+        )
+        if has_transformer_weight and self.transformer_model is None:
+            transformer_path = Path(self.models_dir) / "attention_transformer.pkl"
+            if transformer_path.exists():
+                raise RuntimeError(
+                    "Blend weights require a Transformer model but "
+                    f"attention_transformer.pkl in {self.models_dir} failed to load. "
+                    "Fix the artifact or retrain."
+                )
+            raise FileNotFoundError(
+                "Blend weights require a Transformer model but "
+                f"attention_transformer.pkl is missing from {self.models_dir}. "
+                "Provide the artifact or retrain with the Transformer disabled."
+            )
 
     def load_models(self) -> Dict[str, int]:
         """Public wrapper for compatibility with older callers."""
         return self._load_models()
 
-    def _predict_catboost_quantiles(self, target: str, X: pd.DataFrame) -> Optional[Dict[str, np.ndarray]]:
+    def _predict_catboost_quantiles(
+        self, target: str, X: pd.DataFrame
+    ) -> Optional[Dict[str, np.ndarray]]:
         """Predict quantile bounds when available."""
         if target not in self.catboost_quantile_models:
             return None
 
         q_models = self.catboost_quantile_models[target]
         preds: Dict[str, np.ndarray] = {}
-        if 'low' in q_models:
-            preds['low'] = np.asarray(q_models['low'].predict(X), dtype=float)
-        if 'high' in q_models:
-            preds['high'] = np.asarray(q_models['high'].predict(X), dtype=float)
+        if "low" in q_models:
+            preds["low"] = np.asarray(q_models["low"].predict(X), dtype=float)
+        if "high" in q_models:
+            preds["high"] = np.asarray(q_models["high"].predict(X), dtype=float)
         return preds or None
 
     def _predict_catboost_target(self, target: str, X: pd.DataFrame) -> np.ndarray:
@@ -306,12 +362,23 @@ class ModelManager:
         if self.feature_cols is None or not self.feature_cols:
             return None
 
-        seq_len = int(getattr(self.transformer_model, 'seq_len', 0) or 0)
+        seq_len = int(getattr(self.transformer_model, "seq_len", 0) or 0)
         if seq_len <= 0 or len(history_df) < seq_len:
             return None
 
-        seq_df = history_df.reindex(columns=self.feature_cols, fill_value=0)
-        seq = seq_df.tail(seq_len).apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+        selector = getattr(self, "feature_selector", None)
+        schema = getattr(self, "feature_schema", None)
+        if selector is not None and schema is not None:
+            seq_df = selector.transform(
+                history_df, schema, strict=False, fill_value=0.0
+            )
+        else:
+            seq_df = (
+                history_df.reindex(columns=self.feature_cols, fill_value=0)
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0)
+            )
+        seq = seq_df.tail(seq_len).values.astype(np.float32)
 
         try:
             preds = self.transformer_model.predict(seq)
@@ -331,7 +398,9 @@ class ModelManager:
             return None
         return float(preds[target_idx])
 
-    def predict_player_stats(self, player_context_df: pd.DataFrame, history_df: pd.DataFrame = None) -> Dict[str, float]:
+    def predict_player_stats(
+        self, player_context_df: pd.DataFrame, history_df: pd.DataFrame = None
+    ) -> Dict[str, float]:
         """Predict a single player's stat line using the active model stack."""
         if player_context_df is None or player_context_df.empty:
             return self._fallback_prediction(pd.DataFrame())
@@ -345,8 +414,18 @@ class ModelManager:
         if self.feature_cols is None or not self.feature_cols:
             return self._fallback_prediction(player_context_df)
 
-        context = player_context_df.reindex(columns=self.feature_cols, fill_value=0)
-        context = context.apply(pd.to_numeric, errors='coerce').fillna(0)
+        selector = getattr(self, "feature_selector", None)
+        schema = getattr(self, "feature_schema", None)
+        if selector is not None and schema is not None:
+            context = selector.transform(
+                player_context_df, schema, strict=False, fill_value=0.0
+            )
+        else:
+            context = (
+                player_context_df.reindex(columns=self.feature_cols, fill_value=0)
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0)
+            )
 
         predictions: Dict[str, float] = {}
         base_predictions: Dict[str, float] = {}
@@ -370,17 +449,17 @@ class ModelManager:
             transformer_pred = self._predict_transformer_target(target, history_df)
             if transformer_pred is not None:
                 blend_cfg = self.blend_weights.get(target, {})
-                cb_weight = float(blend_cfg.get('catboost', 0.7))
-                tx_weight = float(blend_cfg.get('transformer', 0.3))
+                cb_weight = float(blend_cfg.get("catboost", 0.7))
+                tx_weight = float(blend_cfg.get("transformer", 0.3))
                 final_pred = (base * cb_weight) + (transformer_pred * tx_weight)
 
             predictions[target] = float(max(0.0, final_pred))
 
             q_preds = self._predict_catboost_quantiles(target, context)
-            if q_preds and 'low' in q_preds and 'high' in q_preds:
-                low = float(q_preds['low'][0])
-                high = float(q_preds['high'][0])
-                predictions[f'{target}_STD'] = max(0.0, (high - low) / 2.56)
+            if q_preds and "low" in q_preds and "high" in q_preds:
+                low = float(q_preds["low"][0])
+                high = float(q_preds["high"][0])
+                predictions[f"{target}_STD"] = max(0.0, (high - low) / 2.56)
 
         return predictions
 
@@ -396,7 +475,9 @@ class ModelManager:
         rows: List[Dict[str, float]] = []
         for idx in range(len(context_df)):
             row = context_df.iloc[[idx]]
-            player_id = int(row['PLAYER_ID'].iloc[0]) if 'PLAYER_ID' in row.columns else idx
+            player_id = (
+                int(row["PLAYER_ID"].iloc[0]) if "PLAYER_ID" in row.columns else idx
+            )
             history_df = histories_map.get(player_id) if histories_map else None
             try:
                 rows.append(self.predict_player_stats(row, history_df))
@@ -413,9 +494,16 @@ class ModelManager:
             predictions[target] = self._get_fallback_value(player_context_df, target)
         return predictions
 
-    def _get_fallback_value(self, player_context_df: pd.DataFrame, target: str) -> float:
+    def _get_fallback_value(
+        self, player_context_df: pd.DataFrame, target: str
+    ) -> float:
         """Get a fallback value for a single stat."""
-        fallback_cols = [f'ROLL_{target}_AVG_10', f'ROLL_{target}_AVG_20', f'{target}_EWMA_5', target]
+        fallback_cols = [
+            f"ROLL_{target}_AVG_10",
+            f"ROLL_{target}_AVG_20",
+            f"{target}_EWMA_5",
+            target,
+        ]
         for col in fallback_cols:
             if col in player_context_df.columns and len(player_context_df) > 0:
                 val = player_context_df[col].iloc[0]

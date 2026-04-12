@@ -37,10 +37,12 @@
   - `src/preprocessing/data_loader.py`
   - `src/preprocessing/feature_engineer.py`
   - `src/training/pipeline.py`
+- Current note: `train.py` now resolves `training_presets` from `config/default.yaml` through `src/training/presets.py`, and the selected preset controls feature-group selection, Transformer enablement, and optional recent-history trimming before feature engineering.
 - Risk level: high because it defines the artifact contract consumed later by simulation.
 - Current note: success now depends on `TrainingPipeline` validating the full runtime artifact set, so failures here can indicate missing output files rather than only model-fit errors.
 - Current note: `train.py` now performs explicit preflight checks for the writable model/cache directories and required raw CSV inputs before expensive work begins, and it logs stage names so subprocess callers can surface a failure stage clearly.
 - Current note: Step 2 feature-engineering setup should go through `src/preprocessing/feature_engineer.py:build_feature_engineer(...)` so mixed-version checkouts tolerate older constructor signatures; `tests/test_training/test_train_entrypoint.py` statically guards that call shape.
+- Current note: the active training presets now include `archetype`, the deterministic player-style similarity group used to support cold-start prediction.
 
 ### `train_colab.ipynb`
 
@@ -81,13 +83,14 @@
 ### `config/default.yaml`
 
 - Primary runtime config file.
-- Owns paths, training defaults, simulation settings, and scraper-related settings.
+- Owns paths, training defaults, training preset definitions, simulation settings, and scraper-related settings.
 - Risk level: high if keys are renamed or semantics change.
 
 ### `src/config/config.py`
 
 - Dataclass-based config loading and defaults.
 - Central dependency for most scripts.
+- Current note: `Config` now carries `training_presets` as a raw mapping so `train.py` can resolve preset definitions from YAML without hard-coding them in the CLI.
 - Risk level: high because config drift breaks many modules at once.
 
 ### `src/config/model_config.py`
@@ -151,28 +154,47 @@ Important files:
   - `get_diagnostics`
 - Compatibility helper:
   - `build_feature_engineer(...)` filters constructor kwargs and backfills `disable_groups`/`disable_columns` for older checkouts that do not accept them directly.
+  - `benchmark_feature_variants()` now uses the same helper for its internal ablation variants, so this module is the compatibility boundary for both normal Step 2 construction and feature-ablation probing.
 - Owns feature-group registration, diagnostics, and main feature build flow.
 - Risk level: high.
 - Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.
+
+### `src/training/presets.py`
+
+- Role: named training preset registry and recent-history window helper for `train.py`.
+- High-value objects/functions:
+  - `TrainingPreset`
+  - `BUILTIN_TRAINING_PRESETS`
+  - `resolve_training_preset`
+  - `apply_recent_history_window`
+- Risk level: medium to high because it now controls the feature-stack shape and Transformer enablement used by the main training CLI.
+- Current note: the built-in `full` preset includes all 19 feature groups (rolling, efficiency, momentum, context, fatigue, minutes_confidence, rest_density, matchup, opponent_strength, pace, team_role, lineup_stability, injury_opportunity, teammate_usage, recency_form, archetype, defense_position, target_encoding, league_rank). The `small` preset includes 6 groups (rolling, efficiency, momentum, pace, opponent_strength, archetype).
 
 ### `src/preprocessing/features/`
 
 - Role: modular feature groups.
 - Important files include:
-  - `rolling.py`
-  - `efficiency.py`
-  - `momentum.py`
-  - `contextual.py`
-  - `fatigue.py`
-  - `matchup.py`
-  - `opponent_strength.py`
-  - `pace.py`
-  - `team_role.py`
-  - `target_encoding.py`
-  - `league_ranking.py`
-  - `base.py`
+  - `base.py` — `FeatureGroup` ABC, `FeatureContext`, `FeatureDiagnostics`, `fill_series_with_prior`, `add_missing_flag`, `normalize_output_columns`
+  - `rolling.py` — `RollingFeatureGroup`, `EfficiencyFeatureGroup`, `MomentumFeatureGroup`
+  - `context.py` — `ContextualFeatureGroup`, `FatigueFeatureGroup`
+  - `matchup.py` — `MatchupFeatureGroup`, `OpponentStrengthFeatureGroup`
+  - `pace_role.py` — `PaceFeatureGroup`, `TeamRoleFeatureGroup`
+  - `archetype.py` — `PlayerArchetypeFeatureGroup`
+  - `target_encoding.py` — `TargetEncodingFeatureGroup`, `LeagueRankingFeatureGroup`
+  - `minutes_confidence.py` — `MinutesConfidenceFeatureGroup` (rolling variance, trend, starter-rate signals for MIN)
+  - `recency_form.py` — `RecencyFormFeatureGroup` (recent-vs-season deltas, form ratios, volatility)
+  - `lineup_stability.py` — `LineupStabilityFeatureGroup` (starter rate, teammate Jaccard continuity, rotation variance, MIN rank)
+  - `rest_density.py` — `RestGameDensityFeatureGroup` (schedule density, B2B detection, rest advantage, composite density score)
+  - `injury_opportunity.py` — `InjuryAdjustedOpportunityFeatureGroup` (missing high-usage teammate detection, same-minutes missing count, MIN/usage boost, team absence rolling count)
+  - `teammate_usage.py` — `TeammateUsageFeatureGroup` (top-usage teammate active flag, missing teammate FGA/AST/REB shares, missing shot volume, active scoring depth)
+  - `defense_position.py` — `DefensePositionFeatureGroup` (opponent defensive stats by position group — guard/wing/big — including PTS/REB/AST/STL/BLK/TOV allowed, defensive rank, recent PTS allowed)
+  - `__init__.py` — re-exports all feature group classes
 - Safe entry point for adding new features if the feature schema contract is respected.
+- All new feature groups follow the batched-column pattern: accumulate columns in a `dict[str, pd.Series]`, then `_concat_new_columns(df, new_columns)` once per group.
 - Current caution: `rolling.py` was a performance hotspot due to DataFrame fragmentation warnings; the hot groups now assemble feature columns in batches and concatenate once per group.
+- Current caution: `archetype.py` computes hard labels plus soft similarities from fixed playstyle templates. Keep that template set in sync with preset definitions and schema expectations if the archetypes change.
+- Current caution: `lineup_stability.py` uses row-level iteration for Jaccard similarity and roster-size lookups; this may be slow on very large datasets. Consider vectorization if it becomes a bottleneck.
+- Current caution: `rest_density.py` uses row-level iteration for game-count windows and opponent rest lookups; same performance caveat applies.
 
 ## Training Layer
 
@@ -201,6 +223,7 @@ Important files:
 - Risk level: very high.
 - Current caution: any artifact filename or format change here must stay aligned with `CatBoostTrainer`, `ModelManager`, and `simulate_season.py`.
 - Current note: Transformer validation no longer calls the compiled model directly; it delegates through `TransformerWrapper.predict_batch()` so the validation seam stays on the eager-safe path.
+- Current note: `_save_model_stack_metadata()` records whether the Transformer was active and can now include the selected training preset and enabled feature groups when `train.py` provides them.
 
 ### `src/training/catboost_trainer.py`
 
@@ -246,6 +269,7 @@ Important files:
 - Breakage here can invalidate all simulation output.
 - Risk level: very high.
 - Current note: runtime loading is now intentionally strict about missing per-target CatBoost artifacts and shared metadata files.
+- Current note: `validate_runtime_artifacts()` now treats `model_stack_metadata.pkl` as part of the shared runtime set so the loader and training pipeline stay aligned on the same contract.
 - Current note: `_validate_blend_contract()` raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug.
 - Current note: Transformer predictions flow through `TransformerWrapper.predict()`, which now defaults to eager inference and can force a math SDPA backend on CUDA when backend controls are available.
 

@@ -1,0 +1,448 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 3250 >>
+stream
+BT
+/F2 22 Tf
+1 0 0 1 54.00 684.00 Tm
+(Recommended Three-Model Stack) Tj
+/F1 13 Tf
+1 0 0 1 54.00 658.00 Tm
+(Simple step-by-step guide that matches the diagram) Tj
+/F3 10 Tf
+1 0 0 1 54.00 632.00 Tm
+(Generated on 2026-03-26) Tj
+/F1 11 Tf
+1 0 0 1 54.00 586.00 Tm
+(This PDF explains the picture in plain language. It follows the same flow as the SVG:) Tj
+/F1 11 Tf
+1 0 0 1 54.00 571.00 Tm
+(collect data, build features, split into CatBoost and Transformer, blend them by inverse) Tj
+/F1 11 Tf
+1 0 0 1 54.00 556.00 Tm
+(MAE, run Monte Carlo simulation, and produce player projections.) Tj
+/F4 10 Tf
+1 0 0 1 54.00 531.00 Tm
+(+--------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 519.00 Tm
+(| 1. Collect data    |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 507.00 Tm
+(| player/team logs   |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 495.00 Tm
+(+--------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 483.00 Tm
+(          |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 471.00 Tm
+(          v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 459.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 447.00 Tm
+(| 2. Feature engineering      |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 435.00 Tm
+(| rolling, matchup, context   |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 423.00 Tm
+(| pace, fatigue               |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 411.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 399.00 Tm
+(          |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 387.00 Tm
+(          v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 375.00 Tm
+(      split into two models) Tj
+/F4 10 Tf
+1 0 0 1 54.00 363.00 Tm
+(        /                \\) Tj
+/F4 10 Tf
+1 0 0 1 54.00 351.00 Tm
+(       v                  v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 339.00 Tm
+(+----------------+  +-------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 327.00 Tm
+(| CatBoost       |  | Transformer       |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 315.00 Tm
+(| per-stat model |  | sequence model    |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 303.00 Tm
+(| about 70%      |  | about 30%         |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 291.00 Tm
+(| PTS REB AST    |  | momentum + rhythm |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 279.00 Tm
+(+----------------+  +-------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 267.00 Tm
+(        \\              /) Tj
+/F4 10 Tf
+1 0 0 1 54.00 255.00 Tm
+(         \\            /) Tj
+/F4 10 Tf
+1 0 0 1 54.00 243.00 Tm
+(          v          v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 231.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 219.00 Tm
+(| 3. Inverse-MAE blender      |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 207.00 Tm
+(| weight by 1 / MAE           |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 195.00 Tm
+(| stable weighted average      |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 183.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 171.00 Tm
+(                |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 159.00 Tm
+(                v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 147.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 135.00 Tm
+(| 4. Monte Carlo simulation   |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 123.00 Tm
+(| correlated stat sampling    |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 111.00 Tm
+(+-----------------------------+) Tj
+/F4 10 Tf
+1 0 0 1 54.00 99.00 Tm
+(                |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 87.00 Tm
+(                v) Tj
+/F4 10 Tf
+1 0 0 1 54.00 75.00 Tm
+(+-----------------------------+) Tj
+/F3 9 Tf
+1 0 0 1 288.00 24.00 Tm
+(Page 1) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Length 1215 >>
+stream
+BT
+/F4 10 Tf
+1 0 0 1 54.00 738.00 Tm
+(| 5. Player projections       |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 726.00 Tm
+(| mean, mode, CI, over/under  |) Tj
+/F4 10 Tf
+1 0 0 1 54.00 714.00 Tm
+(+-----------------------------+) Tj
+/F2 15 Tf
+1 0 0 1 54.00 694.00 Tm
+(What each step means) Tj
+/F1 11 Tf
+1 0 0 1 70.00 672.00 Tm
+( Collect data means downloading player logs and team logs.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 657.00 Tm
+( Feature engineering means turning raw stats into model inputs like rolling averages and) Tj
+/F1 11 Tf
+1 0 0 1 82.00 642.00 Tm
+(matchup data.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 627.00 Tm
+( CatBoost gives one prediction for each stat such as points, rebounds, assists, steals,) Tj
+/F1 11 Tf
+1 0 0 1 82.00 612.00 Tm
+(blocks, and turnovers.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 597.00 Tm
+( The Transformer looks at game order, so it can learn recent rhythm and momentum.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 582.00 Tm
+( The blender combines both model outputs and gives more weight to the one with lower MAE.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 567.00 Tm
+( Monte Carlo simulation repeats the game many times so the final output is not just one) Tj
+/F1 11 Tf
+1 0 0 1 82.00 552.00 Tm
+(number.) Tj
+/F3 9 Tf
+1 0 0 1 288.00 24.00 Tm
+(Page 2) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Length 2190 >>
+stream
+BT
+/F2 15 Tf
+1 0 0 1 54.00 738.00 Tm
+(Step 1: Collect data) Tj
+/F1 11 Tf
+1 0 0 1 54.00 716.00 Tm
+(The first box in the diagram is data collection. The program reads NBA player logs and team) Tj
+/F1 11 Tf
+1 0 0 1 54.00 701.00 Tm
+(logs, then saves them as CSV files under data/. This is the raw material for everything) Tj
+/F1 11 Tf
+1 0 0 1 54.00 686.00 Tm
+(else.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 671.00 Tm
+( The updater gets fresh game logs from NBA.com Stats API.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 656.00 Tm
+( It keeps player rows and team rows in simple files so training can reuse them later.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 641.00 Tm
+( If you run it again, it can only fetch new games instead of starting over.) Tj
+/F2 15 Tf
+1 0 0 1 54.00 622.00 Tm
+(Step 2: Feature engineering) Tj
+/F1 11 Tf
+1 0 0 1 54.00 600.00 Tm
+(The second box turns raw rows into useful signals. The code makes rolling averages, matchup) Tj
+/F1 11 Tf
+1 0 0 1 54.00 585.00 Tm
+(stats, pace numbers, and context features like home or away, rest days, and fatigue.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 570.00 Tm
+( This step makes the data easier for the models to read.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 555.00 Tm
+( It uses only past games, so the model does not peek into the future.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 540.00 Tm
+( This is where the program gets most of its predictive power.) Tj
+/F2 15 Tf
+1 0 0 1 54.00 521.00 Tm
+(Step 3: Two model paths) Tj
+/F1 11 Tf
+1 0 0 1 54.00 499.00 Tm
+(After features are ready, the flow splits into two paths. CatBoost handles the main per-stat) Tj
+/F1 11 Tf
+1 0 0 1 54.00 484.00 Tm
+(prediction. The Transformer handles sequence patterns across recent games. The diagram shows) Tj
+/F1 11 Tf
+1 0 0 1 54.00 469.00 Tm
+(CatBoost at about 70 percent and Transformer at about 30 percent before blending.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 454.00 Tm
+( CatBoost is strong for tabular data and one model is trained for each stat.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 439.00 Tm
+( The Transformer is strong for order and context across the last several games.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 424.00 Tm
+( The diagram also shows CatBoost with quantile variants, which help estimate uncertainty.) Tj
+/F3 9 Tf
+1 0 0 1 288.00 24.00 Tm
+(Page 3) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Length 2264 >>
+stream
+BT
+/F2 15 Tf
+1 0 0 1 54.00 738.00 Tm
+(Step 4: Inverse-MAE blender) Tj
+/F1 11 Tf
+1 0 0 1 54.00 716.00 Tm
+(The two model outputs meet in the blender. Inverse MAE means the model with lower error gets) Tj
+/F1 11 Tf
+1 0 0 1 54.00 701.00 Tm
+(more weight. So if CatBoost has been more accurate, it counts more. If the Transformer is) Tj
+/F1 11 Tf
+1 0 0 1 54.00 686.00 Tm
+(better for a player, it gets more weight instead.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 671.00 Tm
+( This keeps the final answer stable instead of trusting only one model.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 656.00 Tm
+( MAE stands for mean absolute error, which is a simple measure of past mistakes.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 641.00 Tm
+( The blender is the merge point in the diagram.) Tj
+/F2 15 Tf
+1 0 0 1 54.00 622.00 Tm
+(Step 5: Monte Carlo simulation) Tj
+/F1 11 Tf
+1 0 0 1 54.00 600.00 Tm
+(After blending, the program does many simulations. This is how it turns one estimate into a) Tj
+/F1 11 Tf
+1 0 0 1 54.00 585.00 Tm
+(range of outcomes. The simulator keeps the stat groups linked together so the results look) Tj
+/F1 11 Tf
+1 0 0 1 54.00 570.00 Tm
+(realistic.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 555.00 Tm
+( One game is simulated many times, not just once.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 540.00 Tm
+( Points, rebounds, assists, steals, blocks, and turnovers move together in a realistic) Tj
+/F1 11 Tf
+1 0 0 1 82.00 525.00 Tm
+(way.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 510.00 Tm
+( This makes the final projection more useful than a single raw prediction.) Tj
+/F2 15 Tf
+1 0 0 1 54.00 491.00 Tm
+(Step 6: Player projections) Tj
+/F1 11 Tf
+1 0 0 1 54.00 469.00 Tm
+(The last box is the output. The program writes player projections with a mean, a mode, a) Tj
+/F1 11 Tf
+1 0 0 1 54.00 454.00 Tm
+(confidence interval, and over/under style results. That output is what the query tool and) Tj
+/F1 11 Tf
+1 0 0 1 54.00 439.00 Tm
+(season simulator use later.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 424.00 Tm
+( query_prob.py reads those saved projections and answers simple betting questions.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 409.00 Tm
+( simulate_season.py uses the same model stack to make game and season reports.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 394.00 Tm
+( The diagram is a simplified picture of that full flow.) Tj
+/F3 9 Tf
+1 0 0 1 288.00 24.00 Tm
+(Page 4) Tj
+ET
+endstream
+endobj
+9 0 obj
+<< /Length 1086 >>
+stream
+BT
+/F2 15 Tf
+1 0 0 1 54.00 738.00 Tm
+(Very short summary) Tj
+/F1 11 Tf
+1 0 0 1 70.00 716.00 Tm
+( Data goes in.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 701.00 Tm
+( Features are built.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 686.00 Tm
+( CatBoost and the Transformer make predictions.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 671.00 Tm
+( The blender combines them.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 656.00 Tm
+( Monte Carlo simulation makes the result realistic.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 641.00 Tm
+( Player projections come out the other side.) Tj
+/F2 15 Tf
+1 0 0 1 54.00 622.00 Tm
+(Files to look at) Tj
+/F1 11 Tf
+1 0 0 1 70.00 600.00 Tm
+( update_data.py for data collection.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 585.00 Tm
+( src/training/pipeline.py for the CatBoost + Transformer training flow.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 570.00 Tm
+( src/models/model_manager.py for blending and prediction.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 555.00 Tm
+( src/simulation/game_simulator.py for Monte Carlo simulation.) Tj
+/F1 11 Tf
+1 0 0 1 70.00 540.00 Tm
+( query_prob.py for the final question-and-answer tool.) Tj
+/F3 9 Tf
+1 0 0 1 288.00 24.00 Tm
+(Page 5) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 16 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 5 0 R >>
+endobj
+11 0 obj
+<< /Type /Page /Parent 16 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 6 0 R >>
+endobj
+12 0 obj
+<< /Type /Page /Parent 16 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 7 0 R >>
+endobj
+13 0 obj
+<< /Type /Page /Parent 16 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 8 0 R >>
+endobj
+14 0 obj
+<< /Type /Page /Parent 16 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> >> /Contents 9 0 R >>
+endobj
+15 0 obj
+<< /Type /Pages /Kids [ 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R ] /Count 5 >>
+endobj
+16 0 obj
+<< /Type /Catalog /Pages 15 0 R >>
+endobj
+xref
+0 17
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000000238 00000 n 
+0000000306 00000 n 
+0000003608 00000 n 
+0000004875 00000 n 
+0000007117 00000 n 
+0000009433 00000 n 
+0000010571 00000 n 
+0000010729 00000 n 
+0000010887 00000 n 
+0000011045 00000 n 
+0000011203 00000 n 
+0000011361 00000 n 
+0000011450 00000 n 
+trailer
+<< /Size 17 /Root 16 0 R >>
+startxref
+11501
+%%EOF

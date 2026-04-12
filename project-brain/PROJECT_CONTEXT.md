@@ -66,8 +66,10 @@ Not supported by repo evidence:
 
 - Run `python train.py`.
 - The script loads the CSV data through `src/preprocessing/data_loader.py`.
+- It resolves a named training preset from `config/default.yaml` plus `src/training/presets.py` before feature engineering starts.
 - It engineers features through `src/preprocessing/feature_engineer.py`.
 - It trains the model stack through `src/training/pipeline.py`.
+- The `small` preset keeps the six canonical targets, disables the Transformer, uses the `rolling`, `efficiency`, `momentum`, `pace`, `opponent_strength`, and `archetype` feature groups, and trims to the most recent two seasons when `SEASON_ID` is available.
 - In Colab, `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage so code can run from `/content/knowing` while `data/` and `models/` stay in Google Drive.
 - Expected artifact contract for downstream consumers:
   - CatBoost model files per target in `models/`
@@ -76,7 +78,7 @@ Not supported by repo evidence:
   - `feature_schema.pkl`
   - `feature_cols.pkl`
   - `blend_weights.pkl`
-  - `model_stack_metadata.pkl` recording Transformer active status and expected model count
+  - `model_stack_metadata.pkl` recording Transformer active status, expected model count, and optionally the selected preset / feature groups
 - Important behavior: the active pipeline now validates this artifact contract before reporting success, so incomplete CatBoost runtime output is treated as a hard failure instead of a silent partial success.
 - Important behavior: `ModelManager._validate_blend_contract()` now raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug where CatBoost-only fallback silently produced uncalibrated predictions.
 - Transformer validation/runtime inference now stays on an eager-safe path by default; `torch.compile` is opt-in rather than the default runtime behavior for this model.
@@ -120,6 +122,7 @@ Not supported by repo evidence:
 - Config-driven runtime via `config/default.yaml` and dataclass loaders in `src/config/config.py`.
 - Historical ingestion from `nba_api` with multiple season-range modes in `update_data.py`.
 - Modular feature engineering based on `FeatureGroup` implementations in `src/preprocessing/features/`.
+- Player-style archetype and similarity features built from rolling/season-level player context, used to generalize better on new or low-sample players.
 - Multi-target training centered on six box-score stats:
   - `PTS`
   - `REB`
@@ -173,6 +176,8 @@ Important boundary:
 ## Project-Specific Terms
 
 - `FeatureGroup`: plugin-like feature module under `src/preprocessing/features/` that adds a coherent set of engineered columns.
+- `PlayerArchetypeFeatureGroup`: deterministic style-profile feature group that emits `ARCHETYPE_*` and `SIMILARITY_TO_*` columns for playstyle matching.
+- `TrainingPreset`: named preset in `src/training/presets.py` that controls feature-group selection, rolling windows, Transformer enablement, and optional recent-history trimming.
 - `FeatureSchema`: saved metadata describing how training features are organized and later reconstructed for inference.
 - `ModelManager`: runtime loader that reconstructs the trained-model stack for simulator and query-time prediction.
 - `GameSimulator`: main simulation engine for a single matchup, including context gathering and repeated simulation draws.
@@ -200,6 +205,7 @@ This repo does not currently implement:
 - The model stack assumes six canonical target stats in uppercase naming inside training/inference code.
 - The system prefers fallback behavior over hard failures when external data scrapers break during simulation.
 - Transformer training still uses mixed-precision and GPU-friendly settings where supported, but validation intentionally avoids the compiled flash-attention path unless an operator explicitly opts in.
+- Training presets are intentionally conservative about artifact naming: the small preset changes feature breadth and Transformer enablement, not downstream filenames or the canonical six-target contract.
 
 ## Important Constraints
 

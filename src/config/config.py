@@ -386,6 +386,7 @@ class Config:
     """Root configuration for the NBA prediction system."""
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    training_presets: Dict[str, Any] = field(default_factory=dict)
     features: FeatureConfig = field(default_factory=FeatureConfig)
     features_ext: FeatureConfigExt = field(default_factory=FeatureConfigExt)
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
@@ -428,6 +429,8 @@ class Config:
             config.data = DataConfig(**data['data'])
         if 'training' in data:
             config.training = TrainingConfig(**data['training'])
+        if 'training_presets' in data:
+            config.training_presets = data['training_presets']
         if 'features' in data:
             config.features = FeatureConfig(**data['features'])
         if 'features_ext' in data:

@@ -505,6 +505,60 @@ class CatBoostTrainer(BaseTrainer):
     def get_feature_importance(self) -> Optional[Dict[str, float]]:
         """Get feature importance."""
         return self._feature_importance
+
+    @classmethod
+    def metadata_path(cls, path: Union[str, Path], target: str) -> Path:
+        """Return the metadata file path for a saved target."""
+        return Path(path) / f"{target.lower()}_metadata.joblib"
+
+    @classmethod
+    def primary_model_candidates(cls, path: Union[str, Path], target: str) -> List[Path]:
+        """Return the acceptable primary-model artifact paths for a target."""
+        base = Path(path)
+        stem = target.lower()
+        return [
+            base / f"{stem}_catboost.cbm",
+            base / f"{stem}_catboost.joblib",
+        ]
+
+    @classmethod
+    def missing_runtime_artifacts(cls, path: Union[str, Path], target: str) -> List[str]:
+        """Return missing required runtime artifacts for a target."""
+        missing: List[str] = []
+        metadata_path = cls.metadata_path(path, target)
+        if not metadata_path.exists():
+            missing.append(str(metadata_path))
+
+        primary_candidates = cls.primary_model_candidates(path, target)
+        if not any(candidate.exists() for candidate in primary_candidates):
+            missing.append(" or ".join(str(candidate) for candidate in primary_candidates))
+
+        return missing
+
+    def validate_saved_artifacts(self, path: Union[str, Path]) -> List[str]:
+        """Return any artifacts that should exist after save() but do not."""
+        base = Path(path)
+        missing: List[str] = []
+
+        if not self.metadata_path(base, self.target).exists():
+            missing.append(str(self.metadata_path(base, self.target)))
+
+        expected_pairs = [
+            ("catboost", self.primary_model),
+            ("catboost_mae", self.mae_model),
+            ("catboost_qlow", self.quantile_low_model),
+            ("catboost_qhigh", self.quantile_high_model),
+        ]
+
+        for suffix, model in expected_pairs:
+            if model is None:
+                continue
+            extension = "joblib" if isinstance(model, ConstantRegressor) else "cbm"
+            artifact_path = base / f"{self.target.lower()}_{suffix}.{extension}"
+            if not artifact_path.exists():
+                missing.append(str(artifact_path))
+
+        return missing
     
     def save(self, path: Union[str, Path]) -> None:
         """Save all models to disk."""
@@ -552,7 +606,12 @@ class CatBoostTrainer(BaseTrainer):
     def load(cls, path: Union[str, Path], target: str, **kwargs) -> 'CatBoostTrainer':
         """Load a trained CatBoost trainer."""
         path = Path(path)
-        
+        missing = cls.missing_runtime_artifacts(path, target)
+        if missing:
+            raise FileNotFoundError(
+                f"Missing CatBoost runtime artifacts for {target}: {', '.join(missing)}"
+            )
+
         metadata = joblib.load(path / f"{target.lower()}_metadata.joblib")
         
         trainer = cls(
@@ -576,6 +635,11 @@ class CatBoostTrainer(BaseTrainer):
             if primary_path.exists():
                 trainer.primary_model = CatBoostRegressor()
                 trainer.primary_model.load_model(str(primary_path))
+
+        if trainer.primary_model is None:
+            raise FileNotFoundError(
+                f"Primary CatBoost artifact for {target} exists on disk but could not be loaded from {path}"
+            )
         
         mae_joblib = path / f"{target.lower()}_catboost_mae.joblib"
         if mae_joblib.exists():
