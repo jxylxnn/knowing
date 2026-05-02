@@ -95,8 +95,9 @@
 
 ### `src/config/model_config.py`
 
-- Hardware/model-size heuristics.
+- Hardware/model-size heuristics and `SIZE_TIER_SPECS` dictionary.
 - Important for training-time resource decisions.
+- Current note: M tier transformer `seq_len` and `max_seq_length` are now 20 (previously 10), matching the L tier's context window.
 - Risk level: medium.
 
 ## Data And Scraping Layer
@@ -175,6 +176,7 @@ Important files:
 - Role: modular feature groups.
 - Important files include:
   - `base.py` — `FeatureGroup` ABC, `FeatureContext`, `FeatureDiagnostics`, `fill_series_with_prior`, `add_missing_flag`, `normalize_output_columns`
+  - `_teammate_utils.py` — shared roster/teammate precomputations (`TeammateContext`, `build_game_roster_map`, `build_regular_teammates_map`, `build_high_usage_teammates_map`, `build_team_totals_map`).  Used by `lineup_stability`, `injury_opportunity`, and `teammate_usage` to avoid duplicate mapping logic.
   - `rolling.py` — `RollingFeatureGroup`, `EfficiencyFeatureGroup`, `MomentumFeatureGroup`
   - `context.py` — `ContextualFeatureGroup`, `FatigueFeatureGroup`
   - `matchup.py` — `MatchupFeatureGroup`, `OpponentStrengthFeatureGroup`
@@ -193,8 +195,8 @@ Important files:
 - All new feature groups follow the batched-column pattern: accumulate columns in a `dict[str, pd.Series]`, then `_concat_new_columns(df, new_columns)` once per group.
 - Current caution: `rolling.py` was a performance hotspot due to DataFrame fragmentation warnings; the hot groups now assemble feature columns in batches and concatenate once per group.
 - Current caution: `archetype.py` computes hard labels plus soft similarities from fixed playstyle templates. Keep that template set in sync with preset definitions and schema expectations if the archetypes change.
-- Current caution: `lineup_stability.py` uses row-level iteration for Jaccard similarity and roster-size lookups; this may be slow on very large datasets. Consider vectorization if it becomes a bottleneck.
-- Current caution: `rest_density.py` uses row-level iteration for game-count windows and opponent rest lookups; same performance caveat applies.
+- Current note: `lineup_stability.py` Jaccard computation was refactored to a vectorised key-shift approach (no per-player Python loops) and now sources its roster maps from `_teammate_utils.py`.
+- Current note: `rest_density.py` game-count windows were vectorised with pandas time-based `rolling(..., closed='left')`, and opponent-rest lookups now use `np.searchsorted` on pre-sorted `datetime64[ns]` arrays instead of nested Python loops.
 
 ## Training Layer
 
@@ -213,6 +215,7 @@ Important files:
   - `_train_catboost_parallel`
   - `_save_catboost_artifacts`
   - `_train_transformer_model`
+  - `_build_sequence_batch` — now uses zero-padding for short players instead of skipping them
   - `_save_feature_cols`
   - `_save_blend_weights`
   - `_save_model_stack_metadata`
@@ -224,6 +227,7 @@ Important files:
 - Current caution: any artifact filename or format change here must stay aligned with `CatBoostTrainer`, `ModelManager`, and `simulate_season.py`.
 - Current note: Transformer validation no longer calls the compiled model directly; it delegates through `TransformerWrapper.predict_batch()` so the validation seam stays on the eager-safe path.
 - Current note: `_save_model_stack_metadata()` records whether the Transformer was active and can now include the selected training preset and enabled feature groups when `train.py` provides them.
+- Current note: `_build_sequence_batch()` now produces zero-padded sequences for players with fewer than `seq_len + 1` games instead of skipping them entirely.
 
 ### `src/training/catboost_trainer.py`
 
@@ -277,7 +281,9 @@ Important files:
 
 - Transformer wrapper and checkpoint compatibility logic.
 - Owns the eager-safe Transformer inference path used by training validation and runtime prediction.
+- Owns `_create_sequences()`, which now uses zero-padding for players with fewer than `seq_len` context games instead of skipping them.
 - Risk level: medium to high.
+- Current caution: sequence construction behavior changed — players with 1+ games now always produce training samples, with zero-padding for early timesteps. Players with enough games still use the standard sliding window.
 
 ## Simulation Layer
 
@@ -412,7 +418,7 @@ These are important but secondary to the main orchestration files above.
   - `tests/test_query/test_interactive_cli.py`
   - `tests/test_training/test_training_pipeline_colab.py`
   - `tests/test_training/test_nn_trainer.py`
-  - `tests/test_models/test_transformer_model.py`
+  - `tests/test_models/test_transformer_model.py` — now includes config, zero-padding, and regression tests for the transformer sequence builder
 
 ## Generated State And Non-Source Directories
 

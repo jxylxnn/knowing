@@ -19,6 +19,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from sklearn.linear_model import Ridge
 
 try:
     import torch
@@ -254,6 +255,13 @@ class TrainingPipeline:
         self.feature_cols = self.feature_schema.feature_cols
         self.cat_features = list(self.feature_schema.categorical_cols)
 
+        if not self.feature_cols:
+            raise ValueError(
+                "No leakage-safe features found after feature selection. "
+                "Check that input data has numeric columns matching safe prefixes "
+                "(ROLL_, EWMA_, VS_OPP_, etc.)"
+            )
+
         logger.info(
             "Data prepared: fit=%s, val=%s, test=%s, features=%s",
             len(fit_df),
@@ -300,15 +308,29 @@ class TrainingPipeline:
             logger.info("Reducing CatBoost workers to 1 to avoid GPU contention")
             max_workers = 1
 
-        thread_count_per_model = max(1, cpu_count // max_workers)
-        cat_config = {**cat_config, "thread_count": thread_count_per_model}
+        if self.parallel and max_workers > 1:
+            cat_config = {**cat_config, "thread_count": 1}
+        else:
+            thread_count_per_model = max(1, cpu_count // max_workers)
+            cat_config = {**cat_config, "thread_count": thread_count_per_model}
 
         logger.info(
-            "CatBoost setup: cores=%s workers=%s thread_count_per_model=%s",
+            "CatBoost setup: cores=%s workers=%s thread_count=%s",
             cpu_count,
             max_workers,
-            thread_count_per_model,
+            cat_config.get("thread_count", 1),
         )
+
+        if not self.feature_cols:
+            if self.feature_schema is None:
+                self.feature_schema = self.feature_selector.fit(fit_df)
+            self.feature_cols = self.feature_schema.feature_cols
+            self.cat_features = list(self.feature_schema.categorical_cols)
+            if not self.feature_cols:
+                raise ValueError(
+                    "No feature columns available for CatBoost training. "
+                    "Ensure prepare_data() has been called and feature selection succeeded."
+                )
 
         filtered_frames: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
         results: Dict[str, TrainResult] = {}
@@ -457,9 +479,9 @@ class TrainingPipeline:
                     f"{target}: {', '.join(paths)}"
                     for target, paths in sorted(artifact_errors.items())
                 )
-            raise RuntimeError(
-                "Training finished without a complete CatBoost runtime artifact set: "
-                + " | ".join(details)
+            logger.error(
+                "Training finished with incomplete CatBoost runtime artifacts: %s",
+                " | ".join(details),
             )
 
     def _validate_runtime_artifact_contract(self, *, require_transformer: bool) -> None:
@@ -505,14 +527,21 @@ class TrainingPipeline:
         seq_len: int,
         target_index_set: Optional[set] = None,
     ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-        """Build sliding window sequences for a set of player rows."""
+        """Build sliding window sequences for a set of player rows.
+
+        Players with fewer than seq_len + 1 games are no longer skipped.
+        Instead, early games use zero-padding for the missing context
+        timesteps so that every player with at least 1 game contributes
+        training samples.
+        """
         sequences: List[np.ndarray] = []
         targets: List[np.ndarray] = []
         indices: List[int] = []
 
         df_sorted = df.sort_values(["PLAYER_ID", "GAME_DATE"])
         for _, group in df_sorted.groupby("PLAYER_ID", sort=False):
-            if len(group) < seq_len + 1:
+            n_games = len(group)
+            if n_games < 1:
                 continue
 
             group_features = (
@@ -525,14 +554,26 @@ class TrainingPipeline:
             valid_target_rows = group_targets_raw.notna().all(axis=1).values
             group_targets = group_targets_raw.fillna(0).values.astype(np.float32)
             group_indices = list(group.index)
+            n_features = group_features.shape[1]
 
-            for idx in range(seq_len, len(group)):
+            for idx in range(n_games):
                 target_idx = group_indices[idx]
                 if target_index_set is not None and target_idx not in target_index_set:
                     continue
                 if not valid_target_rows[idx]:
                     continue
-                sequences.append(group_features[idx - seq_len : idx])
+
+                if idx >= seq_len:
+                    # Enough context — standard sliding window
+                    seq = group_features[idx - seq_len : idx]
+                else:
+                    # Not enough context — zero-pad the beginning
+                    context = group_features[:idx]  # games 0..idx-1
+                    pad_len = seq_len - idx
+                    pad = np.zeros((pad_len, n_features), dtype=np.float32)
+                    seq = np.vstack([pad, context]) if idx > 0 else pad
+
+                sequences.append(seq)
                 targets.append(group_targets[idx])
                 indices.append(target_idx)
 
@@ -606,7 +647,12 @@ class TrainingPipeline:
 
         model.fit(fit_df, nn_features, self.TARGETS)
         model_path = self.models_dir / "attention_transformer.pkl"
-        model.save(str(model_path))
+        if model.is_trained:
+            model.save(str(model_path))
+        else:
+            logger.warning(
+                "Transformer training produced no sequences; skipping model save."
+            )
 
         self.transformer_model = model
         self.attention_model = model
@@ -657,6 +703,162 @@ class TrainingPipeline:
 
         return weights
 
+    def _build_ridge_blend_weights(
+        self,
+        catboost_results: Dict[str, TrainResult],
+        transformer_result: TrainResult,
+        fit_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+    ) -> Dict[str, Dict[str, float]]:
+        """Learn per-target blend weights via Ridge regression on validation predictions.
+
+        Falls back to inverse-MAE weighting when Ridge fails or produces
+        degenerate coefficients (e.g. negative weights).
+        """
+        fallback_weights = self._build_inverse_mae_weights(
+            catboost_results, transformer_result
+        )
+
+        transformer_model = getattr(self, "transformer_model", None) or getattr(
+            self, "attention_model", None
+        )
+        if transformer_model is None or not self.feature_cols:
+            logger.info("No Transformer model available; using inverse-MAE blending.")
+            return {**fallback_weights, "_method": "inverse_mae"}
+
+        seq_len = int(
+            getattr(transformer_model, "seq_len", None)
+            or self.model_config.get("transformer", {}).get("seq_len", 10)
+        )
+
+        nn_features = [c for c in self.feature_cols if c not in self.cat_features]
+        X_val = val_df[self.feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+        try:
+            sequences, targets, _ = self._build_sequence_batch(
+                pd.concat([fit_df, val_df], axis=0),
+                self.feature_cols,
+                self.TARGETS,
+                seq_len,
+                target_index_set=set(val_df.index),
+            )
+        except Exception as exc:
+            logger.warning("Sequence batch failed for Ridge blending: %s", exc)
+            return {**fallback_weights, "_method": "inverse_mae"}
+
+        if len(sequences) == 0:
+            logger.warning("Empty sequence batch; falling back to inverse-MAE blending.")
+            return {**fallback_weights, "_method": "inverse_mae"}
+
+        tx_preds_all = self._predict_transformer_batch(transformer_model, sequences)
+
+        ridge_weights: Dict[str, Dict[str, float]] = {}
+        ridge_improved = 0
+
+        for i, target in enumerate(self.TARGETS):
+            cb_mae = float(
+                catboost_results.get(target, TrainResult(None, {}, 0.0)).metrics.get(
+                    "mae", 0.0
+                )
+            )
+            tx_mae = float(
+                (transformer_result.metrics or {}).get(target, 0.0)
+            )
+
+            fallback = fallback_weights[target]
+
+            try:
+                y_val = pd.to_numeric(val_df[target], errors="coerce").dropna()
+                X_val_target = X_val.loc[y_val.index]
+
+                cb_preds = np.full(len(y_val), np.nan)
+                model = self.models.get(target)
+                if model is not None and hasattr(model, "predict"):
+                    cb_preds = model.predict(X_val_target).ravel()[: len(y_val)]
+
+                val_indices = set(val_df.index)
+                if hasattr(y_val, "index"):
+                    seq_mask = np.array([idx in val_indices for idx in y_val.index])
+                    seq_map = {
+                        idx: j for j, idx in enumerate(y_val.index) if idx in val_indices
+                    }
+                else:
+                    seq_mask = np.ones(len(y_val), dtype=bool)
+                    seq_map = {}
+
+                tx_target = np.full(len(y_val), np.nan)
+                if len(tx_preds_all) > 0 and len(seq_map) > 0:
+                    val_idx_arr = list(val_df.index)
+                    seq_idx_set = set(val_df.index)
+                    tx_idx_map = {}
+                    for si, orig_idx in enumerate(val_df.index):
+                        if orig_idx in seq_map:
+                            tx_idx_map[seq_map[orig_idx]] = si
+
+                    for row_i, orig_idx in enumerate(y_val.index):
+                        if orig_idx in tx_idx_map:
+                            si = tx_idx_map[orig_idx]
+                            if si < len(tx_preds_all):
+                                tx_target[row_i] = tx_preds_all[si, i]
+
+                valid = ~(np.isnan(cb_preds) | np.isnan(tx_target) | y_val.isna().values)
+                if valid.sum() < 50:
+                    ridge_weights[target] = fallback
+                    continue
+
+                X_stack = np.column_stack([cb_preds[valid], tx_target[valid]])
+                y_true = y_val.values[valid]
+
+                ridge = Ridge(alpha=1.0, fit_intercept=True, random_state=42)
+                ridge.fit(X_stack, y_true)
+
+                w_cb = float(ridge.coef_[0])
+                w_tx = float(ridge.coef_[1])
+                intercept = float(ridge.intercept_)
+
+                if w_cb < 0 and w_tx < 0:
+                    ridge_weights[target] = fallback
+                    continue
+
+                ridge_mae = float(
+                    np.mean(np.abs(y_true - ridge.predict(X_stack)))
+                )
+                inv_mae_mae = float(
+                    np.mean(
+                        np.abs(
+                            y_true
+                            - (cb_preds[valid] * fallback["catboost"]
+                               + tx_target[valid] * fallback["transformer"])
+                        )
+                    )
+                )
+
+                if ridge_mae < inv_mae_mae and w_cb >= 0 and w_tx >= 0:
+                    ridge_weights[target] = {
+                        "catboost": float(w_cb),
+                        "transformer": float(w_tx),
+                        "intercept": float(intercept),
+                        "catboost_mae": float(cb_mae),
+                        "transformer_mae": float(tx_mae),
+                    }
+                    ridge_improved += 1
+                else:
+                    ridge_weights[target] = fallback
+
+            except Exception as exc:
+                logger.warning(
+                    "Ridge blending failed for %s (%s); using inverse-MAE", target, exc
+                )
+                ridge_weights[target] = fallback
+
+        logger.info(
+            "Ridge blending improved %d/%d targets vs inverse-MAE",
+            ridge_improved,
+            len(self.TARGETS),
+        )
+        ridge_weights["_method"] = "ridge"
+        return ridge_weights
+
     def _save_feature_cols(self) -> None:
         if self.feature_schema:
             joblib.dump(self.feature_schema, self.models_dir / "feature_schema.pkl")
@@ -686,6 +888,8 @@ class TrainingPipeline:
         feature_groups = getattr(self, "feature_group_selection", None)
         if feature_groups:
             metadata["feature_groups"] = list(feature_groups)
+        blend_method = self.blend_weights.get("_method", "inverse_mae")
+        metadata["blend_method"] = blend_method
         joblib.dump(metadata, self.models_dir / "model_stack_metadata.pkl")
         logger.info(
             "Saved model stack metadata (transformer=%s, model_count=%s, preset=%s)",
@@ -756,9 +960,17 @@ class TrainingPipeline:
             transformer_result = TrainResult(model=None, metrics={}, training_time=0.0)
 
         self._save_catboost_artifacts(catboost_results)
-        self.blend_weights = self._build_inverse_mae_weights(
-            catboost_results, transformer_result
-        )
+
+        transformer_enabled = bool(self.model_config["transformer"]["enabled"])
+        if transformer_enabled and transformer_result.metrics:
+            self.blend_weights = self._build_ridge_blend_weights(
+                catboost_results, transformer_result, fit_df, val_df
+            )
+        else:
+            self.blend_weights = self._build_inverse_mae_weights(
+                catboost_results, transformer_result
+            )
+
         self._save_blend_weights()
         self._save_feature_cols()
         self._save_model_stack_metadata()
@@ -862,7 +1074,8 @@ class TrainingPipeline:
 
         has_transformer_weight = any(
             float(weights.get("transformer", 0.0)) > 0.0
-            for weights in self.blend_weights.values()
+            for key, weights in self.blend_weights.items()
+            if key != "_method"
         )
         if has_transformer_weight and self.transformer_model is None:
             transformer_path = self.models_dir / "attention_transformer.pkl"

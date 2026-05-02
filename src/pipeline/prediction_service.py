@@ -191,9 +191,10 @@ class PredictionService:
                     blend_cfg = self.blend_weights.get(target, {})
                     cb_weight = float(blend_cfg.get('catboost', 1.0))
                     tx_weight = float(blend_cfg.get('transformer', 0.0))
+                    intercept = float(blend_cfg.get('intercept', 0.0))
                     tx_idx = self.config.training.targets.index(target)
                     tx_pred = float(transformer_preds[tx_idx])
-                    predictions[target] = float(predictions[target] * cb_weight + tx_pred * tx_weight)
+                    predictions[target] = float(predictions[target] * cb_weight + tx_pred * tx_weight + intercept)
                     base_predictions[target] = predictions[target]
                     if f'{target}_STD' in predictions:
                         tx_uncertainty = float(blend_cfg.get('transformer_mae', predictions[f'{target}_STD']))

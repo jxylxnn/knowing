@@ -68,26 +68,23 @@ class RestGameDensityFeatureGroup(FeatureGroup):
         new_columns: dict[str, pd.Series] = {}
 
         # --- SCHED_GAMES_XD: count of games in last X days (shifted) ---
-        # For each player, for each game, count how many previous games (shifted)
-        # fall within the X-day window before the current game date.
+        # Vectorized using time-based rolling windows on a unit series.
+        # For each player we count previous games whose date falls in
+        # [current - delta, current).  `closed='left'` excludes the
+        # current game and `min_periods=0` yields 0 for empty windows.
+        tmp = df[['PLAYER_ID', 'GAME_DATE']].copy()
+        tmp['_count'] = 1.0
+
         for days, col_name in [(3, 'SCHED_GAMES_3D'), (5, 'SCHED_GAMES_5D'), (7, 'SCHED_GAMES_7D')]:
-            delta = pd.Timedelta(days=days)
-            counts = pd.Series(0.0, index=df.index, dtype=float)
-
-            for player_id, group in df.groupby('PLAYER_ID'):
-                dates = group['GAME_DATE'].values
-                idx = group.index.values
-                for i in range(len(dates)):
-                    current_date = dates[i]
-                    window_start = current_date - delta
-                    # Count previous games (not including current) within window
-                    count = 0
-                    for j in range(i):
-                        if window_start <= dates[j] < current_date:
-                            count += 1
-                    counts.loc[idx[i]] = float(count)
-
-            # Shift to prevent leakage: we want past games only
+            rolling = (
+                tmp.set_index('GAME_DATE')
+                .groupby('PLAYER_ID')['_count']
+                .rolling(f'{days}D', closed='left', min_periods=0)
+                .sum()
+            )
+            # `rolling` aligns 1-to-1 with `tmp` rows because both are sorted
+            # by PLAYER_ID and GAME_DATE.
+            counts = pd.Series(rolling.values, index=df.index, dtype=float)
             counts_shifted = counts.groupby(df['PLAYER_ID']).shift(1)
             new_columns[col_name] = fill_series_with_prior(counts_shifted, 0.0, diagnostics, col_name)
 
@@ -128,25 +125,26 @@ class RestGameDensityFeatureGroup(FeatureGroup):
             # Compute player's rest days (days since last game)
             player_rest = days_since_last.fillna(4.0).clip(0, 7)
 
-            # Build team game date lookup for opponent rest calculation
-            team_game_dates: dict[str, list] = {}
-            for tid, group in df.groupby('TEAM_ID'):
-                team_game_dates[tid] = sorted(group['GAME_DATE'].unique())
+            # Precompute sorted unique game dates per team for fast binary search
+            team_dates = df.groupby('TEAM_ID')['GAME_DATE'].apply(
+                lambda x: np.array(sorted(x.unique()), dtype='datetime64[ns]')
+            )
 
-            # For each row, compute opponent's rest days
+            # Vectorized opponent rest using np.searchsorted per opponent group
             opponent_rest = pd.Series(4.0, index=df.index, dtype=float)
-
-            for idx, row in df.iterrows():
-                opp_id = row.get('OPPONENT_ID')
-                game_date = row['GAME_DATE']
-                if pd.isna(opp_id) or opp_id not in team_game_dates:
+            for opp_id, group in df.groupby('OPPONENT_ID'):
+                if pd.isna(opp_id):
                     continue
-                opp_dates = team_game_dates[opp_id]
-                # Find the most recent game date before current for the opponent
-                prev_dates = [d for d in opp_dates if d < game_date]
-                if prev_dates:
-                    opp_rest_days = (game_date - prev_dates[-1]).total_seconds() / 86400.0
-                    opponent_rest.iloc[idx] = opp_rest_days
+                dates = team_dates.get(opp_id, np.array([], dtype='datetime64[ns]'))
+                if len(dates) == 0:
+                    continue
+                game_dates = group['GAME_DATE'].values.astype('datetime64[ns]')
+                idxs = np.searchsorted(dates, game_dates, side='left')
+                valid = idxs > 0
+                if valid.any():
+                    prev_dates = dates[idxs[valid] - 1]
+                    rest_days = (game_dates[valid] - prev_dates).astype('timedelta64[s]') / 86400.0
+                    opponent_rest.loc[group.index[valid]] = rest_days.astype(float)
 
             rest_advantage = (player_rest - opponent_rest).fillna(0.0).clip(-7, 7)
             new_columns['SCHED_REST_ADVANTAGE'] = rest_advantage

@@ -431,6 +431,10 @@ class NeuralNetworkTrainer(BaseTrainer):
         # Use optimal workers determined at initialization
         num_workers = self._optimal_workers
         
+        # Ensure device is torch.device object (defensive check)
+        if isinstance(self.device, str):
+            self.device = torch.device(self.device)
+        
         # Pin memory for faster GPU transfers (only on CUDA)
         pin_memory = self.use_gpu and self.device.type == 'cuda'
         

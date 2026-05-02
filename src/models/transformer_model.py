@@ -16,6 +16,7 @@ Optimizations included:
 
 import logging
 import math
+import sys
 from contextlib import nullcontext
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -257,13 +258,20 @@ class TransformerWrapper:
     def _create_sequences(
         self, df: pd.DataFrame, feature_cols: List[str], target_cols: List[str]
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Creates sliding window sequences for each player (vectorized)."""
+        """Creates sliding window sequences for each player with zero-padding.
+
+        Players with fewer than seq_len + 1 games are no longer skipped.
+        Instead, early games use zero-padding for the missing context
+        timesteps so that every player with at least 1 game contributes
+        training samples.
+        """
         df_sorted = df.sort_values(["PLAYER_ID", "GAME_DATE"])
         sequences = []
         targets = []
 
         for _, group in df_sorted.groupby("PLAYER_ID", sort=False):
-            if len(group) < self.seq_len + 1:
+            n_games = len(group)
+            if n_games < 1:
                 continue
 
             features = (
@@ -275,11 +283,22 @@ class TransformerWrapper:
             targets_raw = group[target_cols].apply(pd.to_numeric, errors="coerce")
             valid_target_rows = targets_raw.notna().all(axis=1).values
             targets_arr = targets_raw.fillna(0).values.astype(np.float32)
+            n_features = features.shape[1]
 
-            for idx in range(self.seq_len, len(group)):
+            for idx in range(n_games):
                 if not valid_target_rows[idx]:
                     continue
-                sequences.append(features[idx - self.seq_len : idx])
+                if idx >= self.seq_len:
+                    # Enough context — standard sliding window
+                    seq = features[idx - self.seq_len : idx]
+                else:
+                    # Not enough context — zero-pad the beginning
+                    context = features[:idx]  # games 0..idx-1
+                    pad_len = self.seq_len - idx
+                    pad = np.zeros((pad_len, n_features), dtype=np.float32)
+                    seq = np.vstack([pad, context]) if idx > 0 else pad
+
+                sequences.append(seq)
                 targets.append(targets_arr[idx])
 
         if not sequences:
@@ -323,7 +342,7 @@ class TransformerWrapper:
             "num_workers": num_workers,
             "drop_last": True,
         }
-        if num_workers > 0:
+        if num_workers > 0 and sys.platform != "darwin":
             loader_kwargs["persistent_workers"] = True
             loader_kwargs["prefetch_factor"] = 2
         loader = DataLoader(dataset, **loader_kwargs)

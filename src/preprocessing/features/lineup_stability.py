@@ -13,6 +13,7 @@ from src.preprocessing.features.base import (
     FeatureGroup,
     fill_series_with_prior,
 )
+from src.preprocessing.features._teammate_utils import TeammateContext
 
 
 def _concat_new_columns(df: pd.DataFrame, new_columns: dict[str, pd.Series]) -> pd.DataFrame:
@@ -63,7 +64,6 @@ class LineupStabilityFeatureGroup(FeatureGroup):
 
         # --- LINEUP_STARTER_RATE_10 ---
         # Fraction of last 10 games where MIN >= 25 (starter proxy)
-        is_starter = (df['MIN'] >= 25).astype(float)
         starter_rate = df.groupby('PLAYER_ID')['MIN'].transform(
             lambda x: x.shift(1).rolling(10, min_periods=3).apply(
                 lambda s: (s >= 25).mean(), raw=False
@@ -72,83 +72,37 @@ class LineupStabilityFeatureGroup(FeatureGroup):
         col_name = 'LINEUP_STARTER_RATE_10'
         new_columns[col_name] = fill_series_with_prior(starter_rate, 0.5, diagnostics, col_name)
 
-        # --- Precompute teammate sets per (TEAM_ID, GAME_DATE) ---
-        # Build mapping: (TEAM_ID, GAME_DATE) -> set of PLAYER_IDs who played (MIN > 0)
-        played_mask = df['MIN'] > 0
-        teammate_map: dict[tuple, set] = {}
-        for (tid, gdate), group in df[played_mask].groupby(['TEAM_ID', 'GAME_DATE']):
-            teammate_map[(tid, gdate)] = set(group['PLAYER_ID'].values)
+        # --- Shared teammate context ---
+        tctx = TeammateContext(df)
+        teammate_map = tctx.game_roster_map
 
         # --- LINEUP_TEAM_STABILITY_5 and LINEUP_TEAM_STABILITY_10 ---
         # Jaccard similarity of teammate sets across consecutive game transitions
-        def _compute_jaccard_stability(player_games: pd.DataFrame, window: int) -> pd.Series:
-            """For each row, compute avg Jaccard similarity of teammate sets over last `window` transitions."""
-            results = []
-            for _idx, row in player_games.iterrows():
-                tid = row['TEAM_ID']
-                gdate = row['GAME_DATE']
-                # Get this player's game dates for this team, sorted
-                player_team_games = player_games[
-                    (player_games['TEAM_ID'] == tid)
-                ].sort_values('GAME_DATE')
-                # Find games before current date
-                prior_games = player_team_games[player_team_games['GAME_DATE'] < gdate]['GAME_DATE'].values[-window:]
-                if len(prior_games) < 1:
-                    results.append(np.nan)
-                    continue
-                jaccard_vals = []
-                for i in range(len(prior_games)):
-                    g = prior_games[i]
-                    prev_games = player_team_games[player_team_games['GAME_DATE'] < g]['GAME_DATE'].values
-                    if len(prev_games) == 0:
-                        continue
-                    prev_g = prev_games[-1]
-                    set_curr = teammate_map.get((tid, g), set())
-                    set_prev = teammate_map.get((tid, prev_g), set())
-                    if len(set_curr) == 0 and len(set_prev) == 0:
-                        jaccard_vals.append(1.0)
-                    elif len(set_curr) == 0 or len(set_prev) == 0:
-                        jaccard_vals.append(0.0)
-                    else:
-                        intersection = len(set_curr & set_prev)
-                        union = len(set_curr | set_prev)
-                        jaccard_vals.append(intersection / union if union > 0 else 0.0)
-                results.append(np.mean(jaccard_vals) if jaccard_vals else np.nan)
-            return pd.Series(results, index=player_games.index)
+        # Vectorized: shift the (TEAM_ID, GAME_DATE) key within each player group,
+        # then compute Jaccard in a single pass over all rows.
+        df['_curr_key'] = list(zip(df['TEAM_ID'], df['GAME_DATE']))
+        df['_prev_key'] = df.groupby('PLAYER_ID')['_curr_key'].shift(1)
 
-        # Vectorized approach: compute per-player Jaccard stability
-        # For efficiency, we compute a shifted version using precomputed teammate sets
-        # Map each row to its team+date, then look up prior game's teammate set
-        df['_team_date_key'] = list(zip(df['TEAM_ID'], df['GAME_DATE']))
+        def _jaccard_for_keys(curr_key, prev_key):
+            if pd.isna(prev_key):
+                return np.nan
+            # prev_key comes from a tuple, but after shift it may be a list or tuple
+            prev_key = tuple(prev_key) if not isinstance(prev_key, tuple) else prev_key
+            curr_set = teammate_map.get(curr_key, set())
+            prev_set = teammate_map.get(prev_key, set())
+            if not curr_set and not prev_set:
+                return 1.0
+            if not curr_set or not prev_set:
+                return 0.0
+            inter = len(curr_set & prev_set)
+            union = len(curr_set | prev_set)
+            return inter / union if union > 0 else 0.0
 
-        # For each player, get their sorted game dates and compute Jaccard for consecutive pairs
-        jaccard_series = pd.Series(np.nan, index=df.index, dtype=float)
-
-        for player_id, player_df in df.groupby('PLAYER_ID'):
-            player_idx = player_df.index
-            player_dates = player_df['GAME_DATE'].values
-            player_teams = player_df['TEAM_ID'].values
-
-            # For each game, compute Jaccard with previous game's teammate set
-            jaccard_vals = []
-            for i in range(len(player_dates)):
-                curr_key = (player_teams[i], player_dates[i])
-                if i == 0:
-                    jaccard_vals.append(np.nan)
-                    continue
-                prev_key = (player_teams[i - 1], player_dates[i - 1])
-                set_curr = teammate_map.get(curr_key, set())
-                set_prev = teammate_map.get(prev_key, set())
-                if len(set_curr) == 0 and len(set_prev) == 0:
-                    jaccard_vals.append(1.0)
-                elif len(set_curr) == 0 or len(set_prev) == 0:
-                    jaccard_vals.append(0.0)
-                else:
-                    intersection = len(set_curr & set_prev)
-                    union = len(set_curr | set_prev)
-                    jaccard_vals.append(intersection / union if union > 0 else 0.0)
-
-            jaccard_series.loc[player_idx] = jaccard_vals
+        jaccard_vals = [
+            _jaccard_for_keys(c, p)
+            for c, p in zip(df['_curr_key'], df['_prev_key'])
+        ]
+        jaccard_series = pd.Series(jaccard_vals, index=df.index, dtype=float)
 
         # Shift Jaccard values to prevent leakage (we want past transitions only)
         jaccard_shifted = jaccard_series.groupby(df['PLAYER_ID']).shift(1)
@@ -162,15 +116,9 @@ class LineupStabilityFeatureGroup(FeatureGroup):
 
         # --- LINEUP_ROTATION_SIZE_VAR_5 ---
         # Variance of team roster size (players with MIN > 0) over last 5 games
-        # Precompute roster size per (TEAM_ID, GAME_DATE)
-        roster_size_map: dict[tuple, int] = {}
-        for (tid, gdate), group in df[played_mask].groupby(['TEAM_ID', 'GAME_DATE']):
-            roster_size_map[(tid, gdate)] = len(group)
-
-        # Map roster size to each row
-        df['_roster_size'] = df.apply(
-            lambda row: roster_size_map.get((row['TEAM_ID'], row['GAME_DATE']), np.nan), axis=1
-        )
+        # Precompute roster size per (TEAM_ID, GAME_DATE) via the shared map
+        roster_size_map = {k: len(v) for k, v in teammate_map.items()}
+        df['_roster_size'] = df['_curr_key'].map(roster_size_map).astype(float)
 
         # Rolling variance of roster size per player (shifted)
         roster_var = df.groupby('PLAYER_ID')['_roster_size'].transform(
@@ -193,6 +141,6 @@ class LineupStabilityFeatureGroup(FeatureGroup):
         new_columns[col_name] = fill_series_with_prior(min_rank_avg, 5.0, diagnostics, col_name)
 
         # Clean up temporary columns
-        df.drop(columns=['_team_date_key', '_roster_size', '_min_rank'], inplace=True, errors='ignore')
+        df.drop(columns=['_curr_key', '_prev_key', '_roster_size', '_min_rank'], inplace=True, errors='ignore')
 
         return _concat_new_columns(df, new_columns)

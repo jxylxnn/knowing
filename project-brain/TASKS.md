@@ -2,18 +2,46 @@
 
 ## NOW
 
+### Apply planned bug-fix batch (groupby KeyError, CatBoost GPU callback, device AttributeError)
+
+- Status: DONE on 2026-04-25.
+- `pace_role.py` already uses string column names in groupby; no code change required.
+- `catboost_trainer.py` already conditionally disables callbacks for GPU and rebuilds fit_kwargs on fallback; no code change required.
+- `nn_trainer.py` received defensive `isinstance(self.device, str)` coercion in `_create_loader()`.
+- All targeted tests pass (preprocessing 19/19, nn_trainer 2/2, runtime artifact 5/5, transformer 8/8).
+
+### Validate zero-padding behavior on real training data
+
+- Why it matters: the zero-padding change increases the number of training samples for players with short careers. A live training run should confirm that the Transformer still converges and that the padded samples do not degrade validation MAE.
+- Likely files:
+  - `src/models/transformer_model.py`
+  - `src/training/pipeline.py`
+  - `train.py`
+- Done when:
+  - `python train.py` completes with the M tier (seq_len=20) and the Transformer validation MAE is comparable to or better than before
+  - the training log shows more sequences generated than before (due to short-player inclusion)
+
 ### Wire new feature groups into FeatureEngineer and training presets — DONE
 
 - Completed 2026-04-12. All seven new feature groups are now wired into `FeatureEngineer._build_groups()`, the `full` training preset in both `config/default.yaml` and `src/training/presets.py`, and `FeatureSelector.SAFE_PREFIXES` in `src/utils/prediction_utils.py`. The `small` preset is unchanged. Preprocessing tests pass (19/19). `FeatureEngineer()` instantiates with 19 groups total.
 
-### Add unit tests for the seven new feature groups
+### Add unit tests for the seven new feature groups — DONE
 
-- Why it matters: the new groups are import-tested and smoke-tested with synthetic data but have no dedicated unit tests covering edge cases (cold start, single-game players, missing optional columns, NaN propagation). The three newest groups (`InjuryAdjustedOpportunityFeatureGroup`, `TeammateUsageFeatureGroup`, `DefensePositionFeatureGroup`) use row-level iteration for teammate-set and opponent-position lookups, which may be slow on large datasets and should be tested for correctness.
-- Likely files:
-  - `tests/test_preprocessing/test_feature_engineer.py` (or a new test file)
-- Done when:
-  - each group has tests for: empty input, missing optional columns, single-player single-game, multi-player multi-game, NaN fill behavior
-  - all tests pass
+- Completed on 2026-04-21.
+- Delivered:
+  - `tests/test_preprocessing/test_new_feature_groups.py` with 38 tests covering all 7 new feature groups plus shared utilities and performance smoke tests:
+    - `RestGameDensityFeatureGroup` — 5 tests (output columns, first-game priors, B2B flag, no leakage, missing-opponent fallback)
+    - `LineupStabilityFeatureGroup` — 4 tests (output columns, first-game priors, team-change stability, no leakage)
+    - `InjuryAdjustedOpportunityFeatureGroup` — 4 tests (output columns, first-game priors, missing high-usage teammate, no leakage)
+    - `TeammateUsageFeatureGroup` — 4 tests (output columns, first-game priors, empty roster fallback, no leakage)
+    - `RecencyFormFeatureGroup` — 4 tests (output columns, first-game priors, cold-start player, no leakage)
+    - `MinutesConfidenceFeatureGroup` — 4 tests (output columns, first-game priors, cold-start flag, no leakage)
+    - `DefensePositionFeatureGroup` — 5 tests (output columns, first-game priors, missing-opponent fallback, no-archetype inference, no leakage)
+    - 2 integration tests for `FeatureDiagnostics` tracking and `FeatureContext` prior usage
+    - `TestTeammateUtils` — 4 tests for shared `_teammate_utils.py` (game roster map, regular teammates map, high-usage teammates map, empty-roster handling)
+    - `TestPerformanceSmoke` — 2 performance smoke tests (`rest_density` < 2s, `lineup_stability` < 3s on 500-row synthetic DataFrames)
+  - All tests use small synthetic DataFrames and run fast/offline.
+  - Full suite result: `178 passed, 0 failed`.
 
 ### Export complete projection stats for query-time use — DONE
 
@@ -126,15 +154,15 @@
   - preflight failure modes (missing CSV, unwritable models dir) live-verified
   - full training run deferred due to runtime length; unit tests confirm artifact contract
 
-### Audit remaining legacy scraper modules for inactive drift
+### Audit remaining legacy scraper modules for inactive drift — DONE
 
-- Why it matters: `rotowire_lineup_scraper.py` and similar alternate paths still look legacy relative to the active simulator stack.
-- Likely files:
-  - `src/data/rotowire_lineup_scraper.py`
-  - other non-primary `src/data/` scrapers
-- Done when:
-  - active vs inactive scraper modules are documented clearly
-  - duplicate broken implementations are either fixed or marked inactive
+- Completed on 2026-04-21.
+- Delivered:
+  - `src/data/rotowire_lineup_scraper.py`: removed unreachable code after `return` in `_get_config_value`, moved `self._cache_timestamp` initialization into `__init__`, fixed uppercase attribute references (`MAX_RETRIES`, `RETRY_DELAY`, `CACHE_TTL_MINUTES`) to lowercase instance attributes, removed undefined `ROTONAME_TO_TEAM` usage and replaced with `normalize_team()`.
+  - `src/data/nba_defense_scraper.py`: added missing import of `ABBR_TO_ID` and `ID_TO_ABBR` from `src.utils.team_mappings`, replaced all undefined `TEAM_ID_MAP` and `ID_TO_TEAM` references, fixed `DefensiveMatchupAnalyzer` to initialize `max_retries`, `retry_delay`, and `headers` and to use `defense_scraper._session` for HTTP calls instead of undefined `self._session`/`self.HEADERS`.
+  - `src/data/schedule_scraper.py`: replaced the 30-day stub in `get_remaining_season()` with a computed season-end horizon (capped at 180 days), added TODO/fallback logging, and updated docstring to document the upstream limitation.
+  - `tests/test_data/test_scraper_health.py`: added 4 new regression tests covering rotowire constructor/attrs, unreachable-code safety, defense-scraper import/analyzer attrs, and schedule-scraper horizon cap.
+  - Full test suite: `140 passed, 0 failed`.
 
 ## LATER
 

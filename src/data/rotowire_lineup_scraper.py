@@ -30,6 +30,7 @@ class RotoWireLineupScraper:
         self._session = requests.Session()
         self._session.headers.update(self._get_headers())
         self._lineups_cache: Dict[str, dict] = {}
+        self._cache_timestamp: Optional[datetime] = None
         
         self.max_retries = self._get_config_value('http.max_retries', 3)
         self.retry_delay = self._get_config_value('http.retry_delay', 2.0)
@@ -73,7 +74,6 @@ class RotoWireLineupScraper:
             else:
                 return default
         return obj
-        self._cache_timestamp: Optional[datetime] = None
         
     def get_todays_lineups(self) -> Dict[str, dict]:
         """
@@ -100,13 +100,13 @@ class RotoWireLineupScraper:
             cached = self._lineups_cache[cache_key]
             if cached.get('timestamp'):
                 cache_time = datetime.fromisoformat(cached['timestamp'])
-                if datetime.now() - cache_time < timedelta(minutes=self.CACHE_TTL_MINUTES):
+                if datetime.now() - cache_time < timedelta(minutes=self.cache_ttl_minutes):
                     return cached
         
         cache_file = os.path.join(self.cache_dir, f"lineups_{game_date}.json")
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            if datetime.now() - file_time < timedelta(minutes=self.CACHE_TTL_MINUTES):
+            if datetime.now() - file_time < timedelta(minutes=self.cache_ttl_minutes):
                 try:
                     with open(cache_file, 'r') as f:
                         cached = json.load(f)
@@ -136,7 +136,7 @@ class RotoWireLineupScraper:
             'fetched_at': datetime.now().isoformat()
         }
         
-        for attempt in range(self.MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 response = self._session.get(self.LINEUPS_URL, timeout=15)
                 response.raise_for_status()
@@ -152,8 +152,8 @@ class RotoWireLineupScraper:
                     
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                if attempt < self.MAX_RETRIES - 1:
-                    time.sleep(self.RETRY_DELAY * (attempt + 1))
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
             except Exception as e:
                 logger.error(f"Error parsing lineups: {e}")
                 break
@@ -346,12 +346,6 @@ class RotoWireLineupScraper:
         """Convert team name to abbreviation."""
         team_lower = team_name.lower().strip()
         
-        if team_lower in ROTONAME_TO_TEAM:
-            return ROTONAME_TO_TEAM[team_lower]
-        
-        if team_lower in ROTONAME_TO_TEAM.values():
-            return [k for k, v in ROTONAME_TO_TEAM.items() if v == team_lower][0]
-        
         return normalize_team(team_name)
     
     def get_projected_minutes(self, team_abbr: str = None) -> Dict[str, float]:
@@ -372,7 +366,7 @@ class RotoWireLineupScraper:
         
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
-            if datetime.now() - file_time < timedelta(minutes=self.CACHE_TTL_MINUTES):
+            if datetime.now() - file_time < timedelta(minutes=self.cache_ttl_minutes):
                 try:
                     with open(cache_file, 'r') as f:
                         return json.load(f)

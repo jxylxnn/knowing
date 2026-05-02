@@ -578,7 +578,12 @@ class ProjectionLoader:
         import json
         from pathlib import Path
         
-        cache_file = Path(self.data_dir).parent / 'cache' / 'all_team_defense_2025-26.json'
+        cache_dir = Path(self.data_dir).parent / 'cache'
+        candidates = sorted(cache_dir.glob('all_team_defense_*.json'))
+        if candidates:
+            cache_file = candidates[-1]
+        else:
+            cache_file = cache_dir / 'all_team_defense_2025-26.json'
         
         if not cache_file.exists():
             return None

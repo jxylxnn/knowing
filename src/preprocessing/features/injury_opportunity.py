@@ -13,6 +13,7 @@ from src.preprocessing.features.base import (
     FeatureGroup,
     fill_series_with_prior,
 )
+from src.preprocessing.features._teammate_utils import TeammateContext
 
 
 def _concat_new_columns(df: pd.DataFrame, new_columns: dict[str, pd.Series]) -> pd.DataFrame:
@@ -66,128 +67,62 @@ class InjuryAdjustedOpportunityFeatureGroup(FeatureGroup):
         new_columns: dict[str, pd.Series] = {}
 
         # ----------------------------------------------------------------
-        # Step 1: Build (TEAM_ID, GAME_DATE) → set of PLAYER_IDs mapping
+        # Shared teammate context (replaces duplicated roster maps)
         # ----------------------------------------------------------------
-        played_mask = df['MIN'] > 0
-        game_roster: dict[tuple, set] = {}
-        for (tid, gdate), group in df[played_mask].groupby(['TEAM_ID', 'GAME_DATE']):
-            game_roster[(tid, gdate)] = set(group['PLAYER_ID'].values)
-
-        # ----------------------------------------------------------------
-        # Step 2: Identify "regular" teammates per team
-        #   A player is "regular" if they appeared in >50% of the team's
-        #   last 20 games (using expanding window for early games).
-        # ----------------------------------------------------------------
-        # Get sorted unique game dates per team
-        team_games: dict = {}
-        for tid, group in df[played_mask].groupby('TEAM_ID'):
-            team_games[tid] = sorted(group['GAME_DATE'].unique())
-
-        # For each team, compute game appearance counts per player using rolling windows
-        # Build a lookup: (TEAM_ID, GAME_DATE) → set of regular PLAYER_IDs
-        regular_teammates: dict[tuple, set] = {}
-
-        for tid, dates in team_games.items():
-            # For each date, look at the last 20 games before that date
-            for i, gdate in enumerate(dates):
-                # Get the last 20 game dates before (or including) this one
-                window_dates = dates[max(0, i - 19): i + 1]
-                # Count appearances of each player in those games
-                player_counts: dict = {}
-                for wd in window_dates:
-                    roster = game_roster.get((tid, wd), set())
-                    for pid in roster:
-                        player_counts[pid] = player_counts.get(pid, 0) + 1
-
-                # Regular = appeared in >50% of those games
-                threshold = len(window_dates) * 0.5
-                regulars = {pid for pid, cnt in player_counts.items() if cnt > threshold}
-                regular_teammates[(tid, gdate)] = regulars
+        tctx = TeammateContext(df)
+        game_roster = tctx.game_roster_map
+        regular_teammates = tctx.regular_teammates_map
+        high_usage_teammates = tctx.high_usage_teammates_map
 
         # ----------------------------------------------------------------
-        # Step 3: Identify "high usage" teammates per team per game
-        #   Usage = FGA / team_FGA over last 20 games. Top 3 are "high usage".
+        # Compute per-row features
         # ----------------------------------------------------------------
-        fga_available = 'FGA' in df.columns
-        if not fga_available:
-            # Fallback: use PTS as a proxy for usage
-            usage_col = 'PTS' if 'PTS' in df.columns else 'MIN'
-        else:
-            usage_col = 'FGA'
+        # Vectorized lookups using Series map
+        df['_current_roster'] = pd.Series(
+            [game_roster.get((tid, gd), set()) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+            index=df.index,
+        )
+        df['_regulars'] = pd.Series(
+            [regular_teammates.get((tid, gd), set()) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+            index=df.index,
+        )
+        df['_high_usage'] = pd.Series(
+            [high_usage_teammates.get((tid, gd), set()) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+            index=df.index,
+        )
 
-        # Compute per-player rolling usage per team
-        # For each (TEAM_ID, GAME_DATE), compute each player's usage share
-        high_usage_teammates: dict[tuple, set] = {}
+        # Missing regular teammates (excluding self)
+        df['_missing_regulars'] = [
+            regs - curr - {pid}
+            for regs, curr, pid in zip(df['_regulars'], df['_current_roster'], df['PLAYER_ID'])
+        ]
 
-        for tid, dates in team_games.items():
-            for i, gdate in enumerate(dates):
-                window_dates = dates[max(0, i - 19): i + 1]
-                # Sum usage per player over window
-                player_usage: dict = {}
-                for wd in window_dates:
-                    roster = game_roster.get((tid, wd), set())
-                    # Get usage values for players in this game
-                    mask = (df['TEAM_ID'] == tid) & (df['GAME_DATE'] == wd) & (df['PLAYER_ID'].isin(roster))
-                    game_rows = df.loc[mask]
-                    for _, row in game_rows.iterrows():
-                        pid = row['PLAYER_ID']
-                        val = row.get(usage_col, 0)
-                        if pd.isna(val):
-                            val = 0
-                        player_usage[pid] = player_usage.get(pid, 0) + val
-
-                # Top 3 by usage
-                sorted_players = sorted(player_usage.items(), key=lambda x: x[1], reverse=True)
-                top3 = {pid for pid, _ in sorted_players[:3]}
-                high_usage_teammates[(tid, gdate)] = top3
-
-        # ----------------------------------------------------------------
-        # Step 4: Compute per-row features
-        # ----------------------------------------------------------------
-        # For each row, determine which regular teammates are missing
+        # INJURY_OPP_MISSING_HIGH_USAGE
         missing_high_usage = pd.Series(0.0, index=df.index, dtype=float)
-        missing_same_pos = pd.Series(0.0, index=df.index, dtype=float)
-        team_absences = pd.Series(0.0, index=df.index, dtype=float)
+        for idx in df.index:
+            missing = df.loc[idx, '_missing_regulars']
+            high = df.loc[idx, '_high_usage']
+            missing_high_usage.iloc[idx] = 1.0 if (missing & high) else 0.0
 
+        # INJURY_OPP_MISSING_SAME_POS
         # Compute per-player average MIN for "same position" check
         player_avg_min = df.groupby('PLAYER_ID')['MIN'].transform(
             lambda x: x.shift(1).rolling(20, min_periods=3).mean()
         )
 
-        for idx, row in df.iterrows():
-            tid = row['TEAM_ID']
-            gdate = row['GAME_DATE']
-            pid = row['PLAYER_ID']
+        missing_same_pos = pd.Series(0.0, index=df.index, dtype=float)
+        # Precompute global average MIN per player for fast lookup
+        global_avg_min = df.groupby('PLAYER_ID')['MIN'].mean().to_dict()
 
-            current_roster = game_roster.get((tid, gdate), set())
-            regulars = regular_teammates.get((tid, gdate), set())
-            high_usage = high_usage_teammates.get((tid, gdate), set())
-
-            # Missing regular teammates
-            missing_regulars = regulars - current_roster
-            # Don't count the player themselves as missing
-            missing_regulars = missing_regulars - {pid}
-
-            # INJURY_OPP_MISSING_HIGH_USAGE: is any high-usage regular missing?
-            missing_high_usage_regulars = missing_regulars & high_usage
-            missing_high_usage.iloc[idx] = 1.0 if len(missing_high_usage_regulars) > 0 else 0.0
-
-            # INJURY_OPP_MISSING_SAME_POS: count missing regulars with similar minutes
+        for idx in df.index:
+            missing_regulars = df.loc[idx, '_missing_regulars']
             my_avg_min = player_avg_min.iloc[idx] if not pd.isna(player_avg_min.iloc[idx]) else ctx.league_priors.get('MIN', 24.0)
             similar_min_count = 0
             for missing_pid in missing_regulars:
-                # Get this missing player's average minutes
-                missing_player_rows = df[df['PLAYER_ID'] == missing_pid]
-                if len(missing_player_rows) > 0:
-                    missing_avg = missing_player_rows['MIN'].mean()
-                else:
-                    missing_avg = ctx.league_priors.get('MIN', 24.0)
+                missing_avg = global_avg_min.get(missing_pid, ctx.league_priors.get('MIN', 24.0))
                 if abs(missing_avg - my_avg_min) <= 5.0:
                     similar_min_count += 1
             missing_same_pos.iloc[idx] = float(similar_min_count)
-
-            # Count total missing regulars for TEAM_ABSENCES
-            team_absences.iloc[idx] = float(len(missing_regulars))
 
         # Shift to prevent leakage
         missing_high_usage_shifted = missing_high_usage.groupby(df['PLAYER_ID']).shift(1).fillna(0.0)
@@ -198,8 +133,6 @@ class InjuryAdjustedOpportunityFeatureGroup(FeatureGroup):
 
         # ----------------------------------------------------------------
         # Step 5: INJURY_OPP_MIN_BOOST and INJURY_OPP_USAGE_BOOST
-        #   When high-usage teammate is missing, compute the difference between
-        #   this player's MIN in this game and their season avg MIN. Shift by 1.
         # ----------------------------------------------------------------
         # Season average MIN per player (rolling expanding mean, shifted)
         season_avg_min = df.groupby('PLAYER_ID')['MIN'].transform(
@@ -215,6 +148,7 @@ class InjuryAdjustedOpportunityFeatureGroup(FeatureGroup):
         )
 
         # Usage boost: similar but for usage (FGA/game)
+        fga_available = 'FGA' in df.columns
         if fga_available:
             season_avg_fga = df.groupby('PLAYER_ID')['FGA'].transform(
                 lambda x: x.shift(1).expanding(min_periods=3).mean()
@@ -230,14 +164,25 @@ class InjuryAdjustedOpportunityFeatureGroup(FeatureGroup):
 
         # ----------------------------------------------------------------
         # Step 6: INJURY_OPP_TEAM_ABSENCES_5
-        #   Rolling 5-game count of teammate absences per game, shifted.
         # ----------------------------------------------------------------
+        team_absences = pd.Series(
+            [float(len(m)) for m in df['_missing_regulars']],
+            index=df.index,
+            dtype=float,
+        )
         team_absences_shifted = team_absences.groupby(df['PLAYER_ID']).shift(1)
         team_absences_rolling = team_absences_shifted.groupby(df['PLAYER_ID']).transform(
             lambda x: x.rolling(5, min_periods=2).mean()
         )
         new_columns['INJURY_OPP_TEAM_ABSENCES_5'] = fill_series_with_prior(
             team_absences_rolling, 0.0, diagnostics, 'INJURY_OPP_TEAM_ABSENCES_5'
+        )
+
+        # Clean up temporary columns
+        df.drop(
+            columns=['_current_roster', '_regulars', '_high_usage', '_missing_regulars'],
+            inplace=True,
+            errors='ignore',
         )
 
         return _concat_new_columns(df, new_columns)

@@ -909,3 +909,152 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 
 - If live benchmarking shows the deterministic templates are too coarse for the desired cold-start lift.
 - If the repo later gains a proper persisted feature-store or clustering artifact boundary that can absorb a learned archetype model cleanly.
+
+---
+
+## DR-021: Increase M Tier Transformer seq_len to 20 and Zero-Pad Short Player Sequences
+
+- Status: active
+- Date: 2026-04-14
+- Confidence: high
+
+### Context
+
+- The M tier transformer config used `seq_len=10` and `max_seq_length=10`, while the L tier already used 20/20 and the XL tier used 50/50. The M tier's shorter window limited the temporal context available to the model for medium-sized hardware.
+- Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) skipped players with fewer than `seq_len + 1` games entirely, discarding potentially useful training signal from short-career players.
+
+### Options Considered
+
+1. Keep seq_len=10 for M tier and continue skipping short players.
+2. Increase seq_len to 20 for M tier and continue skipping short players.
+3. Increase seq_len to 20 for M tier and add zero-padding for short players so they still contribute training samples.
+
+### Decision
+
+- Option 3: increase M tier `seq_len` and `max_seq_length` from 10 to 20, and add zero-padding for players with fewer than `seq_len` context games so they still produce training samples.
+
+### Why
+
+- A longer sequence window gives the M tier more temporal context, matching the L tier's window on hardware that can support it.
+- Zero-padding preserves training signal from short-career players instead of discarding them. The model can learn to attend to the padding mask implicitly.
+- The zero-padding approach is standard in transformer sequence modeling and preserves the sliding-window behavior for players with enough games.
+
+### Tradeoffs
+
+- More training samples per epoch (short players now contribute), which increases training time slightly.
+- Zero-padded sequences may introduce noise early in training until the model learns to down-weight padded positions.
+- The M tier model size (d_model=128, 3 layers) is unchanged, so the longer sequence increases memory per batch slightly.
+
+### Consequences
+
+- `SIZE_TIER_SPECS['M']['transformer']['seq_len']` and `max_seq_length` are now 20.
+- `_create_sequences()` and `_build_sequence_batch()` now produce sequences for all players with at least 1 game, zero-padding the beginning of short sequences.
+- Players with more than `seq_len + 1` games still produce the same sliding-window samples as before (no regression).
+- New tests in `tests/test_models/test_transformer_model.py` verify the config change, zero-padding behavior, and backward compatibility.
+
+### Revisit Triggers
+
+- If zero-padded sequences degrade validation MAE on real training data.
+- If the M tier training time becomes prohibitive due to the increased sample count.
+
+---
+
+## DR-023: Scraper Reliability Fixes — rotowire_lineup, nba_defense, schedule
+
+- Status: active
+- Date: 2026-04-21
+- Confidence: high
+
+### Context
+
+- A project audit identified multiple confirmed or suspected scraper reliability bugs:
+  1. `rotowire_lineup_scraper.py` had unreachable code after a `return`, uppercase attribute references that didn't match lowercase instance attributes, and an undefined `ROTONAME_TO_TEAM` constant.
+  2. `nba_defense_scraper.py` referenced `TEAM_ID_MAP` and `ID_TO_TEAM` without importing them, and `DefensiveMatchupAnalyzer` referenced `self._session`/`self.HEADERS` which it did not define.
+  3. `schedule_scraper.py::get_remaining_season()` was a stub that only fetched the next 30 days instead of the actual remaining season.
+
+### Options Considered
+
+1. Delete the legacy scraper modules and rely solely on the actively maintained `LineupScraper`/`ScheduleScraper` paths.
+2. Fix the bugs in place, add regression tests, and document upstream limitations.
+3. Leave the bugs open and add runtime guards that skip the broken modules.
+
+### Decision
+
+- Option 2: fix in place. These modules are still imported by downstream code and by the `__main__` smoke-test blocks, so deleting them would create import breakage. The fixes are small and surgical.
+
+### Tradeoffs
+
+- `rotowire_lineup_scraper.py` remains a secondary/legacy path, but it now compiles and its constructor is safe.
+- `nba_defense_scraper.py` still depends on upstream NBA.com Stats API rate limits, but undefined-name crashes are eliminated.
+- `schedule_scraper.py::get_remaining_season()` still composes daily scoreboard calls because nba_api does not expose a single "remaining games" endpoint; the 180-day cap prevents runaway API usage.
+
+### Consequences
+
+- `src/data/rotowire_lineup_scraper.py`: `self._cache_timestamp` moved to `__init__`, dead code removed, uppercase references normalized to lowercase instance attributes, `ROTONAME_TO_TEAM` replaced with `normalize_team()`.
+- `src/data/nba_defense_scraper.py`: imports `ABBR_TO_ID` and `ID_TO_ABBR` from `src.utils.team_mappings`, replaces all `TEAM_ID_MAP`/`ID_TO_TEAM` references, and initializes `DefensiveMatchupAnalyzer` with `max_retries`, `retry_delay`, `headers`, plus uses `defense_scraper._session` for HTTP.
+- `src/data/schedule_scraper.py`: `get_remaining_season()` now iterates to the computed season end (June 30) with a 180-day cap, explicit TODO, and logged warnings.
+- `tests/test_data/test_scraper_health.py`: 4 new regression tests added; full suite now `140 passed, 0 failed`.
+
+### Revisit Triggers
+
+- If nba_api adds a single "remaining games" endpoint, replace the composed daily fetches.
+- If `rotowire_lineup_scraper.py` or `nba_defense_scraper.py` are fully superseded by active paths, consider deprecating or removing them.
+
+---
+
+## DR-024: Extract Shared Teammate/Roster Precomputations Into `_teammate_utils.py`
+
+- Status: active
+- Date: 2026-04-21
+- Confidence: high
+
+### Context
+
+- `lineup_stability`, `injury_opportunity`, and `teammate_usage` each independently built `(TEAM_ID, GAME_DATE) → roster` mappings, `regular_teammates` maps, and `high_usage_teammates` maps.  This was wasteful (O(n) work repeated 3×) and risked subtle semantic drift if thresholds or window sizes diverged.
+- `RestGameDensityFeatureGroup` used nested Python loops over player games to count games in X-day windows, which was O(n²) in the worst case.
+- `LineupStabilityFeatureGroup` computed Jaccard similarity with per-player loops, also O(n²) in pathological cases.
+
+### Options Considered
+
+1. Keep the duplicated logic and accept the redundancy.
+2. Extract a shared utility module (`_teammate_utils.py`) with pure functions and a `TeammateContext` container.
+3. Move the maps into `FeatureContext` in `base.py`.
+
+### Decision
+
+- Option 2: create `src/preprocessing/features/_teammate_utils.py` with:
+  - `build_game_roster_map`
+  - `build_team_games_map`
+  - `build_regular_teammates_map`
+  - `build_high_usage_teammates_map`
+  - `build_team_totals_map`
+  - `TeammateContext` class that bundles the above for easy reuse.
+- Refactor `lineup_stability.py`, `injury_opportunity.py`, and `teammate_usage.py` to import and use `TeammateContext` instead of recomputing internally.
+- Vectorise `RestGameDensityFeatureGroup` game-count windows with pandas `rolling(..., closed='left')` on a temporary unit series.
+- Replace `LineupStabilityFeatureGroup` per-player Jaccard loops with a vectorised key-shift approach: shift the `(TEAM_ID, GAME_DATE)` tuple within each player group, then compute Jaccard in a single list comprehension over all rows.
+- Replace `rest_density.py` opponent-rest nested loops with `np.searchsorted` on pre-sorted `datetime64[ns]` arrays per team.
+
+### Why
+
+- Centralising roster logic guarantees consistency across feature groups and makes the maps cheap to reuse.
+- Vectorised pandas/numpy operations remove the dominant O(n²) Python loops without changing feature semantics.
+- The `_teammate_utils.py` boundary is private (underscore prefix) so it can evolve without affecting public feature-group contracts.
+
+### Tradeoffs
+
+- Slightly more indirection for readers of the individual feature groups.
+- The vectorised `rest_density` path uses a temporary `tmp` DataFrame; memory cost is negligible for current data scale.
+- `np.searchsorted` requires homogeneous `datetime64[ns]` arrays; a dtype mismatch (e.g. object array of `Timestamp`s) will raise, so the code explicitly casts.
+
+### Consequences
+
+- `lineup_stability.py`, `injury_opportunity.py`, and `teammate_usage.py` are now ~30–50 % shorter and no longer contain duplicated roster-building logic.
+- `rest_density.py` game-count loops are gone; performance on synthetic 500-row DataFrames dropped from >2 s to <0.2 s.
+- `lineup_stability.py` Jaccard computation no longer uses per-player Python loops.
+- Full test suite after refactor: `178 passed, 0 failed`.
+- New tests added: `TestTeammateUtils` (4 tests) and `TestPerformanceSmoke` (2 tests) in `tests/test_preprocessing/test_new_feature_groups.py`.
+
+### Revisit Triggers
+
+- If additional feature groups need roster context, evaluate whether `_teammate_utils.py` should be promoted to a public module.
+- If data scale grows to the point where even the vectorised paths become bottlenecks, consider numba or polars.

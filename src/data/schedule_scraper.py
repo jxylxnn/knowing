@@ -280,12 +280,15 @@ class ScheduleScraper:
     def get_remaining_season(self, season: Optional[str] = None) -> pd.DataFrame:
         """
         Fetches all remaining unplayed games for the season.
-        This is heavier and uses leaguegamefinder.
+
+        NOTE: nba_api does not expose a single "remaining games" endpoint, so this
+        composes daily scoreboard calls from today through the expected season end.
+        The iteration window is capped to avoid excessive API calls.
         """
         if season is None:
             season = self._get_current_season()
         cache_file = os.path.join(self.cache_dir, f"remaining_season_{season.replace('-', '_')}.csv")
-        
+
         # Check cache (24 hour expiry)
         if os.path.exists(cache_file):
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
@@ -302,26 +305,37 @@ class ScheduleScraper:
                 )
                 return cached_df
 
-        logger.info(f"Fetching full season schedule for {season}...")
+        logger.info(f"Fetching remaining season schedule for {season}...")
         try:
-            # This is a bit tricky with nba_api as there isn't a single "remaining games" endpoint
-            # We usually fetch the full schedule for a league and filter
-            # For now, let's implement a stub or fetch a range
-            # A common way is to use Scoreboard over a range or a specific league endpoint
-            
-            # Actually, scoreboard for a broad range is better
-            # But let's keep it simple: simulate next 30 days if --season is called
-            # or fetch from a known schedule file if we had one.
-            
-            # Temporary implementation: Fetch next 30 days
+            # TODO: Replace composed daily fetches with a single league-schedule endpoint
+            # if one becomes available via nba_api or an alternative provider.
             all_games = []
             today = date.today()
-            for i in range(30):
+
+            # Compute a reasonable season-end horizon (June 30 of the season's second year).
+            # The NBA regular season ends in April and playoffs run into June.
+            season_end_year = int(season.split('-')[0]) + 1
+            season_end = date(season_end_year, 6, 30)
+
+            # Cap the forward window to avoid excessive API calls during the offseason
+            # or if the season string is malformed.
+            max_days = (season_end - today).days
+            if max_days < 0:
+                max_days = 0
+            if max_days > 180:
+                max_days = 180
+                logger.warning(
+                    f"Remaining-season window capped at {max_days} days "
+                    f"(original horizon {(season_end - today).days} days). "
+                    "This is a safeguard against excessive API calls."
+                )
+
+            for i in range(max_days + 1):
                 target_date = (today + timedelta(days=i)).strftime('%Y-%m-%d')
                 day_games = self.get_games_by_date(target_date)
                 if not day_games.empty:
                     all_games.append(day_games)
-            
+
             if not all_games:
                 self._set_last_fetch_status(
                     'failed',
@@ -329,21 +343,21 @@ class ScheduleScraper:
                     {
                         'season': season,
                         'source': 'composed_daily_schedule',
-                        'days_attempted': 30,
+                        'days_attempted': max_days + 1,
                     },
                 )
                 return pd.DataFrame()
-                
+
             full_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
             full_df.to_csv(cache_file, index=False)
             self._set_last_fetch_status(
                 'success',
-                f"Built remaining-season schedule stub for {season}",
+                f"Built remaining-season schedule for {season}",
                 {
                     'season': season,
                     'source': 'composed_daily_schedule',
                     'rows': int(len(full_df)),
-                    'days_attempted': 30,
+                    'days_attempted': max_days + 1,
                 },
             )
             return full_df

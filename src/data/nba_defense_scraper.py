@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import re
 
+from src.utils.team_mappings import ABBR_TO_ID, ID_TO_ABBR
+
 logger = logging.getLogger(__name__)
 
 
@@ -493,7 +495,7 @@ class NBADefenseScraper:
     
     def _fetch_team_defense(self, team_abbr: str, season: str) -> dict:
         """Fetch team defensive stats from NBA stats API."""
-        team_id = TEAM_ID_MAP.get(team_abbr.upper())
+        team_id = ABBR_TO_ID.get(team_abbr.upper())
         if not team_id:
             logger.warning(f"Unknown team: {team_abbr}")
             return self._get_default_defense(team_abbr)
@@ -694,7 +696,7 @@ class NBADefenseScraper:
             'Overall': {'pts_mult': 1.00, 'fg_mult': 1.00}
         }
         
-        team_id = TEAM_ID_MAP.get(team_abbr.upper())
+        team_id = ABBR_TO_ID.get(team_abbr.upper())
         if team_id:
             try:
                 season_param = season.replace('-', '')
@@ -828,7 +830,7 @@ class NBADefenseScraper:
         """
         all_defenses = []
         
-        for team_abbr in TEAM_ID_MAP.keys():
+        for team_abbr in ABBR_TO_ID.keys():
             try:
                 defense = self.get_team_defense_allowed(team_abbr, season)
                 all_defenses.append(defense)
@@ -909,7 +911,7 @@ class NBADefenseScraper:
             'source': 'estimate'
         }
         
-        opponent_id = TEAM_ID_MAP.get(opponent_team)
+        opponent_id = ABBR_TO_ID.get(opponent_team)
         if not opponent_id:
             return result
         
@@ -931,7 +933,7 @@ class NBADefenseScraper:
                     response = self._session.get(
                         url,
                         params=params,
-                        headers=self.HEADERS,
+                        headers=self._get_headers(),
                         timeout=15
                     )
                     response.raise_for_status()
@@ -1254,6 +1256,9 @@ class DefensiveMatchupAnalyzer:
         self.defense_scraper = defense_scraper or NBADefenseScraper()
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
+        self.max_retries = 3
+        self.retry_delay = 2.0
+        self.headers = self.defense_scraper._get_headers()
         
         self.position_defense_effects = {
             'elite_defense': 0.92,
@@ -1408,7 +1413,7 @@ class DefensiveMatchupAnalyzer:
             'source': 'estimate'
         }
         
-        opponent_id = TEAM_ID_MAP.get(opponent_team)
+        opponent_id = ABBR_TO_ID.get(opponent_team)
         if not opponent_id:
             return result
         
@@ -1425,12 +1430,12 @@ class DefensiveMatchupAnalyzer:
                 'MeasureType': 'Base'
             }
             
-            for attempt in range(self.MAX_RETRIES):
+            for attempt in range(self.max_retries):
                 try:
-                    response = self._session.get(
+                    response = self.defense_scraper._session.get(
                         url,
                         params=params,
-                        headers=self.HEADERS,
+                        headers=self.headers,
                         timeout=15
                     )
                     response.raise_for_status()
@@ -1442,8 +1447,8 @@ class DefensiveMatchupAnalyzer:
                     
                 except Exception as e:
                     logger.debug(f"Player game log fetch attempt {attempt + 1} failed: {e}")
-                    if attempt < self.MAX_RETRIES - 1:
-                        time.sleep(self.RETRY_DELAY)
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
         
         if all_games:
             all_games.sort(key=lambda x: x.get('game_date', ''), reverse=True)
@@ -1510,7 +1515,7 @@ class DefensiveMatchupAnalyzer:
                     try:
                         matchup = str(row[header_map.get('matchup', 5)]).upper()
                         
-                        opponent_abbr = ID_TO_TEAM.get(opponent_id, '')
+                        opponent_abbr = ID_TO_ABBR.get(opponent_id, '')
                         if opponent_abbr and opponent_abbr.upper() not in matchup:
                             continue
                         

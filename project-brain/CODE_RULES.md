@@ -87,6 +87,8 @@
 - Keep Transformer validation/runtime inference on the eager model path by default. If `torch.compile` is re-enabled for the Transformer, it must stay behind an explicit safety flag and should never be the only validation path.
 - When touching CUDA attention code, prefer math SDPA fallback controls for validation and add regression coverage for the eager path.
 - `model_stack_metadata.pkl` is part of the shared runtime contract and may now include the selected training preset and feature-group list; keep it in sync with any preset changes.
+- Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) must use zero-padding for players with fewer than `seq_len` context games. Do not revert to skipping short players — the zero-padding behavior is now covered by regression tests.
+- When changing `SIZE_TIER_SPECS` in `src/config/model_config.py`, remember that `seq_len` and `max_seq_length` affect both the Transformer model's sequence window and the training pipeline's batch construction. Changes here must be reflected in both `_create_sequences()` and `_build_sequence_batch()`.
 
 ### Simulation
 

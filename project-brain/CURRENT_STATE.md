@@ -2,9 +2,14 @@
 
 ## Snapshot
 
-- Observed date: 2026-04-12
+- Observed date: 2026-04-25
 - Repository health: good
 - Test status in this workspace:
+  - full suite (2026-04-25): `178 passed, 0 failed` in 74.82s
+  - full suite after teammate-utils refactor + rest_density/lineup_stability vectorisation + performance smoke tests: `178 passed, 0 failed`
+  - full suite after adding dedicated unit tests for the 7 new feature groups: `172 passed, 0 failed`
+  - full suite after scraper reliability fixes (rotowire, nba_defense, schedule): `140 passed, 0 failed`
+  - full suite after TRANSFORMER-SEQ-001 (M tier seq_len=20, zero-padding, new tests): `136 passed, 0 failed`
   - full suite after adding 6-stat export/load regression tests: `132 passed, 0 failed`
   - preprocessing tests after wiring 7 new feature groups into pipeline: `19 passed, 0 failed`
   - full suite after the player archetype feature-group implementation: `116 passed, 0 failed`
@@ -50,10 +55,14 @@
 - The query subsystem in `src/query/` is structurally complete and supported by tests.
 - Many unit tests around preprocessing, model wrappers, and probability math are green.
 - Cleanup tooling in `clear_cache.py` is clear and conservative about preserving raw data.
+- The M tier transformer config now uses `seq_len=20` and `max_seq_length=20` (up from 10), matching the L tier's sequence length for better temporal context.
+- Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) now use zero-padding instead of skipping players with fewer than `seq_len + 1` games. Players with at least 1 game produce training samples with zero-padded context for early timesteps.
 
 ## What Partially Works
 
 - Simulation stack is feature-rich and still depends on volatile third-party scrapers, but degraded optional inputs are now surfaced explicitly in per-game metadata and CLI output.
+- `RotoWireLineupScraper` and `NBADefenseScraper` previously had undefined references and unreachable code that would have caused runtime `AttributeError`/`NameError`; these are now fixed and covered by tests.
+- `ScheduleScraper.get_remaining_season()` previously hard-coded a 30-day window; it now iterates to the computed season end (capped at 180 days) with explicit TODOs about upstream limitations.
 - The blend-weight/Transformer artifact contract is now enforced at load time, but existing model directories trained with a Transformer that later lose the `attention_transformer.pkl` artifact will fail loudly instead of silently degrading — which is the intended behavior.
 - Query flow supports all six stats (PTS, REB, AST, STL, BLK, TOV) at the parser/calculator level, and projection exports are now complete for all six stats.
 - The train-to-simulation artifact contract is covered by focused regression tests. A live `python train.py` smoke test was not completed due to training runtime length, but preflight checks and all 116 unit tests pass.
@@ -66,6 +75,17 @@
 - Rolling feature generation no longer emits the large pandas fragmentation warning flood; the hot feature groups now batch new columns before concatenating them back into the frame.
 
 ## New Bugs Found And Fixed During This Session
+
+### Planned bug-fix batch (2026-04-25) — all verified / applied
+
+- **GroupBy Series KeyError in `pace_role.py`** (plan: `bugfix_groupby_series_keyerror.md`):
+  - The bug described computed pandas Series being passed directly to `groupby()[...]` as column selectors. Current code already stores these metrics as named `RAW_*` DataFrame columns and references them by string in `groupby('PLAYER_ID')['RAW_*']`, so the KeyError path is no longer present. No code change was required; the fix is live.
+- **CatBoost GPU callback failure** (plan: `catboost_gpu_callback_fix.md`):
+  - Current code already conditionally attaches callbacks only for CPU training (`use_callback = task_type == 'CPU'`), sets `verbose=200` for GPU, uses defensive `getattr(info, 'learn_error', None)` in `after_iteration()`, and rebuilds `fit_kwargs` from scratch on GPU→CPU fallback. No code change was required; the fix is live.
+- **Device type AttributeError in `nn_trainer.py`** (plan: `fix_device_type_attribute_error.md`):
+  - `BaseTrainer.__init__` already coerces `device` to `torch.device` and raises `TypeError` for unexpected types. `NeuralNetworkTrainer.__init__` already accepts `Optional[Union[str, torch.device]]`.
+  - Applied an additional defensive check in `NeuralNetworkTrainer._create_loader()` before accessing `self.device.type`, ensuring a string value is coerced to `torch.device` on the spot.
+  - All targeted tests pass: preprocessing (19 passed), nn_trainer (2 passed), runtime artifact contract (5 passed), transformer model (8 passed).
 
 ### Torch shim clobbered real PyTorch when pytest was running
 
@@ -187,6 +207,11 @@
   - `pytest tests/ -v`
   - Result: `132 passed, 0 failed`
   - New tests in `tests/test_query/test_six_stat_contract.py` cover the full export/load contract for all 6 stats (PTS, REB, AST, STL, BLK, TOV)
+- Verified on 2026-04-21 after teammate-utils extraction and vectorization refactor:
+  - `pytest tests/ -v`
+  - Result: `178 passed, 0 failed`
+  - New tests: `TestTeammateUtils` (4 tests) and `TestPerformanceSmoke` (2 tests) in `tests/test_preprocessing/test_new_feature_groups.py`
+  - Refactored: `src/preprocessing/features/_teammate_utils.py` (new), `lineup_stability.py`, `injury_opportunity.py`, `teammate_usage.py`, `rest_density.py`
 - Two tests are skipped by design around Transformer runtime constraints.
 - The earlier 1612-warning flood from pandas `PerformanceWarning` messages in `src/preprocessing/features/rolling.py` is no longer present in the post-refactor test runs.
 

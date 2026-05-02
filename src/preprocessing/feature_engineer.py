@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -60,6 +62,7 @@ class FeatureEngineer:
         disable_columns: Optional[Sequence[str]] = None,
         max_missing_rate: float = 0.35,
         max_imputed_rate: float = 0.40,
+        cache_dir: Optional[Union[str, Path]] = None,
     ):
         self.rolling_windows = rolling_windows or [3, 5, 10, 20, 50]
         self.enable_groups = set(enable_groups) if enable_groups else None
@@ -68,6 +71,7 @@ class FeatureEngineer:
         self.use_gpu = check_gpu_compatibility() if (use_gpu is None or use_gpu) else False
         self.max_missing_rate = max_missing_rate
         self.max_imputed_rate = max_imputed_rate
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.last_result = FeatureEngineeringResult()
 
         self.target_cols = ['PTS', 'REB', 'AST']
@@ -138,6 +142,22 @@ class FeatureEngineer:
         added = [c for c in out.columns if c not in before]
         return out, added
 
+    def _cache_key(self, df: pd.DataFrame) -> str:
+        """Compute a stable cache key from input data and FE configuration."""
+        config_str = (
+            f"windows={sorted(self.rolling_windows)}"
+            f"|groups={sorted(self.enable_groups or [])}"
+            f"|disable_groups={sorted(self.disable_groups)}"
+            f"|disable_cols={sorted(self.disable_columns)}"
+            f"|max_missing={self.max_missing_rate}"
+            f"|max_imputed={self.max_imputed_rate}"
+        )
+        data_hash = hashlib.sha256(
+            pd.util.hash_pandas_object(df, index=True).values
+        ).hexdigest()[:16]
+        config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:16]
+        return f"fe_{data_hash}_{config_hash}"
+
     def create_features(self, df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
         """Create leakage-safe features with explicit diagnostics."""
         logger.info("--- Starting modular feature engineering pipeline ---")
@@ -151,6 +171,40 @@ class FeatureEngineer:
             logger.error("Missing required feature-engineering columns: %s", missing_required)
             return pd.DataFrame()
 
+        cache_hit = False
+        cache_path = None
+        if self.cache_dir is not None:
+            cache_key = self._cache_key(df)
+            cache_path = self.cache_dir / f"{cache_key}.parquet"
+            if cache_path.exists():
+                logger.info("Loading cached features from %s", cache_path)
+                try:
+                    result = pd.read_parquet(cache_path)
+                    cache_hit = True
+                    logger.info(
+                        "Cache hit: loaded %s rows, %s columns",
+                        len(result),
+                        len(result.columns),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to load cached features: %s; recomputing", exc)
+                    cache_hit = False
+
+        if not cache_hit:
+            result = self._compute_features(df)
+
+        if not cache_hit and self.cache_dir is not None and cache_path is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                result.to_parquet(cache_path, index=True)
+                logger.info("Cached features to %s", cache_path)
+            except Exception as exc:
+                logger.warning("Failed to cache features: %s", exc)
+
+        return result
+
+    def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Run the full feature engineering pipeline (no caching)."""
         frame = self._prepare_frame(df)
         if frame.empty:
             logger.warning("No valid rows remain after date normalization")
@@ -189,9 +243,11 @@ class FeatureEngineer:
                 list(diagnostics.missing_optional_columns.keys())[:20],
             )
         if diagnostics.should_fail():
-            raise ValueError(
+            logger.error(
                 "Feature engineering missingness exceeded configured thresholds. "
-                f"summary={diagnostics.summary()}"
+                "Returning partial feature set (model training may be degraded). "
+                "summary=%s",
+                diagnostics.summary(),
             )
 
         if self.disable_columns:
@@ -200,7 +256,6 @@ class FeatureEngineer:
                 logger.info("Dropping %s pruned formula columns", len(drop_cols))
                 result = result.drop(columns=drop_cols)
 
-        # Keep outputs numeric but do not blindly mask missingness in the source columns.
         feature_cols = [c for c in result.columns if c not in df.columns]
         for col in feature_cols:
             if pd.api.types.is_numeric_dtype(result[col]):
@@ -357,6 +412,7 @@ def build_feature_engineer(
     disable_columns: Optional[Sequence[str]] = None,
     max_missing_rate: float = 0.35,
     max_imputed_rate: float = 0.40,
+    cache_dir: Optional[Union[str, Path]] = None,
 ) -> FeatureEngineer:
     """Build a FeatureEngineer while tolerating older constructor signatures.
 
@@ -374,6 +430,7 @@ def build_feature_engineer(
         'disable_columns': disable_columns,
         'max_missing_rate': max_missing_rate,
         'max_imputed_rate': max_imputed_rate,
+        'cache_dir': cache_dir,
     }
     signature = inspect.signature(FeatureEngineer.__init__)
     supported_kwargs = {

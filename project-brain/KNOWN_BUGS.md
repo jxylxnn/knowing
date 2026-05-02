@@ -234,7 +234,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-005: Exported Projection CSV Omits `STL`, `BLK`, And `TOV`
 
-- Status: open
+- Status: fixed in code on 2026-04-12, doc updated on 2026-04-25
 - Severity: high
 - Confidence: high
 
@@ -262,16 +262,18 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Workaround
 
-- Prefer querying `pts`, `reb`, and `ast` from cached projection CSVs.
+- None needed after fix.
 
 ### Fix Ideas
 
-- Extend projection export to all six targets.
-- Align loader defaults and add tests for each supported stat.
+- Implemented:
+  - `src/simulation/report_generator.py` now exports all six stat columns (PTS, REB, AST, STL, BLK, TOV) with MEAN/MODE/CI for each.
+  - `src/query/projection_loader.py::STAT_COLUMNS` now maps all six stats, and `_row_to_projection()` uses the mapping uniformly.
+  - Regression tests in `tests/test_query/test_six_stat_contract.py` cover the full export/load contract.
 
 ### Risks
 
-- Users may trust incomplete cached projections for unsupported exported stats.
+- None remaining; the export and loader are aligned.
 
 ### Related Files
 
@@ -284,13 +286,13 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-006: `simulate_season.py --season` Does Not Match Its CLI Promise
 
-- Status: open
+- Status: fixed in code on 2026-04-21, pending live upstream confirmation
 - Severity: medium
 - Confidence: high
 
 ### Symptom
 
-- The CLI suggests simulation of all remaining season games, but implementation appears to fetch only about the next 30 days.
+- The CLI suggests simulation of all remaining season games, but implementation fetched only about the next 30 days.
 
 ### Expected Behavior
 
@@ -298,11 +300,17 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Evidence
 
-- `ScheduleScraper.get_remaining_season()` appears to iterate over a fixed next-30-day window rather than a full remaining schedule.
+- `ScheduleScraper.get_remaining_season()` previously iterated over a fixed next-30-day window rather than a full remaining schedule.
+- Fix evidence now in repo:
+  - `get_remaining_season()` now computes the season end date (June 30 of the season's second year) and iterates from today through that date.
+  - The forward window is capped at 180 days to avoid excessive API calls during the offseason or if the season string is malformed.
+  - A clear TODO comment documents the upstream limitation (no single "remaining games" endpoint in nba_api).
+  - `tests/test_data/test_scraper_health.py::test_schedule_scraper_remaining_season_horizon` verifies the capped-horizon behavior.
 
 ### Reproduction
 
 - Static inspection during this audit.
+- Unit test `test_schedule_scraper_remaining_season_horizon` exercises the capped-horizon logic.
 
 ### Suspected Cause
 
@@ -310,16 +318,20 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Workaround
 
-- Use `--week` or date-scoped runs when the intent is near-term forecasting.
+- No workaround needed after the fix; the method now fetches the real remaining season up to the cap.
 
 ### Fix Ideas
 
-- Pull the full remaining schedule from a season endpoint or iterate to the actual season end date.
-- Update CLI help text if full-season support is intentionally deferred.
+- Implemented:
+  - compute season end from the season string
+  - iterate daily scoreboard calls through the computed end date
+  - cap at 180 days with a logged warning
+  - add regression test for the horizon cap
 
 ### Risks
 
-- Misleading user expectations and incomplete simulation coverage.
+- Daily scoreboard composition is slower than a single season endpoint would be, but the cap prevents runaway API usage.
+- Upstream schedule/API changes can still fail, but the CLI now surfaces that as a hard-required input failure.
 
 ### Related Files
 
@@ -330,7 +342,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-007: `ProjectionLoader` Hardcodes A Defense Cache Filename For Season `2025-26`
 
-- Status: open
+- Status: fixed in code on 2026-04-25
 - Severity: medium
 - Confidence: medium-high
 
@@ -344,7 +356,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Evidence
 
-- `src/query/projection_loader.py` references `cache/all_team_defense_2025-26.json`.
+- `src/query/projection_loader.py` previously referenced `cache/all_team_defense_2025-26.json`.
 
 ### Reproduction
 
@@ -356,16 +368,15 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Workaround
 
-- Manually rename or copy cache files to the expected name if necessary.
+- None needed after fix.
 
-### Fix Ideas
+### Fix
 
-- Compute season names dynamically from date/config.
-- Search for the newest matching defense cache file instead of hardcoding one season.
+- `_load_cached_defense_data()` now resolves `cache_dir`, searches `cache_dir.glob('all_team_defense_*.json')`, picks the lexicographically last file (newest season), and falls back to the original hardcoded path if no candidates exist.
 
 ### Risks
 
-- Query-time contextual adjustments become stale or unavailable across seasons.
+- None remaining; lookup now adapts to season rollover.
 
 ### Related Files
 
@@ -375,13 +386,13 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-008: `GameSimulator` Contains Large Unreachable Legacy Logic After An Early Return
 
-- Status: open
+- Status: fixed in code on 2026-04-25
 - Severity: medium
 - Confidence: high
 
 ### Symptom
 
-- The file contains a large simulation block that appears dead, making it unclear which algorithm is truly active.
+- The file contained a large simulation block that was dead, making it unclear which algorithm was truly active.
 
 ### Expected Behavior
 
@@ -389,7 +400,7 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Evidence
 
-- `simulate_matchup(...)` returns `self._simulate_matchup_reactive(...)` and then retains a long block of older simulation code below that return.
+- `simulate_matchup(...)` returned `self._simulate_matchup_reactive(...)` and then retained a long block of older simulation code below that return (lines 1134–1373).
 
 ### Reproduction
 
@@ -401,16 +412,15 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Workaround
 
-- Treat `_simulate_matchup_reactive` as the current source of truth until the dead block is removed.
+- None needed after fix.
 
-### Fix Ideas
+### Fix
 
-- Delete or quarantine the unreachable block.
-- Add tests that make the active path explicit.
+- Removed the entire unreachable legacy block (lines 1134–1373). The active path is now exclusively `_simulate_matchup_reactive`.
 
 ### Risks
 
-- Future contributors may patch dead code and believe they changed live behavior.
+- None remaining; the dead code can no longer mislead contributors.
 
 ### Related Files
 
@@ -903,4 +913,94 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 ### Related Files
 
 - `src/models/transformer_model.py`
+- `tests/test_models/test_transformer_model.py`
+
+---
+
+## KB-018: GroupBy Series KeyError in `PaceRoleFeatureGroup`
+
+- Status: verified fixed in current code on 2026-04-25 (no code change required)
+- Severity: medium
+- Confidence: high
+
+### Symptom
+
+- Historical bug: computed pandas Series objects (`usage_raw`, `reb_opp`, `three_pt_freq`, `ft_rate`, `pts_share`, `ts_pct`) were passed to `df.groupby('PLAYER_ID')[series]` as column selectors, causing `KeyError: 'Columns not found: 0.0, 0.5, ...'`.
+
+### Expected Behavior
+
+- Rolling features should be computed on named DataFrame columns, not raw Series objects.
+
+### Evidence
+
+- `src/preprocessing/features/pace_role.py` now stores all derived metrics as named `RAW_*` columns (`RAW_USAGE`, `RAW_REB_OPPORTUNITY`, `RAW_3PT_FREQ`, `RAW_FT_RATE`, `RAW_PTS_SHARE`, `RAW_TS_PCT`) and references them by string in `groupby('PLAYER_ID')['RAW_*']`.
+- No instance of passing a bare Series to `groupby()[...]` remains in the active code.
+- Preprocessing tests pass (19/19), including feature-engineering runs that exercise this group.
+
+### Related Files
+
+- `src/preprocessing/features/pace_role.py`
+- `tests/test_preprocessing/test_feature_engineer.py`
+
+---
+
+## KB-019: CatBoost GPU Callback Failure
+
+- Status: verified fixed in current code on 2026-04-25 (no code change required)
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- Historical bug: CatBoost GPU training failed because user-defined callbacks are not supported on GPU. Fallback also failed because it reused `fit_kwargs` containing the callback.
+
+### Expected Behavior
+
+- GPU training should use built-in `verbose` instead of callbacks; CPU training should retain callbacks; fallback should rebuild `fit_kwargs` cleanly.
+
+### Evidence
+
+- `src/training/catboost_trainer.py:_train_single_model()` sets `use_callback = task_type == 'CPU'` and only adds `callbacks=[callback]` when `use_callback` is true.
+- GPU path uses `model_params['verbose'] = 200`.
+- `CatBoostProgressCallback.after_iteration()` uses `getattr(info, 'learn_error', None)` and `getattr(info, 'test_error', None)` defensively.
+- GPU→CPU fallback rebuilds `fallback_fit_kwargs` from scratch and adds the callback only for the CPU retry.
+- Runtime artifact contract tests pass (5/5).
+
+### Related Files
+
+- `src/training/catboost_trainer.py`
+- `tests/test_training/test_runtime_artifact_contract.py`
+
+---
+
+## KB-020: Device Type AttributeError (`'str' object has no attribute 'type'`)
+
+- Status: fixed in code on 2026-04-25
+- Severity: medium
+- Confidence: high
+
+### Symptom
+
+- `self.device` was occasionally a string (`'cuda'`) rather than a `torch.device` object, causing `AttributeError: 'str' object has no attribute 'type'` in `nn_trainer.py:322`.
+
+### Expected Behavior
+
+- `self.device` should always be a `torch.device` object before any code accesses `.type`.
+
+### Evidence
+
+- `BaseTrainer.__init__` already coerces `device` to `torch.device` and raises `TypeError` for unexpected types.
+- `NeuralNetworkTrainer.__init__` already accepts `Optional[Union[str, torch.device]]`.
+- Applied an additional defensive coercion in `NeuralNetworkTrainer._create_loader()` before accessing `self.device.type`.
+- `nn_trainer.py` tests pass (2/2); transformer model tests pass (8/8).
+
+### Fix
+
+- Added `if isinstance(self.device, str): self.device = torch.device(self.device)` inside `_create_loader()`.
+
+### Related Files
+
+- `src/training/nn_trainer.py`
+- `src/training/trainer.py`
+- `tests/test_training/test_nn_trainer.py`
 - `tests/test_models/test_transformer_model.py`

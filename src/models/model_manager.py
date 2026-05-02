@@ -303,7 +303,8 @@ class ModelManager:
 
         has_transformer_weight = any(
             float(weights.get("transformer", 0.0)) > 0.0
-            for weights in self.blend_weights.values()
+            for key, weights in self.blend_weights.items()
+            if key != "_method"
         )
         if has_transformer_weight and self.transformer_model is None:
             transformer_path = Path(self.models_dir) / "attention_transformer.pkl"
@@ -451,7 +452,8 @@ class ModelManager:
                 blend_cfg = self.blend_weights.get(target, {})
                 cb_weight = float(blend_cfg.get("catboost", 0.7))
                 tx_weight = float(blend_cfg.get("transformer", 0.3))
-                final_pred = (base * cb_weight) + (transformer_pred * tx_weight)
+                intercept = float(blend_cfg.get("intercept", 0.0))
+                final_pred = (base * cb_weight) + (transformer_pred * tx_weight) + intercept
 
             predictions[target] = float(max(0.0, final_pred))
 

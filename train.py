@@ -80,6 +80,7 @@ except ModuleNotFoundError:
         disable_columns=None,
         max_missing_rate=0.35,
         max_imputed_rate=0.40,
+        cache_dir=None,
     ):
         """Compatibility-safe FeatureEngineer constructor for legacy checkouts."""
         init_kwargs = {
@@ -598,6 +599,7 @@ Examples:
             enable_groups=feature_engineer_kwargs.get('enable_groups'),
             disable_groups=feature_engineer_kwargs.get('disable_groups'),
             disable_columns=feature_engineer_kwargs.get('disable_columns'),
+            cache_dir=cache_dir,
         )
         full_df = feature_engineer.create_features(merged_df)
         

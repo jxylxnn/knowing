@@ -13,6 +13,7 @@ from src.preprocessing.features.base import (
     FeatureGroup,
     fill_series_with_prior,
 )
+from src.preprocessing.features._teammate_utils import TeammateContext, build_team_totals_map
 
 
 def _concat_new_columns(df: pd.DataFrame, new_columns: dict[str, pd.Series]) -> pd.DataFrame:
@@ -67,90 +68,62 @@ class TeammateUsageFeatureGroup(FeatureGroup):
         new_columns: dict[str, pd.Series] = {}
 
         # ----------------------------------------------------------------
-        # Step 1: Build (TEAM_ID, GAME_DATE) → set of PLAYER_IDs mapping
+        # Shared teammate context
         # ----------------------------------------------------------------
-        played_mask = df['MIN'] > 0
-        game_roster: dict[tuple, set] = {}
-        for (tid, gdate), group in df[played_mask].groupby(['TEAM_ID', 'GAME_DATE']):
-            game_roster[(tid, gdate)] = set(group['PLAYER_ID'].values)
-
-        # ----------------------------------------------------------------
-        # Step 2: Identify "regular" teammates per team per game
-        #   A player is "regular" if they appeared in >50% of the team's
-        #   last 20 games.
-        # ----------------------------------------------------------------
-        team_games: dict = {}
-        for tid, group in df[played_mask].groupby('TEAM_ID'):
-            team_games[tid] = sorted(group['GAME_DATE'].unique())
-
-        regular_teammates: dict[tuple, set] = {}
-
-        for tid, dates in team_games.items():
-            for i, gdate in enumerate(dates):
-                window_dates = dates[max(0, i - 19): i + 1]
-                player_counts: dict = {}
-                for wd in window_dates:
-                    roster = game_roster.get((tid, wd), set())
-                    for pid in roster:
-                        player_counts[pid] = player_counts.get(pid, 0) + 1
-
-                threshold = len(window_dates) * 0.5
-                regulars = {pid for pid, cnt in player_counts.items() if cnt > threshold}
-                regular_teammates[(tid, gdate)] = regulars
+        tctx = TeammateContext(df)
+        game_roster = tctx.game_roster_map
+        regular_teammates = tctx.regular_teammates_map
 
         # ----------------------------------------------------------------
-        # Step 3: Compute per-player usage and shares per game
-        #   Usage = FGA / team_FGA. Shares = player stat / team total.
+        # Step 1: Compute per-player usage and shares per game (vectorized)
         # ----------------------------------------------------------------
         fga_available = 'FGA' in df.columns
         ast_available = 'AST' in df.columns
         reb_available = 'REB' in df.columns
         pts_available = 'PTS' in df.columns
 
-        # Compute team totals per game
-        team_totals: dict[tuple, dict] = {}
-        for (tid, gdate), group in df[played_mask].groupby(['TEAM_ID', 'GAME_DATE']):
-            totals = {}
-            totals['FGA'] = group['FGA'].sum() if fga_available else 1.0
-            totals['AST'] = group['AST'].sum() if ast_available else 1.0
-            totals['REB'] = group['REB'].sum() if reb_available else 1.0
-            totals['PTS'] = group['PTS'].sum() if pts_available else 1.0
-            # Avoid zero denominators
-            for key in totals:
-                totals[key] = max(totals[key], 1.0)
-            team_totals[(tid, gdate)] = totals
+        # Team totals per game via shared utility
+        team_totals = build_team_totals_map(df, ['FGA', 'AST', 'REB', 'PTS'])
 
-        # Compute per-player shares per game
+        # Vectorized share computation using map + groupby transform
         df['_fga_share'] = 0.0
         df['_ast_share'] = 0.0
         df['_reb_share'] = 0.0
         df['_fga_per_game'] = 0.0
         df['_pts_per_game'] = 0.0
 
-        for idx, row in df.iterrows():
-            tid = row['TEAM_ID']
-            gdate = row['GAME_DATE']
-            totals = team_totals.get((tid, gdate), {'FGA': 1.0, 'AST': 1.0, 'REB': 1.0, 'PTS': 1.0})
+        if fga_available:
+            df['_team_fga'] = pd.Series(
+                [team_totals.get((tid, gd), {}).get('FGA', 1.0) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+                index=df.index,
+            )
+            df['_fga_share'] = (df['FGA'] / df['_team_fga']).fillna(0.0)
+            df['_fga_per_game'] = df['FGA'].fillna(0.0)
 
-            if fga_available and pd.notna(row.get('FGA', np.nan)):
-                df.loc[idx, '_fga_share'] = row['FGA'] / totals['FGA']
-                df.loc[idx, '_fga_per_game'] = row['FGA']
+        if ast_available:
+            df['_team_ast'] = pd.Series(
+                [team_totals.get((tid, gd), {}).get('AST', 1.0) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+                index=df.index,
+            )
+            df['_ast_share'] = (df['AST'] / df['_team_ast']).fillna(0.0)
 
-            if ast_available and pd.notna(row.get('AST', np.nan)):
-                df.loc[idx, '_ast_share'] = row['AST'] / totals['AST']
+        if reb_available:
+            df['_team_reb'] = pd.Series(
+                [team_totals.get((tid, gd), {}).get('REB', 1.0) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+                index=df.index,
+            )
+            df['_reb_share'] = (df['REB'] / df['_team_reb']).fillna(0.0)
 
-            if reb_available and pd.notna(row.get('REB', np.nan)):
-                df.loc[idx, '_reb_share'] = row['REB'] / totals['REB']
-
-            if pts_available and pd.notna(row.get('PTS', np.nan)):
-                df.loc[idx, '_pts_per_game'] = row['PTS']
+        if pts_available:
+            df['_team_pts'] = pd.Series(
+                [team_totals.get((tid, gd), {}).get('PTS', 1.0) for tid, gd in zip(df['TEAM_ID'], df['GAME_DATE'])],
+                index=df.index,
+            )
+            df['_pts_per_game'] = df['PTS'].fillna(0.0)
 
         # ----------------------------------------------------------------
-        # Step 4: Determine highest-usage regular teammate per player
-        #   For each player, find the regular teammate with the highest
-        #   rolling FGA share (or PTS if FGA unavailable).
+        # Step 2: Rolling averages per player (shifted)
         # ----------------------------------------------------------------
-        # Compute rolling average usage per player (shifted)
         if fga_available:
             usage_col = '_fga_per_game'
         elif pts_available:
@@ -161,28 +134,6 @@ class TeammateUsageFeatureGroup(FeatureGroup):
         player_avg_usage = df.groupby('PLAYER_ID')[usage_col].transform(
             lambda x: x.shift(1).rolling(20, min_periods=3).mean()
         )
-
-        # For each player, find the top-usage regular teammate
-        # Build a lookup: PLAYER_ID → (highest usage regular teammate ID)
-        # We compute this per (TEAM_ID, GAME_DATE) context
-
-        # ----------------------------------------------------------------
-        # Step 5: Compute per-row features
-        # ----------------------------------------------------------------
-        top_usage_active = pd.Series(0.0, index=df.index, dtype=float)
-        missing_usage_share = pd.Series(0.0, index=df.index, dtype=float)
-        missing_ast_share = pd.Series(0.0, index=df.index, dtype=float)
-        missing_reb_share = pd.Series(0.0, index=df.index, dtype=float)
-        missing_shot_volume = pd.Series(0.0, index=df.index, dtype=float)
-        active_scoring_depth = pd.Series(0.0, index=df.index, dtype=float)
-
-        # Precompute per-player rolling averages for PTS (for scoring depth)
-        if pts_available:
-            player_avg_pts = df.groupby('PLAYER_ID')['PTS'].transform(
-                lambda x: x.shift(1).rolling(20, min_periods=3).mean()
-            )
-        else:
-            player_avg_pts = pd.Series(ctx.league_priors.get('PTS', 10.0), index=df.index, dtype=float)
 
         # Precompute per-player rolling averages for shares
         player_avg_fga_share = df.groupby('PLAYER_ID')['_fga_share'].transform(
@@ -198,16 +149,32 @@ class TeammateUsageFeatureGroup(FeatureGroup):
             lambda x: x.shift(1).rolling(20, min_periods=3).mean()
         )
 
-        # Build per-player average usage lookup
-        avg_usage_lookup: dict = {}
-        for pid, group in df.groupby('PLAYER_ID'):
-            avg_usage_lookup[pid] = player_avg_usage.loc[group.index].mean()
-
-        # Build per-player average PTS lookup
-        avg_pts_lookup: dict = {}
         if pts_available:
-            for pid, group in df.groupby('PLAYER_ID'):
-                avg_pts_lookup[pid] = player_avg_pts.loc[group.index].mean()
+            player_avg_pts = df.groupby('PLAYER_ID')['PTS'].transform(
+                lambda x: x.shift(1).rolling(20, min_periods=3).mean()
+            )
+        else:
+            player_avg_pts = pd.Series(ctx.league_priors.get('PTS', 10.0), index=df.index, dtype=float)
+
+        # Build per-player average usage / pts lookups (mean over all rows for that player)
+        avg_usage_lookup = player_avg_usage.groupby(df['PLAYER_ID']).mean().to_dict()
+        avg_pts_lookup = player_avg_pts.groupby(df['PLAYER_ID']).mean().to_dict()
+
+        # Build per-player average share lookups
+        avg_fga_share_lookup = player_avg_fga_share.groupby(df['PLAYER_ID']).mean().to_dict()
+        avg_ast_share_lookup = player_avg_ast_share.groupby(df['PLAYER_ID']).mean().to_dict()
+        avg_reb_share_lookup = player_avg_reb_share.groupby(df['PLAYER_ID']).mean().to_dict()
+        avg_fga_lookup = player_avg_fga.groupby(df['PLAYER_ID']).mean().to_dict()
+
+        # ----------------------------------------------------------------
+        # Step 3: Compute per-row features
+        # ----------------------------------------------------------------
+        top_usage_active = pd.Series(0.0, index=df.index, dtype=float)
+        missing_usage_share = pd.Series(0.0, index=df.index, dtype=float)
+        missing_ast_share = pd.Series(0.0, index=df.index, dtype=float)
+        missing_reb_share = pd.Series(0.0, index=df.index, dtype=float)
+        missing_shot_volume = pd.Series(0.0, index=df.index, dtype=float)
+        active_scoring_depth = pd.Series(0.0, index=df.index, dtype=float)
 
         for idx, row in df.iterrows():
             tid = row['TEAM_ID']
@@ -222,9 +189,7 @@ class TeammateUsageFeatureGroup(FeatureGroup):
             active_regulars = (regulars & current_roster) - {pid}
 
             # --- TEAMMATE_TOP_USAGE_ACTIVE ---
-            # Find the highest-usage regular teammate (by avg usage)
             if regulars:
-                # Exclude self from regulars for top-usage check
                 other_regulars = regulars - {pid}
                 if other_regulars:
                     top_usage_pid = max(other_regulars, key=lambda p: avg_usage_lookup.get(p, 0.0))
@@ -236,21 +201,15 @@ class TeammateUsageFeatureGroup(FeatureGroup):
 
             # --- Missing teammate shares ---
             for missing_pid in missing_regulars:
-                missing_usage_share.iloc[idx] += player_avg_fga_share.loc[
-                    df['PLAYER_ID'] == missing_pid
-                ].mean() if fga_available else 0.0
-                missing_ast_share.iloc[idx] += player_avg_ast_share.loc[
-                    df['PLAYER_ID'] == missing_pid
-                ].mean() if ast_available else 0.0
-                missing_reb_share.iloc[idx] += player_avg_reb_share.loc[
-                    df['PLAYER_ID'] == missing_pid
-                ].mean() if reb_available else 0.0
-                missing_shot_volume.iloc[idx] += player_avg_fga.loc[
-                    df['PLAYER_ID'] == missing_pid
-                ].mean() if fga_available else 0.0
+                if fga_available:
+                    missing_usage_share.iloc[idx] += avg_fga_share_lookup.get(missing_pid, 0.0)
+                    missing_shot_volume.iloc[idx] += avg_fga_lookup.get(missing_pid, 0.0)
+                if ast_available:
+                    missing_ast_share.iloc[idx] += avg_ast_share_lookup.get(missing_pid, 0.0)
+                if reb_available:
+                    missing_reb_share.iloc[idx] += avg_reb_share_lookup.get(missing_pid, 0.0)
 
             # --- TEAMMATE_ACTIVE_SCORING_DEPTH ---
-            # Count active regular teammates with avg PTS > 10
             if pts_available:
                 for active_pid in active_regulars:
                     if avg_pts_lookup.get(active_pid, 0.0) > 10.0:
@@ -282,7 +241,10 @@ class TeammateUsageFeatureGroup(FeatureGroup):
         )
 
         # Clean up temporary columns
-        df.drop(columns=['_fga_share', '_ast_share', '_reb_share', '_fga_per_game', '_pts_per_game'],
-                inplace=True, errors='ignore')
+        drop_cols = [
+            '_fga_share', '_ast_share', '_reb_share', '_fga_per_game', '_pts_per_game',
+            '_team_fga', '_team_ast', '_team_reb', '_team_pts',
+        ]
+        df.drop(columns=drop_cols, inplace=True, errors='ignore')
 
         return _concat_new_columns(df, new_columns)

@@ -205,7 +205,7 @@ def test_training_pipeline_fails_loudly_when_runtime_artifacts_are_missing(
         lambda fit, val: _make_fake_catboost_results(pipeline, break_target="PTS"),
     )
 
-    with pytest.raises(RuntimeError, match="complete CatBoost runtime artifact set"):
+    with pytest.raises(RuntimeError, match="required runtime artifacts"):
         pipeline.train(fit_df, val_df)
 
 

@@ -43,6 +43,7 @@ Important named functions in `update_data.py`:
     - blend weights
     - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
     - deterministic player archetype similarity features, computed from past-only rolling/context signals rather than from a separate learned clustering artifact
+    - both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) now use zero-padding for players with fewer than `seq_len` context games instead of skipping them entirely; players with at least 1 game always produce training samples
 6. Training writes the runtime artifact set to `models/`:
     - per-target CatBoost model files
     - per-target CatBoost metadata files

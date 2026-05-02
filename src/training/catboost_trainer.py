@@ -15,6 +15,8 @@ except Exception:  # pragma: no cover - environment-specific CatBoost import fai
     CatBoostRegressor = None
     Pool = None
 
+CATBOOST_AVAILABLE = CatBoostRegressor is not None
+
 try:
     from src.training.trainer import BaseTrainer, TrainResult
     from src.training.training_logger import TrainingMetrics, get_training_logger
@@ -215,7 +217,13 @@ class CatBoostTrainer(BaseTrainer):
     ):
         """Initialize CatBoost trainer."""
         super().__init__(model_name, config, use_gpu, device, random_state)
-        
+
+        if not CATBOOST_AVAILABLE:
+            raise ImportError(
+                "CatBoost is required for training but is not installed. "
+                "Install it with: pip install catboost"
+            )
+
         self.target = target
         self.use_multi_loss = use_multi_loss
         self.use_quantile = use_quantile
@@ -456,8 +464,11 @@ class CatBoostTrainer(BaseTrainer):
                 model = CatBoostRegressor(**model_params)
                 model.fit(X_train, y_train, **fallback_fit_kwargs)
             else:
-                raise
-        
+                raise RuntimeError(
+                    f"CatBoost training failed for {self.target} ({model_type}) "
+                    f"on CPU after GPU fallback also failed"
+                ) from e
+
         return model
     
     def _compute_feature_importance(self) -> None:

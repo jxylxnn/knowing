@@ -104,8 +104,8 @@ SIZE_TIER_SPECS = {
             'batch_size': 256,
             'epochs': 60,
             'lr': 8e-4,
-            'seq_len': 10,
-            'max_seq_length': 10,
+            'seq_len': 20,
+            'max_seq_length': 20,
         },
         'training': {
             'warmup_steps': 10,
