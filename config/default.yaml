@@ -136,6 +136,7 @@ simulation:
   use_minutes_model: true
   use_error_calibration: true
   four_factors_weight: 0.25
+  use_four_factors: true
   detailed_path_threshold: 250
   fast_path_threshold: 1000
 

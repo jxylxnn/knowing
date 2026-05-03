@@ -159,7 +159,7 @@ class RichTrainingLogger:
             try:
                 allocated, _ = get_gpu_memory_usage()
                 metrics.gpu_memory_gb = allocated
-            except:
+            except Exception:
                 pass
         
         # Rich display

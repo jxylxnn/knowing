@@ -55,7 +55,11 @@ SEASONS = [
     '2022-23', '2023-24', '2024-25', '2025-26'
 ]
 
-RATE_LIMIT_DELAY = 0.6
+try:
+    from src.config.config import get_config
+    RATE_LIMIT_DELAY = get_config().api.rate_limit_delay
+except (ImportError, ModuleNotFoundError):
+    RATE_LIMIT_DELAY = 0.6
 
 
 def get_current_season() -> str:

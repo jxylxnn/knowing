@@ -1,10 +1,14 @@
 """Abstract base classes and protocols for NBA prediction models."""
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Protocol, Optional, Dict, Any, List, Tuple, runtime_checkable
 from pathlib import Path
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -218,39 +222,6 @@ class PredictionResult:
         }
 
 
-class BaseWrapper(ABC):
-    """Base wrapper for sklearn-compatible models.
-    
-    Provides common functionality for wrapping external libraries.
-    """
-    
-    def __init__(self, model: Any, name: str):
-        """Initialize wrapper.
-        
-        Args:
-            model: The underlying model instance
-            name: Name of the model
-        """
-        self.model = model
-        self.name = name
-        self._is_fitted = False
-    
-    @property
-    def is_fitted(self) -> bool:
-        """Check if model has been fitted."""
-        return self._is_fitted
-    
-    def check_is_fitted(self) -> None:
-        """Raise error if model is not fitted."""
-        if not self._is_fitted:
-            raise RuntimeError(f"Model {self.name} has not been fitted yet. "
-                             f"Call fit() before predict().")
-    
-    def mark_as_fitted(self) -> None:
-        """Mark model as fitted."""
-        self._is_fitted = True
-
-
 class ModelRegistry:
     """Centralized registry for model storage and versioning.
     
@@ -377,3 +348,93 @@ class ModelRegistry:
         self.register(name, model, metadata)
         
         return model
+
+
+# ---------------------------------------------------------------------------
+# Shared model-loading utilities used by ModelManager and TrainingPipeline
+# ---------------------------------------------------------------------------
+
+
+def validate_blend_contract(
+    blend_weights: Dict[str, Any],
+    transformer_model: Any,
+    models_dir,
+) -> None:
+    """Raise when blend weights require a model that is not loaded.
+
+    Blend weights are computed during training under the assumption that all
+    models referenced by non-zero weights will contribute at runtime.  If a
+    model is missing, the remaining predictions are scaled incorrectly,
+    producing silently uncalibrated output.
+    """
+    if not blend_weights:
+        return
+
+    has_transformer_weight = any(
+        float(weights.get("transformer", 0.0)) > 0.0
+        for key, weights in blend_weights.items()
+        if key != "_method"
+    )
+    if has_transformer_weight and transformer_model is None:
+        transformer_path = Path(models_dir) / "attention_transformer.pkl"
+        if transformer_path.exists():
+            raise RuntimeError(
+                "Blend weights require a Transformer model but "
+                f"attention_transformer.pkl in {models_dir} failed to load. "
+                "Fix the artifact or retrain."
+            )
+        raise FileNotFoundError(
+            "Blend weights require a Transformer model but "
+            f"attention_transformer.pkl is missing from {models_dir}. "
+            "Provide the artifact or retrain with the Transformer disabled."
+        )
+
+
+def collect_quantile_dict(trainer) -> Dict[str, Any]:
+    """Build a {qualifier: model} dict from a trainer's quantile attributes."""
+    result: Dict[str, Any] = {}
+    low = getattr(trainer, "quantile_low_model", None)
+    high = getattr(trainer, "quantile_high_model", None)
+    if low is not None:
+        result["low"] = low
+    if high is not None:
+        result["high"] = high
+    return result
+
+
+def load_transformer_from_disk(models_dir) -> Optional[Any]:
+    """Load the Transformer model from attention_transformer.pkl if present.
+
+    Returns None if the file is missing or loading fails.
+    """
+    from src.models.transformer_model import TransformerWrapper
+
+    transformer_path = Path(models_dir) / "attention_transformer.pkl"
+    if not transformer_path.exists():
+        return None
+    try:
+        model = TransformerWrapper.load(str(transformer_path))
+        logger.info("Loaded Transformer model")
+        return model
+    except Exception as exc:
+        logger.warning("Failed to load Transformer model: %s", exc)
+        return None
+
+
+def load_blend_weights_from_disk(models_dir) -> Dict[str, Any]:
+    """Load blend weights from blend_weights.pkl if present.
+
+    Returns an empty dict when the file is missing or loading fails.
+    """
+    import joblib
+
+    blend_path = Path(models_dir) / "blend_weights.pkl"
+    if not blend_path.exists():
+        return {}
+    try:
+        weights = joblib.load(blend_path)
+        logger.info("Loaded blend weights for %s targets", len(weights))
+        return weights
+    except Exception as exc:
+        logger.warning("Failed to load blend weights: %s", exc)
+        return {}

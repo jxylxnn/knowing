@@ -16,20 +16,19 @@ import numpy as np
 import pandas as pd
 
 from src.config.model_config import get_model_config, normalize_model_size
-from src.models.base import ModelRegistry
+from src.models.base import (
+    ModelRegistry,
+    collect_quantile_dict,
+    load_blend_weights_from_disk,
+    load_transformer_from_disk,
+    validate_blend_contract,
+)
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
 from src.training.catboost_trainer import CatBoostTrainer
 from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
-
-
-def _load_transformer_wrapper():
-    """Import the Transformer wrapper lazily."""
-    from src.models.transformer_model import TransformerWrapper
-
-    return TransformerWrapper
 
 
 class ModelManager:
@@ -165,7 +164,7 @@ class ModelManager:
         self.cat_features = list(self.feature_schema.categorical_cols)
 
         split_date_str = self.model_config.get("training", {}).get(
-            "test_split_date", "2024-03-01"
+            "test_split_date", "2025-01-01"
         )
         split_date = pd.to_datetime(split_date_str)
         train_df = full_df[full_df["GAME_DATE"] < split_date].copy()
@@ -229,18 +228,9 @@ class ModelManager:
             if trainer.mae_model is not None:
                 self.catboost_mae_models[target] = trainer.mae_model
 
-            if (
-                trainer.quantile_low_model is not None
-                or trainer.quantile_high_model is not None
-            ):
-                self.catboost_quantile_models[target] = {
-                    k: v
-                    for k, v in {
-                        "low": trainer.quantile_low_model,
-                        "high": trainer.quantile_high_model,
-                    }.items()
-                    if v is not None
-                }
+            quantile_dict = collect_quantile_dict(trainer)
+            if quantile_dict:
+                self.catboost_quantile_models[target] = quantile_dict
 
         if self.feature_cols is None and self.models:
             for model in self.models.values():
@@ -258,22 +248,11 @@ class ModelManager:
                     self.feature_selector.feature_schema = self.feature_schema
                     break
 
-        transformer_path = Path(self.models_dir) / "attention_transformer.pkl"
-        if transformer_path.exists():
-            try:
-                TransformerWrapper = _load_transformer_wrapper()
-                self.transformer_model = TransformerWrapper.load(str(transformer_path))
-                counts["transformer"] = 1
-                logger.info("Loaded Transformer model")
-            except Exception as exc:
-                logger.warning("Failed to load Transformer model: %s", exc)
+        self.transformer_model = load_transformer_from_disk(self.models_dir)
+        if self.transformer_model is not None:
+            counts["transformer"] = 1
 
-        blend_path = Path(self.models_dir) / "blend_weights.pkl"
-        if blend_path.exists():
-            try:
-                self.blend_weights = joblib.load(blend_path)
-            except Exception as exc:
-                logger.warning("Failed to load blend weights: %s", exc)
+        self.blend_weights = load_blend_weights_from_disk(self.models_dir)
 
         self._validate_blend_contract()
 
@@ -291,34 +270,8 @@ class ModelManager:
         return counts
 
     def _validate_blend_contract(self) -> None:
-        """Raise when blend weights require a model that is not loaded.
-
-        Blend weights are computed during training under the assumption that all
-        models referenced by non-zero weights will contribute at runtime.  If a
-        model is missing, the remaining predictions are scaled incorrectly,
-        producing silently uncalibrated output.
-        """
-        if not self.blend_weights:
-            return
-
-        has_transformer_weight = any(
-            float(weights.get("transformer", 0.0)) > 0.0
-            for key, weights in self.blend_weights.items()
-            if key != "_method"
-        )
-        if has_transformer_weight and self.transformer_model is None:
-            transformer_path = Path(self.models_dir) / "attention_transformer.pkl"
-            if transformer_path.exists():
-                raise RuntimeError(
-                    "Blend weights require a Transformer model but "
-                    f"attention_transformer.pkl in {self.models_dir} failed to load. "
-                    "Fix the artifact or retrain."
-                )
-            raise FileNotFoundError(
-                "Blend weights require a Transformer model but "
-                f"attention_transformer.pkl is missing from {self.models_dir}. "
-                "Provide the artifact or retrain with the Transformer disabled."
-            )
+        """Raise when blend weights require a model that is not loaded."""
+        validate_blend_contract(self.blend_weights, self.transformer_model, self.models_dir)
 
     def load_models(self) -> Dict[str, int]:
         """Public wrapper for compatibility with older callers."""

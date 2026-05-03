@@ -307,8 +307,6 @@ class ScheduleScraper:
 
         logger.info(f"Fetching remaining season schedule for {season}...")
         try:
-            # TODO: Replace composed daily fetches with a single league-schedule endpoint
-            # if one becomes available via nba_api or an alternative provider.
             all_games = []
             today = date.today()
 

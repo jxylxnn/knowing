@@ -302,7 +302,7 @@ class NeuralNetworkTrainer(BaseTrainer):
                         try:
                             allocated, _ = get_gpu_memory_usage()
                             gpu_mem = allocated
-                        except:
+                        except Exception:
                             pass
                     
                     # Update progress bar

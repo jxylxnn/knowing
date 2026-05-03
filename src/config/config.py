@@ -125,7 +125,7 @@ class EnsembleConfig:
 class TrainingConfig:
     """Training pipeline configuration."""
     targets: List[str] = field(default_factory=lambda: ["PTS", "REB", "AST", "STL", "BLK", "TOV"])
-    test_split_date: str = "2024-03-01"
+    test_split_date: str = "2025-01-01"
     temporal_decay_lambda: float = 0.023
     outlier_percentile: float = 0.99
     use_sample_weights: bool = True

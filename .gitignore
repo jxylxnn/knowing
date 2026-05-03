@@ -14,6 +14,7 @@ catboost_info/
 *.pyo
 
 # Logs
+logs/
 debug.log
 nul
 
@@ -23,3 +24,10 @@ Thumbs.db
 
 # Colab generated
 colab_upload.zip
+
+# Experiment runs (generated)
+experiments/
+
+# Project metadata
+.roo/
+project-brain/

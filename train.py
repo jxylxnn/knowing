@@ -12,7 +12,6 @@ This script provides an efficient, modular training pipeline with:
 """
 
 import argparse
-import inspect
 import logging
 import sys
 import time
@@ -25,230 +24,19 @@ import numpy as np
 # Add local directory to path so standalone uploaded files can import each other.
 sys.path.insert(0, str(Path(__file__).parent))
 
-try:
-    from src.config import load_config
-    from src.training.pipeline import TrainingPipeline, create_pipeline
-    from src.preprocessing.data_loader import DataLoader
-    from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
-    from src.training.presets import apply_recent_history_window, resolve_training_preset
-    from src.training.training_logger import get_training_logger, RichTrainingLogger
-    from src.models.gpu_utils import (
-        check_gpu_compatibility,
-        get_gpu_memory_usage,
-        initialize_gpu_optimizations,
-        print_gpu_summary,
-    )
-    from src.utils.logging_config import setup_logging
-except ModuleNotFoundError:
-    from pipeline import TrainingPipeline, create_pipeline
-    from data_loader import DataLoader
-    from feature_engineer import FeatureEngineer
-    from gpu_utils import (
-        check_gpu_compatibility,
-        get_gpu_memory_usage,
-        initialize_gpu_optimizations,
-        print_gpu_summary,
-    )
-
-    class RichTrainingLogger:
-        def __init__(self, use_rich: bool = False, log_gpu: bool = False):
-            self.use_rich = use_rich
-            self.log_gpu = log_gpu
-
-    _TRAINING_LOGGER = None
-    def get_training_logger(use_rich: bool = False, log_gpu: bool = False):
-        global _TRAINING_LOGGER
-        if _TRAINING_LOGGER is None:
-            _TRAINING_LOGGER = RichTrainingLogger(use_rich=use_rich, log_gpu=log_gpu)
-        return _TRAINING_LOGGER
-
-    def setup_logging():
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    def load_config(path):
-        class _FallbackConfig:
-            def __init__(self):
-                self.training_presets = {}
-
-        return _FallbackConfig()
-
-    def build_feature_engineer(
-        rolling_windows=None,
-        use_gpu=None,
-        enable_groups=None,
-        disable_groups=None,
-        disable_columns=None,
-        max_missing_rate=0.35,
-        max_imputed_rate=0.40,
-        cache_dir=None,
-    ):
-        """Compatibility-safe FeatureEngineer constructor for legacy checkouts."""
-        init_kwargs = {
-            'rolling_windows': rolling_windows,
-            'use_gpu': use_gpu,
-            'enable_groups': enable_groups,
-            'disable_groups': disable_groups,
-            'disable_columns': disable_columns,
-            'max_missing_rate': max_missing_rate,
-            'max_imputed_rate': max_imputed_rate,
-        }
-        supported_kwargs = {
-            name
-            for name in inspect.signature(FeatureEngineer.__init__).parameters
-            if name != 'self'
-        }
-        filtered_kwargs = {
-            key: value
-            for key, value in init_kwargs.items()
-            if value is not None and key in supported_kwargs
-        }
-        engineer = FeatureEngineer(**filtered_kwargs)
-        if disable_groups is not None and 'disable_groups' not in supported_kwargs:
-            engineer.disable_groups = set(disable_groups)
-        if disable_columns is not None and 'disable_columns' not in supported_kwargs:
-            engineer.disable_columns = set(disable_columns)
-        if enable_groups is not None and 'enable_groups' not in supported_kwargs:
-            engineer.enable_groups = set(enable_groups)
-        return engineer
-
-    def resolve_training_preset(preset_name, preset_overrides=None):
-        """Minimal fallback preset resolver for legacy checkouts."""
-        preset_name = str(preset_name).strip().lower()
-        if preset_name == 'small':
-            return type(
-                'TrainingPreset',
-                (),
-                {
-                    'name': 'small',
-                    'description': 'Fast CatBoost-first preset with a reduced feature set and no Transformer.',
-                    'default_mode': 'quick',
-                    'default_model_size': 'S',
-                    'transformer_enabled': False,
-                    'recent_seasons': 2,
-                    'rolling_windows': (3, 5, 10, 20),
-                    'enable_groups': (
-                        'rolling',
-                        'efficiency',
-                        'momentum',
-                        'pace',
-                        'opponent_strength',
-                    ),
-                    'disable_groups': (),
-                    'targets': ('PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'),
-                    'feature_engineer_kwargs': lambda self=None: {
-                        'rolling_windows': [3, 5, 10, 20],
-                        'enable_groups': [
-                            'rolling',
-                            'efficiency',
-                            'momentum',
-                            'pace',
-                            'opponent_strength',
-                        ],
-                        'disable_groups': [],
-                    },
-                    'as_dict': lambda self=None: {
-                        'name': 'small',
-                        'description': 'Fast CatBoost-first preset with a reduced feature set and no Transformer.',
-                        'default_mode': 'quick',
-                        'default_model_size': 'S',
-                        'transformer_enabled': False,
-                        'recent_seasons': 2,
-                        'rolling_windows': [3, 5, 10, 20],
-                        'enable_groups': [
-                            'rolling',
-                            'efficiency',
-                            'momentum',
-                            'pace',
-                            'opponent_strength',
-                        ],
-                        'disable_groups': [],
-                        'targets': ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'],
-                    },
-                },
-            )()
-        return type(
-            'TrainingPreset',
-            (),
-            {
-                'name': 'full',
-                'description': 'Full CatBoost + Transformer stack with the complete feature set.',
-                'default_mode': 'standard',
-                'default_model_size': 'M',
-                'transformer_enabled': True,
-                'recent_seasons': None,
-                'rolling_windows': (3, 5, 10, 20, 50),
-                'enable_groups': (
-                    'rolling',
-                    'efficiency',
-                    'momentum',
-                    'context',
-                    'fatigue',
-                    'matchup',
-                    'opponent_strength',
-                    'pace',
-                    'team_role',
-                    'target_encoding',
-                    'league_rank',
-                ),
-                'disable_groups': (),
-                'targets': ('PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'),
-                'feature_engineer_kwargs': lambda self=None: {
-                    'rolling_windows': [3, 5, 10, 20, 50],
-                    'enable_groups': [
-                        'rolling',
-                        'efficiency',
-                        'momentum',
-                        'context',
-                        'fatigue',
-                        'matchup',
-                        'opponent_strength',
-                        'pace',
-                        'team_role',
-                        'target_encoding',
-                        'league_rank',
-                    ],
-                    'disable_groups': [],
-                },
-                'as_dict': lambda self=None: {
-                    'name': 'full',
-                    'description': 'Full CatBoost + Transformer stack with the complete feature set.',
-                    'default_mode': 'standard',
-                    'default_model_size': 'M',
-                    'transformer_enabled': True,
-                    'recent_seasons': None,
-                    'rolling_windows': [3, 5, 10, 20, 50],
-                    'enable_groups': [
-                        'rolling',
-                        'efficiency',
-                        'momentum',
-                        'context',
-                        'fatigue',
-                        'matchup',
-                        'opponent_strength',
-                        'pace',
-                        'team_role',
-                        'target_encoding',
-                        'league_rank',
-                    ],
-                    'disable_groups': [],
-                    'targets': ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV'],
-                },
-            },
-        )()
-
-    def apply_recent_history_window(df, recent_seasons, **kwargs):
-        if recent_seasons is None:
-            return df
-        if recent_seasons <= 0:
-            raise ValueError("recent_seasons must be positive when provided")
-        if df is None or df.empty or 'SEASON_ID' not in df.columns:
-            return df
-        ordered = df.sort_values('GAME_DATE') if 'GAME_DATE' in df.columns else df
-        seasons = list(dict.fromkeys(ordered['SEASON_ID'].astype(str).tolist()))
-        if len(seasons) <= recent_seasons:
-            return df
-        keep = set(seasons[-recent_seasons:])
-        return df[df['SEASON_ID'].astype(str).isin(keep)].copy()
+from src.config import load_config
+from src.training.pipeline import TrainingPipeline, create_pipeline
+from src.preprocessing.data_loader import DataLoader
+from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
+from src.training.presets import apply_recent_history_window, resolve_training_preset
+from src.training.training_logger import get_training_logger, RichTrainingLogger
+from src.models.gpu_utils import (
+    check_gpu_compatibility,
+    get_gpu_memory_usage,
+    initialize_gpu_optimizations,
+    print_gpu_summary,
+)
+from src.utils.logging_config import setup_logging
 
 setup_logging()
 
@@ -270,19 +58,7 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-def normalize_model_size(value: str) -> str:
-    """Normalize model-size CLI values to S/M/L/XL or auto."""
-    raw = value.strip()
-    if raw.lower() == 'auto':
-        return 'auto'
-    aliases = {
-        'small': 'S',
-        'medium': 'M',
-        'large': 'L',
-        'pro': 'XL',
-        'ultra': 'XL',
-    }
-    return aliases.get(raw.lower(), raw.upper())
+from src.config.model_config import normalize_model_size
 
 
 def resolve_runtime_path(path_value: str, default_name: str) -> Path:

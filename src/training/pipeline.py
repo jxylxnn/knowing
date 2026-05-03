@@ -28,7 +28,14 @@ except Exception:  # pragma: no cover - torch is available in the project env
 
 from src.config import Config
 from src.config.model_config import get_model_config, normalize_model_size
-from src.models.base import ModelRegistry, ModelMetadata
+from src.models.base import (
+    ModelRegistry,
+    ModelMetadata,
+    collect_quantile_dict,
+    load_blend_weights_from_disk,
+    load_transformer_from_disk,
+    validate_blend_contract,
+)
 from src.models.gpu_utils import (
     check_gpu_compatibility,
     clear_gpu_memory,
@@ -220,7 +227,7 @@ class TrainingPipeline:
             )
 
         split_date_str = test_date or self.model_config.get("training", {}).get(
-            "test_split_date", "2024-03-01"
+            "test_split_date", "2025-01-01"
         )
         split_date = pd.to_datetime(split_date_str)
 
@@ -990,8 +997,6 @@ class TrainingPipeline:
         logger.info("=== Training Complete: %.1fs ===", total_time)
         return results
 
-    train_all_models = train
-
     def load_models(self) -> None:
         """Load saved models and blend weights from disk."""
         logger.info("Loading models from disk...")
@@ -1031,65 +1036,22 @@ class TrainingPipeline:
                 self.models[target] = trainer.primary_model
             if trainer.mae_model is not None:
                 self.catboost_mae_models[target] = trainer.mae_model
-            if (
-                trainer.quantile_low_model is not None
-                or trainer.quantile_high_model is not None
-            ):
-                self.catboost_quantile_models[target] = {
-                    k: v
-                    for k, v in {
-                        "low": trainer.quantile_low_model,
-                        "high": trainer.quantile_high_model,
-                    }.items()
-                    if v is not None
-                }
 
-        transformer_path = self.models_dir / "attention_transformer.pkl"
-        if transformer_path.exists():
-            try:
-                TransformerWrapper = _load_transformer_wrapper()
-                self.transformer_model = TransformerWrapper.load(str(transformer_path))
-                self.attention_model = self.transformer_model
-                self.temporal_model = self.transformer_model
-                logger.info("Loaded Transformer model")
-            except Exception as exc:
-                logger.warning("Failed to load Transformer model: %s", exc)
+            quantile_dict = collect_quantile_dict(trainer)
+            if quantile_dict:
+                self.catboost_quantile_models[target] = quantile_dict
 
-        blend_path = self.models_dir / "blend_weights.pkl"
-        if blend_path.exists():
-            try:
-                self.blend_weights = joblib.load(blend_path)
-                logger.info(
-                    "Loaded blend weights for %s targets", len(self.blend_weights)
-                )
-            except Exception as exc:
-                logger.warning("Failed to load blend weights: %s", exc)
+        self.transformer_model = load_transformer_from_disk(self.models_dir)
+        self.attention_model = self.transformer_model
+        self.temporal_model = self.transformer_model
+
+        self.blend_weights = load_blend_weights_from_disk(self.models_dir)
 
         self._validate_blend_contract()
 
     def _validate_blend_contract(self) -> None:
         """Raise when blend weights require a model that is not loaded."""
-        if not self.blend_weights:
-            return
-
-        has_transformer_weight = any(
-            float(weights.get("transformer", 0.0)) > 0.0
-            for key, weights in self.blend_weights.items()
-            if key != "_method"
-        )
-        if has_transformer_weight and self.transformer_model is None:
-            transformer_path = self.models_dir / "attention_transformer.pkl"
-            if transformer_path.exists():
-                raise RuntimeError(
-                    "Blend weights require a Transformer model but "
-                    f"attention_transformer.pkl in {self.models_dir} failed to load. "
-                    "Fix the artifact or retrain."
-                )
-            raise FileNotFoundError(
-                "Blend weights require a Transformer model but "
-                f"attention_transformer.pkl is missing from {self.models_dir}. "
-                "Provide the artifact or retrain with the Transformer disabled."
-            )
+        validate_blend_contract(self.blend_weights, self.transformer_model, self.models_dir)
 
     def get_summary(self) -> Dict[str, Any]:
         """Return a compact summary for CLI output."""

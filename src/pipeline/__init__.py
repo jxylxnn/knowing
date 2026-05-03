@@ -1,9 +1,8 @@
-"""Legacy pipeline package.
+"""Pipeline package.
 
-The supported training path lives in :mod:`src.training.pipeline` and keeps the
-CatBoost + Transformer-only flow from the diagram. This package remains as a
-compatibility surface for older imports, but it should not be the place new
-code reaches for training logic.
+Provides DataPipeline, TrainingPipeline (delegated to src.training.pipeline),
+and PredictionService. This package serves as the primary import surface for
+pipeline classes.
 """
 
 from importlib import import_module
