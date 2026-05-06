@@ -342,6 +342,44 @@ class TrainingPipeline:
         filtered_frames: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
         results: Dict[str, TrainResult] = {}
         for target in self.TARGETS:
+            # Guard against targets whose column is entirely missing from the data.
+            if target not in fit_df.columns or target not in val_df.columns:
+                missing_from = []
+                if target not in fit_df.columns:
+                    missing_from.append("fit")
+                if target not in val_df.columns:
+                    missing_from.append("val")
+                logger.warning(
+                    "Target column '%s' missing from %s DataFrame(s); "
+                    "using zero constant fallback.",
+                    target, " and ".join(missing_from),
+                )
+                trainer = CatBoostTrainer(
+                    model_name=f"catboost_{target}",
+                    target=target,
+                    config=cat_config,
+                    use_gpu=False,
+                    use_multi_loss=cat_config.get("use_multi_loss", True),
+                    use_quantile=cat_config.get(
+                        "use_quantile_models", cat_config.get("use_quantile", True)
+                    ),
+                )
+                trainer.primary_model = ConstantRegressor(0.0)
+                if trainer.use_multi_loss:
+                    trainer.mae_model = ConstantRegressor(0.0)
+                if trainer.use_quantile:
+                    trainer.quantile_low_model = ConstantRegressor(0.0)
+                    trainer.quantile_high_model = ConstantRegressor(0.0)
+                trainer.feature_cols = list(self.feature_cols or [])
+                trainer.cat_features = list(self.cat_features)
+                trainer.is_trained = True
+                self.models[target] = trainer.primary_model
+                self.trainers[f"catboost_{target}"] = trainer
+                results[target] = TrainResult(
+                    model=trainer, metrics={}, training_time=0.0
+                )
+                continue
+
             fit_target = (
                 fit_df[fit_df[target].notna()].copy()
                 if target in fit_df.columns
@@ -426,6 +464,8 @@ class TrainingPipeline:
                     use_gpu=self.use_gpu,
                 )
                 results[target] = result
+                if self.use_gpu:
+                    clear_gpu_memory()
 
         for target, result in results.items():
             self.experiment.log_model_metrics("catboost", result.metrics, target)
@@ -656,9 +696,11 @@ class TrainingPipeline:
         model_path = self.models_dir / "attention_transformer.pkl"
         if model.is_trained:
             model.save(str(model_path))
+            logger.info("Transformer model saved to %s", model_path)
         else:
             logger.warning(
-                "Transformer training produced no sequences; skipping model save."
+                "Transformer training produced no sequences; skipping model save. "
+                "Blend weights will fall back to CatBoost-only."
             )
 
         self.transformer_model = model
@@ -966,14 +1008,23 @@ class TrainingPipeline:
         else:
             transformer_result = TrainResult(model=None, metrics={}, training_time=0.0)
 
+        transformer_trained = (
+            bool(self.model_config["transformer"]["enabled"])
+            and transformer_result.model is not None
+            and getattr(transformer_result.model, 'is_trained', False)
+        )
         self._save_catboost_artifacts(catboost_results)
 
-        transformer_enabled = bool(self.model_config["transformer"]["enabled"])
-        if transformer_enabled and transformer_result.metrics:
+        if transformer_trained and transformer_result.metrics:
             self.blend_weights = self._build_ridge_blend_weights(
                 catboost_results, transformer_result, fit_df, val_df
             )
         else:
+            if bool(self.model_config["transformer"]["enabled"]) and not transformer_trained:
+                logger.warning(
+                    "Transformer enabled but not trained; using inverse-MAE blending "
+                    "with CatBoost-only weights."
+                )
             self.blend_weights = self._build_inverse_mae_weights(
                 catboost_results, transformer_result
             )
@@ -982,7 +1033,7 @@ class TrainingPipeline:
         self._save_feature_cols()
         self._save_model_stack_metadata()
         self._validate_runtime_artifact_contract(
-            require_transformer=bool(self.model_config["transformer"]["enabled"]),
+            require_transformer=transformer_trained,
         )
 
         total_time = time.time() - overall_start

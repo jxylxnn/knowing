@@ -263,6 +263,10 @@ class CatBoostTrainer(BaseTrainer):
         # Per-target overrides
         if self.config.get('use_per_target_tuning', True) and self.target in self.TARGET_PROFILES:
             params.update(self.TARGET_PROFILES[self.target])
+            # Cap profile iterations to the config-level budget so training
+            # mode (quick/standard/full) is respected.
+            config_iter = self.config.get('iterations', params['iterations'])
+            params['iterations'] = min(params['iterations'], config_iter)
         
         # Adjust for model type
         if model_type == 'mae':
@@ -472,14 +476,30 @@ class CatBoostTrainer(BaseTrainer):
         return model
     
     def _compute_feature_importance(self) -> None:
-        """Compute feature importance."""
+        """Compute feature importance with safe length handling.
+
+        CatBoost may exclude constant or redundant features, so
+        ``get_feature_importance()`` can return fewer values than
+        ``feature_cols``.  This method aligns by the minimum length
+        and warns when a mismatch occurs.
+        """
         if self.primary_model is None or self.feature_cols is None:
             return
-        
+
         importance = self.primary_model.get_feature_importance()
+        n_cols = len(self.feature_cols)
+        n_imp = len(importance)
+        if n_cols != n_imp:
+            logger.warning(
+                "Feature importance length mismatch for %s: "
+                "%d columns vs %d importance values. "
+                "Dropping %d tail column(s) to align.",
+                self.target, n_cols, n_imp, max(0, n_cols - n_imp),
+            )
+        n = min(n_cols, n_imp)
         self._feature_importance = {
             name: float(imp)
-            for name, imp in zip(self.feature_cols, importance)
+            for name, imp in zip(self.feature_cols[:n], importance[:n])
         }
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], **kwargs) -> np.ndarray:
