@@ -4,7 +4,8 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any
 import numpy as np
-from scipy import stats as scipy_stats
+
+from src.simulation.stat_utils import compute_mode, compute_stats_summary
 
 logger = logging.getLogger(__name__)
 
@@ -18,57 +19,12 @@ class ReportGenerator:
             os.makedirs(output_dir)
 
     def _compute_mode(self, values: np.ndarray) -> float:
-        """
-        Compute the mode of a continuous distribution using KDE.
-        For discrete-like distributions (integers), uses histogram binning.
-        """
-        values = np.array(values)
-        if len(values) < 3:
-            return float(np.mean(values))
-        
-        # Remove any NaN/inf values
-        values = values[np.isfinite(values)]
-        if len(values) < 3:
-            return float(np.mean(values))
-        
-        # Check if values are essentially discrete (integers or half-integers)
-        rounded = np.round(values * 2) / 2  # Round to nearest 0.5
-        if np.allclose(values, rounded, atol=0.1):
-            # Use histogram-based mode for discrete-like data
-            bins = np.arange(values.min() - 0.25, values.max() + 0.75, 0.5)
-            if len(bins) < 2:
-                return float(np.mean(values))
-            hist, bin_edges = np.histogram(values, bins=bins)
-            mode_idx = np.argmax(hist)
-            return float((bin_edges[mode_idx] + bin_edges[mode_idx + 1]) / 2)
-        
-        try:
-            # Use KDE for continuous data
-            kde = scipy_stats.gaussian_kde(values)
-            # Search for mode in a fine grid
-            x_grid = np.linspace(values.min(), values.max(), 200)
-            densities = kde(x_grid)
-            mode_idx = np.argmax(densities)
-            return float(x_grid[mode_idx])
-        except Exception:
-            # Fallback to median if KDE fails
-            return float(np.median(values))
+        """Delegate to the shared compute_mode utility."""
+        return compute_mode(values)
 
     def _compute_stats_summary(self, values: List[float]) -> Dict[str, float]:
-        """Compute mean, mode, median, and std for a list of values."""
-        arr = np.array(values)
-        return {
-            'mean': float(np.mean(arr)),
-            'mode': self._compute_mode(arr),
-            'median': float(np.median(arr)),
-            'std': float(np.std(arr)),
-            'min': float(np.min(arr)),
-            'max': float(np.max(arr)),
-            'p5': float(np.percentile(arr, 5)),
-            'p95': float(np.percentile(arr, 95)),
-            'p0.5': float(np.percentile(arr, 0.5)),
-            'p99.5': float(np.percentile(arr, 99.5)),
-        }
+        """Delegate to the shared compute_stats_summary utility."""
+        return compute_stats_summary(values)
 
     def format_console_report(
         self, 
