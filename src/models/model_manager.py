@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.config.model_config import get_model_config, normalize_model_size
+from src.evaluation.weight_store import EnsembleWeights, TargetBlend, WeightStore
 from src.models.base import (
     ModelRegistry,
     collect_quantile_dict,
@@ -72,6 +73,7 @@ class ModelManager:
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
         self.transformer_model: Optional[Any] = None
         self.blend_weights: Dict[str, Dict[str, float]] = {}
+        self.ensemble_weights: Optional[EnsembleWeights] = None  # v2 versioned weights
         self.feature_cols: Optional[List[str]] = None
         self.cat_features: List[str] = []
         self.feature_schema: Optional[FeatureSchema] = None
@@ -277,6 +279,48 @@ class ModelManager:
         """Public wrapper for compatibility with older callers."""
         return self._load_models()
 
+    def use_ensemble_weights(self, weights: EnsembleWeights) -> None:
+        """Hot-reload ensemble blend weights from a versioned EnsembleWeights object.
+
+        This replaces the legacy blend_weights dict with the new versioned
+        format and updates all blend coefficients immediately without
+        reloading models.
+
+        Args:
+            weights: An EnsembleWeights object from WeightStore.
+        """
+        self.ensemble_weights = weights
+        # Sync legacy dict for backward compatibility
+        self.blend_weights = {}
+        for target, tb in weights.per_target.items():
+            self.blend_weights[target] = {
+                "catboost": tb.catboost,
+                "transformer": tb.transformer,
+                "intercept": tb.intercept,
+            }
+        logger.info(
+            "Hot-reloaded ensemble weights v%d (score=%.3f)",
+            weights.version,
+            weights.backtest_score or float("nan"),
+        )
+
+    def reload_weights(self, store_dir: str = "models/blend_weights") -> bool:
+        """Reload ensemble weights from the versioned weight store.
+
+        Args:
+            store_dir: Path to the WeightStore directory.
+
+        Returns:
+            True if weights were successfully reloaded, False otherwise.
+        """
+        store = WeightStore(store_dir)
+        weights = store.load_current()
+        if weights is None:
+            logger.warning("No current weights found in %s", store_dir)
+            return False
+        self.use_ensemble_weights(weights)
+        return True
+
     def _predict_catboost_quantiles(
         self, target: str, X: pd.DataFrame
     ) -> Optional[Dict[str, np.ndarray]]:
@@ -301,8 +345,15 @@ class ModelManager:
         if mae_model is None:
             return np.clip(primary, 0.0, None)
 
+        # Use versioned ensemble weight if available, else hardcoded 0.7
+        cb_mae_weight = 0.7
+        if self.ensemble_weights is not None:
+            target_blend = self.ensemble_weights.per_target.get(target)
+            if target_blend is not None:
+                cb_mae_weight = target_blend.catboost_mae_blend
+
         mae_pred = np.asarray(mae_model.predict(X), dtype=float)
-        blended = 0.7 * primary + 0.3 * mae_pred
+        blended = cb_mae_weight * primary + (1.0 - cb_mae_weight) * mae_pred
         return np.clip(blended, 0.0, None)
 
     def _predict_transformer_target(
@@ -402,10 +453,20 @@ class ModelManager:
 
             transformer_pred = self._predict_transformer_target(target, history_df)
             if transformer_pred is not None:
-                blend_cfg = self.blend_weights.get(target, {})
-                cb_weight = float(blend_cfg.get("catboost", 0.7))
-                tx_weight = float(blend_cfg.get("transformer", 0.3))
-                intercept = float(blend_cfg.get("intercept", 0.0))
+                # Prefer versioned EnsembleWeights over legacy blend_weights
+                if self.ensemble_weights is not None:
+                    tb = self.ensemble_weights.per_target.get(target)
+                    if tb is not None:
+                        cb_weight = tb.catboost
+                        tx_weight = tb.transformer
+                        intercept = tb.intercept
+                    else:
+                        cb_weight, tx_weight, intercept = 1.0, 0.0, 0.0
+                else:
+                    blend_cfg = self.blend_weights.get(target, {})
+                    cb_weight = float(blend_cfg.get("catboost", 1.0))
+                    tx_weight = float(blend_cfg.get("transformer", 0.0))
+                    intercept = float(blend_cfg.get("intercept", 0.0))
                 final_pred = (base * cb_weight) + (transformer_pred * tx_weight) + intercept
 
             predictions[target] = float(max(0.0, final_pred))

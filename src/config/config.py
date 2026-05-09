@@ -115,10 +115,34 @@ class GNNConfig(NeuralNetConfig):
 class EnsembleConfig:
     """Ensemble and blending configuration."""
     enabled: bool = True
-    method: str = "ridge"  # ridge, weighted_average, stacking
+    method: str = "ridge"  # ridge, lasso, elasticnet, weighted_average
     cv_folds: int = 5
     use_temporal_refinement: bool = True
     use_advanced_temporal: bool = True
+
+
+@dataclass
+class SelfOptimizationConfig:
+    """Self-optimizing ensemble weight tuning configuration.
+
+    Controls the feedback loop that continuously retunes ensemble blend
+    weights as the season progresses without retraining underlying models.
+
+    The optimizer uses a holdout window of recently completed games to
+    evaluate candidate weights, with accept/verify gates that prevent
+    regressions from being deployed.
+    """
+    enabled: bool = False
+    accept_margin: float = 0.01               # 1% min MAE improvement to accept
+    verification_margin: float = 0.02         # 2% max degradation on verification set
+    holdout_window_days: int = 14             # recent completed games for scoring
+    verification_window_days: int = 30        # older window for verification gate
+    optimizer_method: str = "Nelder-Mead"     # Nelder-Mead, L-BFGS-B, Bayesian
+    max_iterations: int = 100
+    schedule: str = "manual"                  # manual, daily, weekly
+    min_samples_per_area: int = 50            # minimum games required to optimize
+    retry_on_failure: bool = True
+    max_retries: int = 3
 
 
 @dataclass
@@ -164,6 +188,7 @@ class SimulationConfig:
     use_minutes_model: bool = True
     use_error_calibration: bool = True
     four_factors_weight: float = 0.25
+    use_four_factors: bool = True
     detailed_path_threshold: int = 250
     fast_path_threshold: int = 1000
 
@@ -402,6 +427,7 @@ class Config:
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     gnn: GNNConfig = field(default_factory=GNNConfig)
     ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
+    self_optimization: SelfOptimizationConfig = field(default_factory=SelfOptimizationConfig)
     
     @classmethod
     def from_yaml(cls, path: Path) -> "Config":
@@ -461,6 +487,8 @@ class Config:
             config.gnn = GNNConfig(**data['gnn'])
         if 'ensemble' in data:
             config.ensemble = EnsembleConfig(**data['ensemble'])
+        if 'self_optimization' in data:
+            config.self_optimization = SelfOptimizationConfig(**data['self_optimization'])
             
         return config
     

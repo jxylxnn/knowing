@@ -398,3 +398,19 @@ ensemble:
   cv_folds: 5
   use_temporal_refinement: true
   use_advanced_temporal: false
+
+# Self-optimizing ensemble weight tuning
+# Continuously retunes blend weights as the season progresses
+# without retraining underlying models
+self_optimization:
+  enabled: false
+  accept_margin: 0.01
+  verification_margin: 0.02
+  holdout_window_days: 14
+  verification_window_days: 30
+  optimizer_method: "Nelder-Mead"
+  max_iterations: 100
+  schedule: "manual"
+  min_samples_per_area: 50
+  retry_on_failure: true
+  max_retries: 3

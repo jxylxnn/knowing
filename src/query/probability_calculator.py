@@ -41,25 +41,27 @@ class ProbabilityResult:
     calibration_metrics: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
-        edge = abs(self.prob_over - 0.5)
-        self.edge = edge
-        if self.std and self.std > 0:
-            self.z_score = (self.line - self.mean) / self.std
-        else:
-            self.z_score = None
-            
-        if edge > 0.15:
-            if self.prob_over > 0.5:
-                self.recommendation = "OVER (strong)"
+        if self.edge is None:
+            self.edge = abs(self.prob_over - 0.5)
+        if self.z_score is None:
+            if self.std and self.std > 0:
+                self.z_score = (self.line - self.mean) / self.std
             else:
-                self.recommendation = "UNDER (strong)"
-        elif edge > 0.05:
-            if self.prob_over > 0.5:
-                self.recommendation = "OVER (moderate)"
+                self.z_score = None
+
+        if self.recommendation is None:
+            if self.edge > 0.15:
+                if self.prob_over > 0.5:
+                    self.recommendation = "OVER (strong)"
+                else:
+                    self.recommendation = "UNDER (strong)"
+            elif self.edge > 0.05:
+                if self.prob_over > 0.5:
+                    self.recommendation = "OVER (moderate)"
+                else:
+                    self.recommendation = "UNDER (moderate)"
             else:
-                self.recommendation = "UNDER (moderate)"
-        else:
-            self.recommendation = "PASS (too close)"
+                self.recommendation = "PASS (too close)"
     
     def to_dict(self) -> Dict[str, Any]:
         return {

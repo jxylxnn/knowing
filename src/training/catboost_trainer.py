@@ -722,8 +722,8 @@ def train_catboost_target(
         target=target,
         config=config,
         use_gpu=use_gpu,
-        use_multi_loss=config.get('use_multi_loss', True),
-        use_quantile=config.get('use_quantile_models', config.get('use_quantile', True)),
+        use_multi_loss=config.get('use_multi_loss', False),
+        use_quantile=config.get('use_quantile_models', config.get('use_quantile', False)),
     )
     
     result = trainer.fit(

@@ -272,7 +272,7 @@ Examples:
             gpu_name = torch.cuda.get_device_name(0)
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
             logger.info(f"GPU detected: {gpu_name} ({vram:.1f}GB VRAM)")
-        except:
+        except Exception:
             pass
     elif not args.no_gpu:
         logger.info("CUDA is unavailable or incompatible. Training will run on CPU.")

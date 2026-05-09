@@ -132,6 +132,11 @@ class GameSimulator(SimCacheMixin):
         self._pace_cache = {}
         logger.info(f"Cache directory: {self.cache_dir}")
 
+        # --- Simulation data state (set by prepare_simulation_context) ---
+        self.all_merged_with_features = None
+        self.merged_data = None
+        self.latest_player_stats = None
+
     # ------------------------------------------------------------------
     # Simulation parameters
     # ------------------------------------------------------------------

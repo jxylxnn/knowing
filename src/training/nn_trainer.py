@@ -250,7 +250,8 @@ class NeuralNetworkTrainer(BaseTrainer):
         # Training config
         epochs = self.config.get('epochs', 100)
         batch_size = self.config.get('batch_size', 64)
-        lr = self.config.get('lr', 1e-3)
+        # Accept both 'lr' (model_config auto-generated) and 'learning_rate' (YAML Config)
+        lr = self.config.get('lr', self.config.get('learning_rate', 1e-3))
         patience = self.config.get('early_stop_patience', 15)
         
         # Optimizer and scheduler

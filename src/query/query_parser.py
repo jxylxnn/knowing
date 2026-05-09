@@ -183,22 +183,22 @@ class QueryParser:
         player_name = self._extract_player_name(query, direction, line, stat)
         
         opponent = self._extract_opponent(query)
-        team = self._extract_team(query)
+        team = self._extract_team(query, exclude_opponent=opponent)
         date = self._extract_date(query)
-        
+
         if player_name:
             if stat is None:
                 stat = self._last_context.get('stat', 'pts')
             if line is None:
                 line = self._infer_line(stat)
-            
+
             self._last_context = {
                 'player_name': player_name,
                 'stat': stat,
                 'opponent': opponent,
                 'team': team
             }
-            
+
             return ParsedQuery(
                 query_type=QueryType.OVER_UNDER,
                 player_name=player_name,
@@ -238,8 +238,8 @@ class QueryParser:
             stat = self._last_context['stat']
         
         opponent = self._extract_opponent(query)
-        team = self._extract_team(query)
-        
+        team = self._extract_team(query, exclude_opponent=opponent)
+
         if player_name:
             return ParsedQuery(
                 query_type=QueryType.PROJECTION,
@@ -382,13 +382,15 @@ class QueryParser:
         
         return None
     
-    def _extract_team(self, query: str) -> Optional[str]:
+    def _extract_team(self, query: str, exclude_opponent: Optional[str] = None) -> Optional[str]:
         query_lower = query.lower()
-        
+
         for city_name, abbr in TEAM_ABBREVIATIONS.items():
+            if exclude_opponent and abbr == exclude_opponent:
+                continue
             if city_name in query_lower:
                 return abbr
-        
+
         return None
     
     def _extract_date(self, query: str) -> Optional[str]:
