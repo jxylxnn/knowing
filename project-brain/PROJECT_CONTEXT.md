@@ -160,6 +160,10 @@ Not supported by repo evidence:
   - one Transformer sequence model
   - inverse-error blending
   - quantile models for uncertainty
+- Season-context features for temporal awareness:
+  - `SeasonPhaseFeatureGroup` — early-season ramp-up and trade resets
+  - `TeamMotivationFeatureGroup` — late-season tanking/load management signals
+  - `PostseasonContextFeatureGroup` — playoff detection with pace prior
 - Simulation pipeline that tries to enrich predictions with:
   - schedule context
   - injuries

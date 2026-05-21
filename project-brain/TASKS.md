@@ -329,6 +329,19 @@
   - `config/default.yaml`: `lifecycle:` config section
 - Full suite: TBD (new lifecycle tests added).
 
+### Season-context feature groups + rest cap + phase-aware drift
+
+- Status: DONE on 2026-05-23.
+- Delivered:
+  - `SeasonPhaseFeatureGroup` — early-season rust, trade resets (4 output columns)
+  - `TeamMotivationFeatureGroup` — tanking, load management, playoff lock signals (4 output columns)
+  - `PostseasonContextFeatureGroup` — playoff detection, pace prior (2 output columns)
+  - `DAYS_SINCE_LAST_GAME` capped at 14 days in `RestGameDensityFeatureGroup`
+  - `DriftDetector` phase-aware: `phase` parameter on `record()`/`detect()`/`record_and_detect()` with auto-inference from date
+  - Wired into `FeatureEngineer._build_groups()` (26 total groups), `full` preset, `config/default.yaml`, `SAFE_PREFIXES`
+  - All feature groups use batched-assembly pattern, no pandas fragmentation
+- Full suite: `279 passed, 1 skipped`.
+
 ### Apply planned bug-fix batch (groupby KeyError, CatBoost GPU callback, device AttributeError)
 
 - Completed on 2026-04-11.

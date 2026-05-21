@@ -123,6 +123,21 @@
 - The GPU engine transparently falls back to CPU when cuDF is unavailable or CUDA is missing. Never crash feature engineering because of GPU unavailability.
 - Complex feature groups (Python loops, scipy) execute on CPU after pandas conversion — do not attempt full GPU port of groups that are fundamentally iterative.
 
+### Season-Context Feature Groups (NEW)
+
+- `src/preprocessing/features/season_phase.py` — early-season ramp-up (cap `DAYS_SINCE_SEASON_START` at 30 days so the feature isolates the opening-month effect). `GAMES_WITH_CURRENT_TEAM` resets on trade — ensure `PLAYER_ID` and `TEAM_ID` columns are present and sorted by `GAME_DATE` before the groupby.
+- `src/preprocessing/features/team_motivation.py` — always shift `TEAM_CUMULATIVE_WIN_PCT` by 1 to prevent label leakage (the model should see the team's record *before* the current game). `WL` column must be present with values `'W'`/`'L'`.
+- `src/preprocessing/features/postseason_context.py` — checks both `SEASON_TYPE` and `GAME_TYPE` columns for playoff strings (`'Playoffs'`, `'Postseason'`, `'4'`). If neither column exists, all games default to regular season.
+- Season-context groups are in the `full` preset but intentionally excluded from `small` to preserve its iteration speed.
+- The rest cap in `RestGameDensityFeatureGroup` (`DAYS_SINCE_LAST_GAME.clip(upper=14.0)`) applies to ALL games, not just off-season gaps. Do not remove or raise the cap without validating the effect on B2B detection (a 1-day gap still correctly produces B2B=1).
+
+### Phase-Aware Drift Detection (NEW)
+
+- `DriftDetector` now maintains a single `_history` list with a `phase` tag on each entry (vs separate lists per phase). The `detect()` method filters the list by phase at query time.
+- When passing `phase` to `detect()`, the function filters history to that phase only. If no phase-specific data exists, it falls back to the full history.
+- The `_infer_phase_from_date()` heuristic (Apr 15–Jun 20 = PLAYOFF) is a rough approximation. Explicitly pass `phase='PLAYOFF'` during postseason backtesting for accuracy.
+- The phase tag is persisted in `drift_state.json` so it survives restarts — old (pre-phase) entries will not have a `phase` key and are treated as `REGULAR`.
+
 ### Evaluation And Optimization (NEW)
 
 - `src/evaluation/` is the evaluation and optimization subsystem. All backtesting, weight optimization, drift detection, and weight versioning lives here.

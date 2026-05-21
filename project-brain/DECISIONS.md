@@ -1194,3 +1194,48 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 
 - If the data quality schema needs to carry more granular information (e.g., per-source quality breakdown per player), extend `DATA_QUALITY` to a composite enum or structured field.
 - If strict mode proves too brittle for production use, consider adding a `--warn-only` variant.
+
+---
+
+## DR-026: Season-Context Feature Groups for Temporal Awareness
+
+- Status: active
+- Date: 2026-05-23
+- Confidence: high
+
+### Context
+
+- The model treated all regular-season and playoff games identically, failing to account for off-season rest gaps, trade deadline resets, late-season tanking/load management, and playoff pace/minute shifts.
+- This caused predictable distribution errors in October (players returning from off-season), February (traded players), March (tanking), and May (playoff intensity shift).
+
+### Options Considered
+
+1. Single feature group with all season-context signals.
+2. Separate feature groups for early-season, late-season motivation, and postseason context — keeping each focused and independently testable.
+3. Hard-coded adjustments in the simulator only (no feature-level signal).
+
+### Decision
+
+- Option 2: three separate feature groups:
+  - `SeasonPhaseFeatureGroup` — early-season ramp-up (days since season start capped at 30) and trade-reset tracking (games with current team, recent trade flag).
+  - `TeamMotivationFeatureGroup` — late-season tanking/load management signals using team cumulative win percentage as a proxy.
+  - `PostseasonContextFeatureGroup` — playoff detection with a 0.95 pace prior (the model learns the exact coefficient).
+
+### Tradeoffs
+
+- Three small files vs one larger file — each is independently testable and follows the batched-assembly pattern.
+- Team motivation uses win percentage as a proxy, not actual front-office intent (which is unobservable).
+- Playoff pace prior is a fixed starting point (0.95) — the model can scale or ignore it.
+
+### Consequences
+
+- Three new feature files, 10 new output columns total.
+- `DAYS_SINCE_LAST_GAME` capped at 14 days in `RestGameDensityFeatureGroup` (the rest cap applies to all games, not just off-season).
+- `DriftDetector` updated with phase-aware baselines to prevent false playoff drift alerts.
+- `full` preset includes all three groups; `small` does not.
+- Full test suite: `279 passed, 1 skipped`.
+
+### Revisit Triggers
+
+- If actual team injury/rest data becomes available, the tanking/load-management proxy can be replaced with real load-management tracking.
+- If the 30-day cap on `DAYS_SINCE_SEASON_START` proves too tight or too loose for the early-season effect, adjust the cap based on empirical validation.

@@ -211,13 +211,16 @@ Important files:
   - **`aging_curve.py` (NEW)** — `AgingCurveFeatureGroup`: B-Ianus Bayesian model features. Outputs: `AGING_PLAYER_AGE`, `AGING_PEAK_AGE_EST`, `AGING_CURVE_FACTOR`, etc.
   - **`kan_aging.py` (NEW)** — `KANAgingFeatureGroup`: KAN nonlinear age features. Outputs: `KAN_AGE_NONLIN_FACTOR`, `KAN_AGE_INFLECTION_AGE`, `KAN_AGE_VOLATILITY`.
   - **`skill_development.py` (NEW)** — `SkillDevelopmentFeatureGroup`: growth velocity metrics. Outputs: `SKILL_DEV_PTS_VELOCITY`, `SKILL_DEV_EFF_VELOCITY`, etc.
+  - **`season_phase.py` (NEW)** — `SeasonPhaseFeatureGroup`: early-season ramp-up and trade resets. Outputs: `DAYS_SINCE_SEASON_START` (capped at 30), `IS_SEASON_OPENER`, `GAMES_WITH_CURRENT_TEAM`, `IS_RECENT_TRADE` (≤5 games with new team).
+  - **`team_motivation.py` (NEW)** — `TeamMotivationFeatureGroup`: late-season tanking/load management signals. Outputs: `TEAM_CUMULATIVE_WIN_PCT` (shift-1), `IS_LATE_SEASON`, `IS_TANKING_PROXY`, `IS_PLAYOFF_LOCK_PROXY`.
+  - **`postseason_context.py` (NEW)** — `PostseasonContextFeatureGroup`: playoff detection. Outputs: `IS_PLAYOFF_GAME`, `PLAYOFF_PACE_PRIOR` (0.95 playoff / 1.0 regular season).
   - `__init__.py` — re-exports all feature group classes
 - Safe entry point for adding new features if the feature schema contract is respected.
 - All new feature groups follow the batched-column pattern: accumulate columns in a `dict[str, pd.Series]`, then `_concat_new_columns(df, new_columns)` once per group.
 - Current caution: `rolling.py` was a performance hotspot due to DataFrame fragmentation warnings; the hot groups now assemble feature columns in batches and concatenate once per group.
 - Current caution: `archetype.py` computes hard labels plus soft similarities from fixed playstyle templates. Keep that template set in sync with preset definitions and schema expectations if the archetypes change.
 - Current note: `lineup_stability.py` Jaccard computation was refactored to a vectorised key-shift approach (no per-player Python loops) and now sources its roster maps from `_teammate_utils.py`.
-- Current note: `rest_density.py` game-count windows were vectorised with pandas time-based `rolling(..., closed='left')`, and opponent-rest lookups now use `np.searchsorted` on pre-sorted `datetime64[ns]` arrays instead of nested Python loops.
+- Current note: `rest_density.py` game-count windows were vectorised with pandas time-based `rolling(..., closed='left')`, and opponent-rest lookups now use `np.searchsorted` on pre-sorted `datetime64[ns]` arrays instead of nested Python loops. `DAYS_SINCE_LAST_GAME` is capped at 14 days to prevent off-season/All-Star gaps from creating infinite rest outliers.
 
 ## Training Layer
 

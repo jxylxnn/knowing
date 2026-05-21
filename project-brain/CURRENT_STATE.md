@@ -2,9 +2,10 @@
 
 ## Snapshot
 
-- Observed date: 2026-05-22
+- Observed date: 2026-05-23
 - Repository health: good
 - Test status in this workspace:
+  - full suite after season-context feature groups (2026-05-23): `279 passed, 1 skipped`
   - full suite after lifecycle ML integration (2026-05-22): TBD
   - full suite (2026-05-18): `178 passed, 0 failed`
   - full suite after evaluation module + ensemble optimizer: `178 passed, 0 failed`
@@ -20,7 +21,7 @@
 
 - Core repo structure is coherent enough to understand and extend.
 - Historical data ingestion flow exists in `update_data.py` with multiple season-selection modes.
-- Feature engineering is substantial, modular, and well-covered (23 feature groups, all test-covered).
+- Feature engineering is substantial, modular, and well-covered (26 feature groups, all test-covered).
 - Training internals for CatBoost/Transformer components are implemented and testable in isolation.
 - Six training-stopping bugs in CatBoost + Transformer pipeline are fixed (2026-05-09):
   - CatBoost import guard prevents crash when catboost isn't installed
@@ -66,9 +67,18 @@
   - `GameSimulator` and `SeasonSimulator` accept `strict_mode` parameter. Raises `RuntimeError` on degraded optional source when strict.
   - `ReportGenerator.export_player_projections()` appends `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`).
   - `ProjectionLoader.find_player()` surfaces visible CLI warning when loading degraded projections.
+- **New: Season-context feature groups** (2026-05-23):
+  - `SeasonPhaseFeatureGroup` — early-season rust detection: `DAYS_SINCE_SEASON_START` (capped at 30), `IS_SEASON_OPENER`, `GAMES_WITH_CURRENT_TEAM` (resets on trade), `IS_RECENT_TRADE` (≤5 games with new team).
+  - `TeamMotivationFeatureGroup` — late-season signals: `TEAM_CUMULATIVE_WIN_PCT` (shift-1, no leakage), `IS_LATE_SEASON` (Mar+), `IS_TANKING_PROXY` (<.35 win %), `IS_PLAYOFF_LOCK_PROXY` (>0.65 win %).
+  - `PostseasonContextFeatureGroup` — playoff detection: `IS_PLAYOFF_GAME` (from `SEASON_TYPE` or `GAME_TYPE`), `PLAYOFF_PACE_PRIOR` (0.95 prior for playoff pace drop).
+  - `DAYS_SINCE_LAST_GAME` capped at 14 days in `RestGameDensityFeatureGroup` to prevent off-season gaps from creating infinite rest outliers.
+- **Phase-aware drift detection** (2026-05-23):
+  - `DriftDetector.record()` and `detect()` accept a `phase` parameter (`REGULAR`/`PLAYOFF`).
+  - Auto-infers phase from date (Apr 15–Jun 20 = playoff).
+  - Prevents false "major drift" alerts when the playoffs naturally lower scoring and pace.
 - Transformer M tier now uses `seq_len=20` (up from 10), matching L tier's context window.
 - Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) use zero-padding for short players instead of skipping them.
-- Training presets and feature engineering remain stable; 19 feature groups in the `full` preset.
+- Training presets and feature engineering remain stable; 26 feature groups in the `full` preset (23 existing + 3 season-context).
 - All six target stats exported from report generator and loaded correctly by projection loader.
 - Training-to-simulation artifact contract is enforced at both boundaries.
 - Dead code in `GameSimulator` has been removed.
@@ -120,11 +130,13 @@
 4. ~~Add a strict simulation mode for optional scraper degradation (CLI flag to fail-fast).~~ **DONE (DR-025, 2026-05-22)**
 5. Run one live `train.py` -> `ModelManager.load_models()` -> `simulate_season.py` smoke test in a healthy local environment with real CSV inputs.
 6. Collect real-data performance profile for the rolling feature path to compare against the synthetic benchmark.
-7. Run full test suite after lifecycle ML integration to update baseline test count.
+7. ~~Run full test suite after lifecycle ML integration to update baseline test count.~~ **DONE (279 passed, 1 skipped)**
 8. Validate lifecycle aging precomputation in `train.py` with real player bio data.
+9. Run training smoke test with season-context features active to confirm `WL` and `SEASON_TYPE` columns propagate through the pipeline.
 
 ## Testing Status
 
+- Verified on 2026-05-23: full suite `279 passed, 1 skipped` after season-context feature groups + lifecycle ML integration.
 - Verified on 2026-05-18: full suite `178 passed, 0 failed` after evaluation module + simulation refactor + training bug fixes.
 - Earlier test runs documented:
   - 2026-04-25: full suite `178 passed, 0 failed` in 74.82s

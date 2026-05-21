@@ -334,6 +334,30 @@ Four new feature groups in `src/preprocessing/features/`, wired into the 19 exis
 
 Total feature groups: 23 (19 original + 4 lifecycle).
 
+### Feature Groups — Season Context (NEW — 2026-05-23)
+
+Three new feature groups in `src/preprocessing/features/`, wired into the 23 existing groups:
+
+- `season_phase.py` — `SeasonPhaseFeatureGroup`: early-season ramp-up and trade resets. Outputs: `DAYS_SINCE_SEASON_START` (capped at 30 days to isolate early-season effect), `IS_SEASON_OPENER` (first 2 days), `GAMES_WITH_CURRENT_TEAM` (consecutive games since last trade, resets on team change), `IS_RECENT_TRADE` (≤5 games with new team).
+- `team_motivation.py` — `TeamMotivationFeatureGroup`: late-season tanking/load management signals. Outputs: `TEAM_CUMULATIVE_WIN_PCT` (shifted to prevent leakage), `IS_LATE_SEASON` (March+), `IS_TANKING_PROXY` (late + win pct < 0.35), `IS_PLAYOFF_LOCK_PROXY` (late + win pct > 0.65).
+- `postseason_context.py` — `PostseasonContextFeatureGroup`: playoff detection. Outputs: `IS_PLAYOFF_GAME` (parsed from `SEASON_TYPE` or `GAME_TYPE`), `PLAYOFF_PACE_PRIOR` (0.95 historical prior for playoff pace drop, model learns exact coefficient).
+
+All three groups use the batched-assembly pattern (`_concat_new_columns`) to avoid pandas fragmentation warnings. They are in the `full` training preset only (not `small`).
+
+### Rest Density Cap
+
+`DAYS_SINCE_LAST_GAME` in `RestGameDensityFeatureGroup` is capped at 14 days to prevent off-season gaps (180+ days) or All-Star breaks from creating infinite rest outliers. Anything beyond 14 days is functionally identical for physical recovery.
+
+Total feature groups: 26 (19 original + 4 lifecycle + 3 season context).
+
+### Phase-Aware Drift Detection
+
+`DriftDetector` now supports separate baselines for regular season and playoffs:
+- `record()`, `detect()`, and `record_and_detect()` accept a `phase` parameter (`'REGULAR'` or `'PLAYOFF'`).
+- When phase is not provided, it's auto-inferred from the date (Apr 15–Jun 20 = playoff).
+- Prevents false "major drift" alerts when the playoffs naturally lower scoring/pace.
+- Falls back to full history when no phase-specific data exists yet.
+
 ### Data Enrichment — Player Bios & Injury History
 
 - `src/data/player_bio_scraper.py` — `PlayerBioScraper`: fetches birthdate, position, height, weight from NBA API `commonplayerinfo`. Caches results to `data/player_bios.csv`. Called from `update_data.py` via `enrich_with_player_bios()`.
