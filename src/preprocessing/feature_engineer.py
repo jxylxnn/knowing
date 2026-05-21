@@ -22,6 +22,10 @@ from src.preprocessing.features import (
     EfficiencyFeatureGroup,
     FatigueFeatureGroup,
     InjuryAdjustedOpportunityFeatureGroup,
+    InjuryRiskFeatureGroup,
+    AgingCurveFeatureGroup,
+    KANAgingFeatureGroup,
+    SkillDevelopmentFeatureGroup,
     LeagueRankingFeatureGroup,
     LineupStabilityFeatureGroup,
     MatchupFeatureGroup,
@@ -35,6 +39,9 @@ from src.preprocessing.features import (
     TargetEncodingFeatureGroup,
     TeamRoleFeatureGroup,
     TeammateUsageFeatureGroup,
+    SeasonPhaseFeatureGroup,
+    TeamMotivationFeatureGroup,
+    PostseasonContextFeatureGroup,
 )
 from src.preprocessing.features.base import FeatureContext, FeatureDiagnostics, FeatureGroup
 from src.utils.prediction_utils import FeatureSelector
@@ -73,6 +80,7 @@ class FeatureEngineer:
         self.max_imputed_rate = max_imputed_rate
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.last_result = FeatureEngineeringResult()
+        self._gpu_engine: Optional[object] = None  # cached GPU engine
 
         self.target_cols = ['PTS', 'REB', 'AST']
         self.feature_groups: List[FeatureGroup] = self._build_groups()
@@ -103,6 +111,15 @@ class FeatureEngineer:
             DefensePositionFeatureGroup(),
             TargetEncodingFeatureGroup(target_cols=self.target_cols, smoothing=20),
             LeagueRankingFeatureGroup(target_cols=self.target_cols, window=2000, min_periods=500),
+            # Player lifecycle & bio-mechanical feature groups
+            InjuryRiskFeatureGroup(),
+            AgingCurveFeatureGroup(),
+            KANAgingFeatureGroup(),
+            SkillDevelopmentFeatureGroup(),
+            # Season context feature groups
+            SeasonPhaseFeatureGroup(),
+            TeamMotivationFeatureGroup(),
+            PostseasonContextFeatureGroup(),
         ]
         return groups
 
@@ -205,6 +222,32 @@ class FeatureEngineer:
 
     def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Run the full feature engineering pipeline (no caching)."""
+        if self.use_gpu:
+            if self._gpu_engine is None:
+                try:
+                    from src.preprocessing.feature_engineer_gpu import FeatureEngineerGPU
+                    self._gpu_engine = FeatureEngineerGPU(
+                        rolling_windows=self.rolling_windows,
+                        use_gpu=True,
+                        enable_groups=list(self.enable_groups) if self.enable_groups else None,
+                        disable_groups=list(self.disable_groups) if self.disable_groups else None,
+                        disable_columns=list(self.disable_columns) if self.disable_columns else None,
+                        max_missing_rate=self.max_missing_rate,
+                        max_imputed_rate=self.max_imputed_rate,
+                        cache_dir=self.cache_dir,
+                    )
+                except Exception as exc:
+                    logger.warning("GPU feature engine unavailable (%s); falling back to CPU.", exc)
+                    self._gpu_engine = None
+            if self._gpu_engine is not None:
+                logger.info("Delegating feature engineering to GPU path.")
+                try:
+                    # type: ignore[union-attr]
+                    gpu_result = self._gpu_engine.create_features(df, is_training=True)
+                    return gpu_result
+                except Exception as exc:
+                    logger.warning("GPU feature engineering failed (%s); falling back to CPU.", exc)
+
         frame = self._prepare_frame(df)
         if frame.empty:
             logger.warning("No valid rows remain after date normalization")

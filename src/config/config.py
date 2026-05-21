@@ -428,6 +428,7 @@ class Config:
     gnn: GNNConfig = field(default_factory=GNNConfig)
     ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
     self_optimization: SelfOptimizationConfig = field(default_factory=SelfOptimizationConfig)
+    lifecycle: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
     def from_yaml(cls, path: Path) -> "Config":
@@ -489,6 +490,8 @@ class Config:
             config.ensemble = EnsembleConfig(**data['ensemble'])
         if 'self_optimization' in data:
             config.self_optimization = SelfOptimizationConfig(**data['self_optimization'])
+        if 'lifecycle' in data:
+            config.lifecycle = data['lifecycle']
             
         return config
     

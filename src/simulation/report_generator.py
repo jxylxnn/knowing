@@ -439,7 +439,9 @@ class ReportGenerator:
                     'TOV_99_CI_HIGH': p.get('tov_99_ci', [0, 0])[1],
                     # Common
                     'PLAY_PROBABILITY': p.get('play_probability', 1.0),
-                    'SIM_TIMESTAMP': datetime.now().isoformat()
+                    'SIM_TIMESTAMP': datetime.now().isoformat(),
+                    # Data quality
+                    'DATA_QUALITY': self._data_quality_from_result(res),
                 })
         
         df = pd.DataFrame(rows)
@@ -452,8 +454,21 @@ class ReportGenerator:
         print(f"\n{'='*90}", flush=True)
         print(f" QUICK SUMMARY ({stat_type.upper()} projections)", flush=True)
         print(f"{'='*90}", flush=True)
-        
+
         for res in results:
             print(f" {self.format_matchup_summary(res, stat_type)}", flush=True)
-        
+
         print(f"{'='*90}\n", flush=True)
+
+    @staticmethod
+    def _data_quality_from_result(res: Dict[str, Any]) -> str:
+        """Determine DATA_QUALITY label from a simulation result's input_health metadata."""
+        health_records = res.get('metadata', {}).get('input_health', {})
+        # input_health may be a dict with 'sources' list or an aggregate
+        sources = health_records.get('sources', []) if isinstance(health_records, dict) else []
+        statuses = [s.get('status', 'success') if isinstance(s, dict) else 'success' for s in sources]
+        if 'failed' in statuses:
+            return 'DEGRADED_MISSING'
+        if 'fallback' in statuses:
+            return 'DEGRADED_FALLBACK'
+        return 'FULL'

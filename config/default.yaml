@@ -56,6 +56,13 @@ training_presets:
         - "defense_position"
         - "target_encoding"
         - "league_rank"
+        - "injury_risk"
+        - "aging_curve"
+        - "kan_aging"
+        - "skill_development"
+        - "season_phase"
+        - "team_motivation"
+        - "postseason_context"
   small:
     description: "Fast CatBoost-first preset with a reduced feature set and no Transformer."
     default_mode: "quick"
@@ -414,3 +421,30 @@ self_optimization:
   min_samples_per_area: 50
   retry_on_failure: true
   max_retries: 3
+
+# Player lifecycle & bio-mechanical configuration
+lifecycle:
+  injury_risk_enabled: true
+  aging_curve_enabled: true
+  kan_aging_enabled: true
+  skill_development_enabled: true
+
+  # B-Ianus aging model priors
+  aging_prior_strength: 10.0
+  aging_peak_priors:
+    PG: [28.5, 1.5]
+    SG: [27.8, 1.3]
+    SF: [27.5, 1.2]
+    PF: [27.0, 1.2]
+    C: [26.5, 1.5]
+
+  # KAN model settings
+  kan_grid_size: 5
+  kan_hidden_dim: 8
+  kan_epochs: 200
+  kan_learning_rate: 0.01
+
+  # Skill development thresholds
+  youth_age_threshold: 25
+  veteran_age_threshold: 30
+  efficiency_stability_band: 0.02

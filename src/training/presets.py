@@ -33,6 +33,9 @@ ALL_FEATURE_GROUPS: Tuple[str, ...] = (
     "defense_position",
     "target_encoding",
     "league_rank",
+    "season_phase",
+    "team_motivation",
+    "postseason_context",
 )
 
 

@@ -12,7 +12,7 @@ source venv/bin/activate
 
 No linter or formatter is installed (no ruff/flake8/pylint). Follow PEP 8.
 
-## Tests (178 total)
+## Tests (260+ total)
 
 ```bash
 pytest tests/ -v                  # full suite (slow — several minutes)
@@ -58,7 +58,7 @@ Root entry points:  update_data.py, train.py, simulate_season.py, query_prob.py
 src/
   config/          — config loading (main config: config/default.yaml)
   data/            — scrapers (NBA API, ESPN injuries, Rotowire lineups, Action Network betting, Basketball Reference)
-  preprocessing/    — 15-phase feature engineering pipeline → 150+ features
+  preprocessing/    — 15-phase feature engineering pipeline → 150+ features (incl. lifecycle: injury risk, aging curves, KAN aging, skill dev)
   models/          — model_manager.py (live bridge), CatBoost (primary), Transformer (secondary)
   pipeline/        — training_pipeline.py, data_pipeline.py, prediction_service.py
   simulation/      — game_simulator.py (GPU Monte Carlo), season_simulator.py
@@ -66,6 +66,7 @@ src/
   training/        — training orchestration, presets, experiment tracking
   evaluation/      — model evaluation
   utils/           — logging, reproducibility, team_mappings
+  lifecycle/       — B-Ianus Bayesian aging model, KAN age model, injury risk computation
 tests/             — mirrors src/ structure; conftest.py injects project root into sys.path
 ```
 
@@ -78,3 +79,7 @@ tests/             — mirrors src/ structure; conftest.py injects project root 
 - **PyTorch CUDA**: installed with CUDA support but auto-detects CPU on machines without GPU. No setup needed.
 - **NBA API rate limits**: `update_data.py` is slow for many seasons; use `--interactive` to select specific seasons.
 - **Data must exist before train**: `train.py` will fail if `data/nba_players.csv` is missing. Run `update_data.py` first.
+- **Player bio data required**: Lifecycle features need AGE and POSITION columns in `nba_players.csv`. Run `update_data.py` at least once after adding the PlayerBioScraper to populate them. Missing AGE defaults all aging features to neutral (1.0 factor).
+- **Injury history is incremental**: The `injury_history.csv` file grows over time. First runs will have sparse data — injury risk features will be near-zero for most players until several update cycles accumulate.
+- **KAN model precomputation**: KAN aging factors are pre-computed on CPU and cached to `data/cache/kan_aging_outputs.csv`. If you retrain with `--force`, delete this file to force recomputation. KAN always runs on CPU to avoid GPU contention with CatBoost/Transformer.
+- **B-Ianus aging precomputation**: Aging curves are cached to `data/cache/aging_curves.csv`. Same rule — delete to force recomputation.

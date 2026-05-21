@@ -115,6 +115,9 @@ class RestGameDensityFeatureGroup(FeatureGroup):
         # --- SCHED_IS_B2B_SECOND: binary flag for second night of back-to-back ---
         # A B2B second night means the previous game was within 1 day
         days_since_last = df.groupby('PLAYER_ID')['GAME_DATE'].diff().dt.total_seconds() / 86400.0
+        # Cap at 14 days to prevent off-season / All-Star gaps from creating infinite rest outliers.
+        # Anything beyond 14 days is functionally identical in terms of physical recovery.
+        days_since_last = days_since_last.clip(upper=14.0)
         is_b2b_second = (days_since_last == 1.0).astype(float)
         # Shift by 1 to prevent leakage: we want to know if the PREVIOUS game was a B2B second
         is_b2b_shifted = is_b2b_second.groupby(df['PLAYER_ID']).shift(1)

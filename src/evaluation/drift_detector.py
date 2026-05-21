@@ -115,6 +115,36 @@ class DriftDetector:
         self._history: List[Dict] = self._load_history()
 
     # ------------------------------------------------------------------
+    # Phase-aware baseline helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _infer_phase_from_date(date_str: str) -> str:
+        """Infer the NBA phase (REGULAR or PLAYOFF) from a date string.
+
+        Rough heuristic: NBA regular season typically runs Oct 20 – Apr 15.
+        Playoffs run Apr 15 – Jun 20. Anything outside this range defaults
+        to REGULAR.
+        """
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return "REGULAR"
+        month_day = (dt.month, dt.day)
+        # Playoff window: April 15 through June 20
+        if (month_day >= (4, 15) and month_day <= (6, 20)):
+            return "PLAYOFF"
+        return "REGULAR"
+
+    def _phase_key(self, phase: str, date: Optional[str] = None) -> str:
+        """Return the effective phase key, inferring from date if not provided."""
+        if phase and phase.upper() in ("REGULAR", "PLAYOFF"):
+            return phase.upper()
+        if date:
+            return self._infer_phase_from_date(date)
+        return "REGULAR"
+
+    # ------------------------------------------------------------------
     # History persistence
     # ------------------------------------------------------------------
 
@@ -158,23 +188,26 @@ class DriftDetector:
         per_target_mae: Dict[str, float],
         per_target_samples: Optional[Dict[str, int]] = None,
         date: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> None:
         """Record per-target MAE values for a specific date.
-
-        Typically called after a backtest run on recently completed games.
 
         Args:
             per_target_mae: Dict mapping target name → MAE.
             per_target_samples: Optional dict mapping target name → sample count.
             date: Date string (YYYY-MM-DD). Defaults to today.
+            phase: Game phase ('REGULAR' or 'PLAYOFF'). Auto-inferred from date if omitted.
         """
         if date is None:
             date = datetime.now().strftime("%Y-%m-%d")
+
+        effective_phase = self._phase_key(phase or "", date)
 
         entry = {
             "date": date,
             "mae": per_target_mae,
             "samples": per_target_samples or {},
+            "phase": effective_phase,
         }
         self._history.append(entry)
 
@@ -192,11 +225,14 @@ class DriftDetector:
     # Detect drift
     # ------------------------------------------------------------------
 
-    def detect(self, targets: Optional[List[str]] = None) -> DriftReport:
+    def detect(self, targets: Optional[List[str]] = None, phase: Optional[str] = None) -> DriftReport:
         """Run drift detection on the current history.
 
         Args:
             targets: List of target stats to check. Defaults to all in history.
+            phase: Game phase ('REGULAR' or 'PLAYOFF'). When provided, only history
+                   from that phase is used for baseline comparison, preventing false
+                   drift alerts when the playoffs naturally lower scoring/pace.
 
         Returns:
             DriftReport with per-target status and recommendations.
@@ -213,9 +249,18 @@ class DriftDetector:
         rolling_cutoff = now - timedelta(days=self.window_days)
         baseline_cutoff = now - timedelta(days=self.baseline_window_days)
 
+        # Filter by phase if specified
+        history_pool = self._history
+        if phase:
+            effective_phase = self._phase_key(phase)
+            history_pool = [e for e in self._history if e.get("phase") == effective_phase]
+            if not history_pool:
+                # Fall back to full history if no phase-specific data exists
+                history_pool = self._history
+
         # Determine available targets
         all_targets = set()
-        for entry in self._history:
+        for entry in history_pool:
             all_targets.update(entry["mae"].keys())
         check_targets = targets or sorted(all_targets)
 
@@ -227,7 +272,7 @@ class DriftDetector:
             rolling_values = []
             baseline_values = []
 
-            for entry in self._history:
+            for entry in history_pool:
                 if target not in entry["mae"]:
                     continue
                 mae = entry["mae"][target]
@@ -314,6 +359,7 @@ class DriftDetector:
         per_target_mae: Dict[str, float],
         targets: Optional[List[str]] = None,
         date: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> DriftReport:
         """Record a new observation and immediately run drift detection.
 
@@ -321,12 +367,13 @@ class DriftDetector:
             per_target_mae: Dict mapping target → MAE.
             targets: Targets to check.
             date: Date of observation.
+            phase: Game phase ('REGULAR' or 'PLAYOFF').
 
         Returns:
             DriftReport with current status.
         """
-        self.record(per_target_mae, date=date)
-        return self.detect(targets=targets)
+        self.record(per_target_mae, date=date, phase=phase)
+        return self.detect(targets=targets, phase=phase)
 
     def status_summary(self) -> str:
         """Quick status string for use in logs/dashboards."""

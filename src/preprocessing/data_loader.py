@@ -144,10 +144,13 @@ class DataLoader:
         self.games_df = self._ensure_columns(self.games_df, game_merge_defaults)
 
         own_team_roll_cols = [c for c in self.games_df.columns if c.startswith('TEAM_') and c.endswith(('_ROLL_10', '_ROLL_5'))]
+        cols_to_select = list(dict.fromkeys([
+            'GAME_ID', 'TEAM_ID', 'WL', 'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
+            'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10'
+        ] + own_team_roll_cols))
         merged_df = pd.merge(
             self.players_df,
-            self.games_df[['GAME_ID', 'TEAM_ID', 'WL', 'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
-                           'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10'] + own_team_roll_cols],
+            self.games_df[cols_to_select],
             on=['GAME_ID', 'TEAM_ID'],
             how='left',
             suffixes=('', '_TEAM')

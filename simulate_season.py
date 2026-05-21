@@ -101,6 +101,8 @@ def main() -> None:
     parser.add_argument('--data-dir', type=str, default='data', help='Data directory (default: data)')
     parser.add_argument('--models-dir', type=str, default='models', help='Models directory (default: models)')
     parser.add_argument('--output-dir', type=str, default=None, help='Output directory for projections (default: <data-dir>/sim_results)')
+    parser.add_argument('--strict', action='store_true',
+                       help='Fail fast if optional context (injuries, lineups, betting) is missing or degraded')
     
     args = parser.parse_args()
 
@@ -123,9 +125,9 @@ def main() -> None:
         manager = ModelManager(data_dir=args.data_dir, models_dir=args.models_dir)
         manager.load_models()
             
-        game_sim = GameSimulator(manager)
+        game_sim = GameSimulator(manager, strict_mode=args.strict)
         schedule_scraper = ScheduleScraper()
-        season_sim = SeasonSimulator(game_sim, schedule_scraper)
+        season_sim = SeasonSimulator(game_sim, schedule_scraper, strict_mode=args.strict)
         report_gen = ReportGenerator(output_dir=output_dir)
         
     except Exception as e:

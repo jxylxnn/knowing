@@ -232,6 +232,15 @@ class FeatureSelector:
         'TEAMMATE_',
         'DEF_POS_',
         'SCHED_',
+        'DAYS_SINCE_',
+        'IS_SEASON_',
+        'GAMES_WITH_',
+        'IS_RECENT_',
+        'TEAM_CUMULATIVE_',
+        'IS_LATE_',
+        'IS_TANKING_',
+        'IS_PLAYOFF_',
+        'PLAYOFF_PACE_',
     )
     SAFE_KEYWORDS = (
         'TREND',

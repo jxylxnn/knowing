@@ -255,7 +255,14 @@ class ProjectionLoader:
         if len(matches) > 1:
             matches = matches.head(1)
         
-        return self._row_to_projection(matches.iloc[0])
+        row = matches.iloc[0]
+        
+        # Surface degradation warning for projections using fallback data
+        quality = row.get('DATA_QUALITY', 'FULL')
+        if quality != 'FULL':
+            print(f"\u26a0\ufe0f  [WARNING: Projection relies on fallback data - Quality: {quality}]")
+        
+        return self._row_to_projection(row)
     
     def find_all_players(
         self,

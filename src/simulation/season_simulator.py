@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 class SeasonSimulator:
     """Orchestrates batch simulations of NBA games from a schedule."""
     
-    def __init__(self, game_simulator: GameSimulator, schedule_scraper: ScheduleScraper):
+    def __init__(self, game_simulator: GameSimulator, schedule_scraper: ScheduleScraper, strict_mode: bool = False):
         self.game_simulator = game_simulator
         self.schedule_scraper = schedule_scraper
+        self.strict_mode = strict_mode
         self.last_run_summary: Dict[str, Any] = {
             'games_requested': 0,
             'games_simulated': 0,

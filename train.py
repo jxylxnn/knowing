@@ -13,6 +13,7 @@ This script provides an efficient, modular training pipeline with:
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -369,6 +370,43 @@ Examples:
                     "Preset %s requested a recent-history window, but SEASON_ID is unavailable; training on full history.",
                     preset.name,
                 )
+
+        # ---- Precompute lifecycle aging curves (B-Ianus + KAN) ----
+        # Must run before feature engineering so caches exist for feature groups to load.
+        lifecycle_cfg = getattr(runtime_config, 'lifecycle', {}) or {}
+        try:
+            if lifecycle_cfg.get('aging_curve_enabled', True):
+                from src.lifecycle.aging_model import BIanusAgingModel
+                aging_model = BIanusAgingModel(
+                    prior_strength=lifecycle_cfg.get('aging_prior_strength', 10.0),
+                )
+                bios_path = os.path.join(data_dir, 'player_bios.csv')
+                if os.path.exists(bios_path):
+                    bios_df = pd.read_csv(bios_path)
+                    aging_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
+                    logger.info("Precomputed B-Ianus aging curves for all players")
+                else:
+                    logger.info("No player_bios.csv found; aging curve precompute skipped (defaults used)")
+        except Exception as e:
+            logger.warning(f"Aging curve precompute failed (non-fatal): {e}")
+
+        try:
+            if lifecycle_cfg.get('kan_aging_enabled', True):
+                from src.lifecycle.kan_age_model import KANAgeModel
+                kan_model = KANAgeModel(
+                    hidden_dim=lifecycle_cfg.get('kan_hidden_dim', 8),
+                    grid_size=lifecycle_cfg.get('kan_grid_size', 5),
+                    device='cpu',  # always CPU to avoid GPU contention
+                )
+                bios_path = os.path.join(data_dir, 'player_bios.csv')
+                if os.path.exists(bios_path):
+                    bios_df = pd.read_csv(bios_path)
+                    kan_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
+                    logger.info("Precomputed KAN aging outputs for all players")
+                else:
+                    logger.info("No player_bios.csv found; KAN aging precompute skipped (fallback used)")
+        except Exception as e:
+            logger.warning(f"KAN aging precompute failed (non-fatal): {e}")
 
         feature_engineer = build_feature_engineer(
             rolling_windows=feature_engineer_kwargs.get('rolling_windows'),

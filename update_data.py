@@ -471,18 +471,129 @@ def update_since_date(date_from: str, existing_players: Optional[pd.DataFrame],
     return existing_players, existing_teams, total_new_players, total_new_teams
 
 
-def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame, 
+def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame,
               data_dir: str, players_file: str, games_file: str):
     os.makedirs(data_dir, exist_ok=True)
-    
+
     players_df = players_df.sort_values(['GAME_DATE', 'PLAYER_NAME'])
     teams_df = teams_df.sort_values(['GAME_DATE', 'TEAM_ABBREVIATION'])
-    
+
     players_df.to_csv(players_file, index=False)
     teams_df.to_csv(games_file, index=False)
-    
+
     logger.info(f"Saved {len(players_df)} player records to {players_file}")
     logger.info(f"Saved {len(teams_df)} team records to {games_file}")
+
+    # Parquet dual-write for GPU-direct storage reads
+    try:
+        players_parquet = os.path.splitext(players_file)[0] + '.parquet'
+        games_parquet = os.path.splitext(games_file)[0] + '.parquet'
+
+        players_df.to_parquet(players_parquet, compression='zstd', index=False)
+        teams_df.to_parquet(games_parquet, compression='zstd', index=False)
+
+        logger.info(f"Saved {len(players_df)} player records to {players_parquet}")
+        logger.info(f"Saved {len(teams_df)} team records to {games_parquet}")
+    except Exception as exc:
+        logger.warning(f"Parquet dual-write skipped: {exc}")
+
+
+def enrich_with_player_bios(
+    players_df: pd.DataFrame,
+    data_dir: str,
+) -> pd.DataFrame:
+    """Merge AGE, POSITION, and other bio columns into player game logs.
+
+    Fetches bio data for all unique PLAYER_IDs via PlayerBioScraper,
+    then left-joins onto the player DataFrame.  Non-fatal on failure.
+    """
+    try:
+        from src.data.player_bio_scraper import PlayerBioScraper
+        cache_dir = os.path.join(data_dir, 'cache')
+        bio_scraper = PlayerBioScraper(cache_dir=cache_dir)
+
+        unique_ids = players_df['PLAYER_ID'].unique().tolist()
+        if not unique_ids:
+            return players_df
+
+        logger.info(f"Enriching {len(unique_ids)} players with bio data...")
+        bio_df = bio_scraper.fetch_all_bios(unique_ids)
+
+        if bio_df.empty:
+            logger.warning("PlayerBioScraper returned empty; skipping bio enrichment")
+            return players_df
+
+        bio_subset = bio_df[[
+            'PLAYER_ID', 'BIRTHDATE', 'AGE', 'POSITION', 'HEIGHT',
+            'WEIGHT', 'DRAFT_YEAR', 'CAREER_START', 'YEARS_EXPERIENCE',
+        ]].drop_duplicates('PLAYER_ID')
+
+        enriched = players_df.merge(bio_subset, on='PLAYER_ID', how='left')
+
+        # Save standalone bio file for other consumers (aging model, etc.)
+        bio_path = os.path.join(data_dir, 'player_bios.csv')
+        bio_df.to_csv(bio_path, index=False)
+
+        n_with_age = enriched['AGE'].notna().sum()
+        logger.info(
+            f"Enriched {len(enriched)} records with player bio data "
+            f"({n_with_age} have AGE)"
+        )
+        return enriched
+    except Exception as e:
+        logger.warning(f"Bio enrichment failed (non-fatal): {e}")
+        return players_df
+
+
+def log_injury_snapshot(data_dir: str) -> None:
+    """Fetch current injury report and append to persistent injury history.
+
+    Non-fatal on failure.
+    """
+    try:
+        from src.data.injury_scraper import InjuryScraper
+        from src.data.injury_history_logger import InjuryHistoryLogger
+
+        cache_dir = os.path.join(data_dir, 'cache')
+        inj_scraper = InjuryScraper(cache_dir=cache_dir)
+        inj_df = inj_scraper.fetch_injuries()
+
+        if inj_df.empty:
+            logger.info("No current injury data to log")
+            return
+
+        # Resolve player names to PLAYER_IDs
+        try:
+            from src.data.player_bio_scraper import PlayerBioScraper
+            bio_scraper = PlayerBioScraper(cache_dir=cache_dir)
+            name_to_id = {}
+            for name in inj_df['PLAYER'].unique():
+                pid = bio_scraper.resolve_name_to_id(name)
+                if pid is not None:
+                    name_to_id[name] = pid
+        except Exception:
+            name_to_id = {}
+
+        history_logger = InjuryHistoryLogger(history_dir=data_dir)
+        events = []
+        for _, row in inj_df.iterrows():
+            player_name = row.get('PLAYER', '')
+            events.append({
+                'PLAYER_ID': name_to_id.get(player_name),
+                'PLAYER': player_name,
+                'TEAM_ABBR': row.get('TEAM_ABBR', ''),
+                'STATUS': row.get('STATUS', ''),
+                'INJURY_TYPE': row.get('COMMENT', '') or 'Unknown',
+                'DATE': row.get('DATE', datetime.now().strftime('%Y-%m-%d')),
+                'PLAY_PROBABILITY': row.get('PLAY_PROBABILITY', 0.0),
+            })
+
+        # Only log events with at least a player name
+        events = [e for e in events if e.get('PLAYER')]
+        history_logger.log_injuries(events)
+        logger.info(f"Logged {len(events)} injury events to persistent history")
+    except Exception as e:
+        logger.warning(f"Injury history logging failed (non-fatal): {e}")
 
 
 def main():
@@ -597,7 +708,11 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         )
         
         if existing_players is not None and existing_teams is not None:
+            # Enrich player data with bio (age, position, etc.)
+            existing_players = enrich_with_player_bios(existing_players, data_dir)
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
+            # Log current injuries to persistent history
+            log_injury_snapshot(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Incremental update complete!")
             logger.info(f"New player records added: {new_players}")
@@ -618,7 +733,11 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             )
         
         if existing_players is not None and existing_teams is not None:
+            # Enrich player data with bio (age, position, etc.)
+            existing_players = enrich_with_player_bios(existing_players, data_dir)
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
+            # Log current injuries to persistent history
+            log_injury_snapshot(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Data update complete!")
             logger.info(f"Total player records: {len(existing_players)}")

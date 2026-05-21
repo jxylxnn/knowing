@@ -80,8 +80,9 @@ class GameSimulator(SimCacheMixin):
 
     STAT_NAMES = ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
 
-    def __init__(self, manager: ModelManager, cache_dir='data/sim_cache', config: Optional[Any] = None):
+    def __init__(self, manager: ModelManager, cache_dir='data/sim_cache', config: Optional[Any] = None, strict_mode: bool = False):
         self._config = config if config else get_config()
+        self.strict_mode = strict_mode
         simulation_cfg = getattr(self._config, 'simulation', None)
         self.manager = manager
         self.players_df = None
@@ -876,6 +877,18 @@ class GameSimulator(SimCacheMixin):
         for source in input_health['sources']:
             if source['status'] != 'success':
                 logger.warning("Simulation input degraded for %s @ %s: %s (%s)", team_b, team_a, source['source_key'], source['status'])
+
+        # Enforce strict mode: halt if any optional source failed or fell back
+        if self.strict_mode:
+            for source in input_health['sources']:
+                status = source.get('status')
+                required = source.get('required', False)
+                source_key = source.get('source_key', 'unknown')
+                if not required and status in ('failed', 'fallback'):
+                    raise RuntimeError(
+                        f"Strict mode enabled: Optional source '{source_key}' "
+                        f"degraded with status '{status}'."
+                    )
 
         return self._run_simulation(
             team_a, team_b, num_sims, betting_lines, lineup_a, lineup_b,
