@@ -91,6 +91,15 @@ Important current contract:
 5. `src/simulation/report_generator.py` prints and exports CSVs under `data/sim_results/`.
 6. `simulate_season.py` prints a run-level input health summary and treats schedule failures as hard-required.
 
+**Simulation Refactor (2026-05-09):** The simulation layer has been refactored into modular, typed components:
+
+- `src/simulation/phase_simulator.py` — Phase-by-phase Monte Carlo game loop, extracted from GameSimulator
+- `src/simulation/archetype.py` — ArchetypeEngine infers player archetypes (heliocentric star guard, 3&D wing, etc.) from projection shape
+- `src/simulation/role_sampler.py` — Samples role states (limited/normal/expanded/starter/bench/closer) with archetype-aware adjustments
+- `src/simulation/sim_types.py` — Typed dataclasses (RoleSample, PhaseDefinition, GameEnvironment, PlayerProjection, TeamContext) replacing raw dicts
+- `src/simulation/sim_cache.py` — JSON disk-cache mixin for simulator caching
+- `src/simulation/stat_utils.py` — Shared statistical helpers (compute_mode, summary stats)
+
 Important named methods in this path:
 
 - `ModelManager.load_models`
@@ -101,6 +110,9 @@ Important named methods in this path:
 - `GameSimulator._safe_get_injury_probs`
 - `GameSimulator._safe_get_defensive_adjustments`
 - `GameSimulator._simulate_matchup_reactive`
+- `PhaseSimulator.simulate`
+- `ArchetypeEngine.infer_archetype`
+- `RoleSampler.sample`
 - `ReportGenerator.export_to_csv`
 - `ReportGenerator.export_player_projections`
 
@@ -121,6 +133,40 @@ Important named methods in this path:
 - `ProbabilityCalculator.run_monte_carlo_simulation`
 - `ProbabilityCalculator.evaluate_calibration`
 - `QueryParser.parse_query`
+
+### Flow 5: Backtest and Weight Optimization (NEW — 2026-05-09)
+
+1. `backtest.py` evaluates model predictions against historical completed games:
+   - Loads trained models via `ModelManager`
+   - Runs predictions for games in the specified date range
+   - Compares against actual box scores from `data/nba_players.csv`
+   - Computes per-stat MAE, RMSE, R², calibration error, and prediction interval coverage
+   - Outputs `BacktestResult` with per-target `TargetMetrics`
+
+2. `optimize_weights.py` retunes ensemble blend weights:
+   - Runs backtesting to establish a baseline
+   - Uses `scipy.optimize` to find optimal blend coefficients (13 parameters: 6 per-target CatBoost/Transformer ratios + 6 per-target intercepts + 1 CatBoost-MAE blend)
+   - Validates candidates against a holdout window
+   - Applies accept/verify gates to prevent regression
+   - Writes versioned weights via `WeightStore` with atomic writes and rollback support
+   - Hot-reloads weights into `ModelManager` at runtime
+
+3. Drift detection (`src/evaluation/drift_detector.py`):
+   - Tracks per-stat accuracy over rolling windows
+   - Uses statistical process control: flags when rolling MAE exceeds 2σ above historical baseline
+   - Distinguishes minor drift (retune weights) from major drift (retrain models)
+
+Important named classes/methods in the evaluation subsystem:
+
+- `BacktestRunner.run` — runs predictions against historical games
+- `BacktestRunner.set_weights` — injects candidate blend weights for evaluation
+- `EnsembleOptimizer.optimize` — scipy-driven weight optimization
+- `EnsembleOptimizer.accept` — writes accepted weights to store
+- `WeightStore.save` — atomic JSON write with versioning
+- `WeightStore.rollback` — revert to previous version
+- `WeightStore.load_current` — load active weights
+- `DriftDetector.check` — evaluate if performance has drifted
+- `DriftDetector.record_result` — append a backtest result to the rolling window
 
 ## Major Subsystems And Ownership
 
@@ -208,21 +254,91 @@ Critical coupling:
 
 - Owns matchup simulation, season-level orchestration, report generation, and adjustment logic.
 - Important modules:
-  - `game_simulator.py`
+  - `game_simulator.py` — orchestration hub (heavily refactored, dead code removed)
+  - `phase_simulator.py` — phase-by-phase Monte Carlo game loop (extracted from GameSimulator)
   - `season_simulator.py`
   - `report_generator.py`
+  - `archetype.py` — ArchetypeEngine: infers player archetypes from projection shape
+  - `role_sampler.py` — role state sampling with archetype-aware adjustments
+  - `sim_types.py` — typed dataclasses (RoleSample, PhaseDefinition, GameEnvironment, PlayerProjection, TeamContext)
+  - `sim_cache.py` — JSON disk-cache mixin
+  - `stat_utils.py` — shared statistical helpers (compute_mode, summary stats)
   - `minutes_predictor.py`
   - `context_aware_adjustments.py`
   - `player_correlation_engine.py`
   - `four_factors_engine.py`
-  - `error_calibration.py`
+|  - `error_calibration.py`
 
 Fragility notes:
 
 - `game_simulator.py` is a high-coupling orchestrator with many dependency points.
-- It currently contains an early return into a reactive path, with a large older simulation block left below that return. That dead code increases maintenance risk.
+- Dead legacy simulation code has been removed; the active path is exclusively `_simulate_matchup_reactive`.
+- The refactored components (phase_simulator, archetype, role_sampler) are now independently testable.
 - Scraper-backed optional context now flows through a shared input-health contract in `src/simulation/input_health.py`.
 - Optional context failures degrade a run visibly; required schedule failures are treated as hard failures.
+- **Strict mode** (`--strict` CLI flag on `simulate_season.py`): halts execution when any optional InputHealth record reports `failed` or `fallback`. Passed through `GameSimulator(strict_mode=True)` and `SeasonSimulator(strict_mode=True)`.
+- **Data quality column** (`DATA_QUALITY`): exported in `player_projections_*.csv` as `FULL`, `DEGRADED_FALLBACK`, or `DEGRADED_MISSING`. Surfaces a CLI warning in the query layer via `ProjectionLoader.find_player()`.
+
+### `src/evaluation/` (NEW — 2026-05-09)
+
+- Owns backtesting, ensemble weight optimization, drift detection, and weight versioning.
+- Important modules:
+  - `metrics.py` — `BacktestResult`, `TargetMetrics`, `compute_target_metrics` dataclasses (MAE, RMSE, R², MAPE, calibration, interval coverage)
+  - `backtest_runner.py` — `BacktestRunner`: runs model predictions against historical completed games, compares against actual box scores
+  - `ensemble_optimizer.py` — `EnsembleOptimizer`: 13-parameter scipy.optimize-based weight tuner with accept/verify gates
+  - `weight_store.py` — `WeightStore` + `EnsembleWeights` + `TargetBlend`: versioned JSON storage replacing opaque binary `blend_weights.pkl`, atomic writes, rollback
+  - `drift_detector.py` — `DriftDetector`: statistical process control tracking per-stat accuracy over rolling windows; flags when rolling MAE exceeds 2σ above baseline
+- Key contracts:
+  - `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores
+  - `EnsembleOptimizer` owns a `BacktestRunner` internally and creates/validates candidate weight configs
+  - `WeightStore` writes to a versioned directory (default: `data/weights/`) with a `current.json` pointer
+  - `ModelManager` now accepts hot-reloadable `EnsembleWeights` objects via `set_weights()`
+  - The weight store format is human-readable JSON, not opaque binary pickle
+
+### `src/lifecycle/` (NEW — 2026-05-22)
+
+- Owns player aging, career trajectory, and injury risk computation — the bio-mechanical layer.
+- Important modules:
+  - `aging_model.py` — `BIanusAgingModel`: position-specific Bayesian aging curves (B-Ianus). Separates development (pre-peak) from decline (post-peak). MAP-estimated peak ages by position (PG: 28.5, SG: 27.8, SF: 27.5, PF: 27.0, C: 26.5). Cached to `data/cache/aging_curves.csv`.
+  - `kan_age_model.py` — `KANAgeModel`: Kolmogorov-Arnold Network for nonlinear age curves. Precomputed on CPU and cached to `data/cache/kan_aging_outputs.csv`. Always runs on CPU to avoid GPU contention.
+- Precomputed by `train.py` at startup (before feature engineering so caches exist for feature groups to load). Both steps are non-fatal — missing bio data defaults all aging features to neutral (1.0 factor).
+- Key rule: KAN always runs on CPU (`device='cpu'`) to avoid CUDA context contention with CatBoost/Transformer.
+
+### `src/models/nexus_model.py` (NEW — 2026-05-22)
+
+- Nexus Multi-Modal Architecture — unified deep-learning model replacing the 6 independent CatBoost models and isolated Transformer with a single end-to-end network.
+- Architecture:
+  - *Temporal Backbone* — Mamba-2-style SSM (simplified pure-PyTorch implementation with fallback when CUDA kernels unavailable)
+  - *Tabular Backbone* — FT-Transformer for scalar / contextual features
+  - *Relational Backbone* — Lightweight Graph Attention Network (GAT) for lineup synergy
+  - *Fusion & Copula Head* — concatenates backbone representations and returns a 6-dimensional mean vector + 6x6 Cholesky-decomposed covariance matrix (guarantees positive semi-definite)
+- Loss: `GaussianNLLLoss` in `src/training/nexus_loss.py` — multivariate Gaussian NLL with Cholesky covariance. Natively penalizes mathematically impossible stat combinations (negative variances, non-PSD correlation matrices).
+- Status: implemented and import-tested; not yet wired as the active training path. CatBoost + Transformer remains the active stack.
+
+### `src/preprocessing/feature_engineer_gpu.py` (NEW — 2026-05-22)
+
+- GPU-accelerated feature engineering using NVIDIA cuDF + Apache Arrow zero-copy export.
+- Mirrors the public API of `FeatureEngineer` but offloads heavy groupby/rolling primitives to the GPU.
+- Complex groups relying on Python loops or NumPy/scipy execute on CPU after converting the relevant partition back to pandas.
+- Transparently falls back to CPU engine when cuDF not installed or CUDA unavailable.
+- Activated automatically when `FeatureEngineer(use_gpu=True)` is set — no CLI flag needed.
+
+### Feature Groups — Lifecycle & Bio-Mechanical (NEW — 2026-05-22)
+
+Four new feature groups in `src/preprocessing/features/`, wired into the 19 existing groups:
+
+- `injury_risk.py` — `InjuryRiskFeatureGroup`: METIC-style workload + injury history signals. Reads from the persistent `data/injury_history.csv` produced by `InjuryHistoryLogger`. Outputs: `INJURY_RISK_CAREER_COUNT`, `INJURY_RISK_LAST_90D`, `INJURY_RISK_LAST_30D`, etc.
+- `aging_curve.py` — `AgingCurveFeatureGroup`: B-Ianus Bayesian model features. Outputs: `AGING_PLAYER_AGE`, `AGING_PEAK_AGE_EST`, `AGING_PRE_POST_PEAK`, `AGING_CURVE_FACTOR`, etc.
+- `kan_aging.py` — `KANAgingFeatureGroup`: KAN nonlinear age features. Outputs: `KAN_AGE_NONLIN_FACTOR`, `KAN_AGE_INFLECTION_AGE`, `KAN_AGE_VOLATILITY`.
+- `skill_development.py` — `SkillDevelopmentFeatureGroup`: growth velocity metrics (year-over-year stat improvements). Outputs: `SKILL_DEV_PTS_VELOCITY`, `SKILL_DEV_EFF_VELOCITY`, `SKILL_DEV_REB_VELOCITY`, `SKILL_DEV_AST_TOV_TREND`, `SKILL_DEV_YOUTH_BOOST`.
+
+Total feature groups: 23 (19 original + 4 lifecycle).
+
+### Data Enrichment — Player Bios & Injury History
+
+- `src/data/player_bio_scraper.py` — `PlayerBioScraper`: fetches birthdate, position, height, weight from NBA API `commonplayerinfo`. Caches results to `data/player_bios.csv`. Called from `update_data.py` via `enrich_with_player_bios()`.
+- `src/data/injury_history_logger.py` — `InjuryHistoryLogger`: persists injury events across runs into `data/injury_history.csv`. Deduplicates by (PLAYER_ID, DATE, INJURY_TYPE). Called from `update_data.py` via `log_injury_snapshot()`.
+- `update_data.py` also performs Parquet dual-write (`nba_players.parquet`, `nba_games.parquet`) for GPU-direct storage reads.
 
 ## Input Health Contract
 
@@ -278,6 +394,12 @@ Important boundary:
 
 - `data/nba_players.csv`
 - `data/nba_games.csv`
+- `data/player_bios.csv` (optional — generated by `update_data.py`; aging features fall back to neutral when missing)
+- `data/injury_history.csv` (optional — generated by `update_data.py`; injury risk features fall back to near-zero when missing)
+
+### GPU-Direct Storage (NEW)
+
+- `data/nba_players.parquet` / `data/nba_games.parquet` — Parquet dual-write for cuDF GPU-direct reads. Written alongside CSV by `update_data.py`.
 
 ### Expected Trained Artifacts
 
@@ -294,6 +416,7 @@ Important boundary:
 - `models/feature_cols.pkl`
 - `models/blend_weights.pkl`
 - `models/model_stack_metadata.pkl`
+- `data/weights/` — versioned JSON weight store (replaces opaque binary `blend_weights.pkl`). Contains version-numbered weight files + `current.json` pointer. Managed by `WeightStore`.
 
 ### Generated Outputs
 

@@ -66,6 +66,23 @@
 - Risk level: high.
 - Current caveat: depends on runtime paths with known scraper regressions.
 
+### `backtest.py` (NEW — 2026-05-09)
+
+- Role: evaluate prediction accuracy on historical completed games.
+- High-value functions: `run_backtest`, `parse_args`, `setup_logging`.
+- Calls into: `BacktestRunner`, `ModelManager`, `DataLoader`.
+- Outputs: per-stat MAE, RMSE, R², calibration error, prediction interval coverage.
+- Risk level: medium. Depends on trained models and historical data being available.
+- CLI modes: `--from`/`--to` for date range, `--recent N` for last N days, `--output <path>` for JSON export.
+
+### `optimize_weights.py` (NEW — 2026-05-09)
+
+- Role: retune ensemble blend weights via scipy.optimize against holdout data.
+- High-value functions: `optimize_weights`, `parse_args`, `setup_logging`.
+- Calls into: `EnsembleOptimizer`, `BacktestRunner`, `WeightStore`, `ModelManager`, `Config`.
+- Risk level: medium. Modifies weight storage; rollback supported via `--rollback N`.
+- CLI modes: `--from`/`--to` for date range, `--recent N`, `--dry-run`, `--rollback N`, `--list`.
+
 ### `query_prob.py`
 
 - Role: interactive or one-shot query CLI for projection probabilities.
@@ -169,7 +186,7 @@ Important files:
   - `resolve_training_preset`
   - `apply_recent_history_window`
 - Risk level: medium to high because it now controls the feature-stack shape and Transformer enablement used by the main training CLI.
-- Current note: the built-in `full` preset includes all 19 feature groups (rolling, efficiency, momentum, context, fatigue, minutes_confidence, rest_density, matchup, opponent_strength, pace, team_role, lineup_stability, injury_opportunity, teammate_usage, recency_form, archetype, defense_position, target_encoding, league_rank). The `small` preset includes 6 groups (rolling, efficiency, momentum, pace, opponent_strength, archetype).
+- Current note: the built-in `full` preset includes all 23 feature groups (19 original + 4 lifecycle: injury_risk, aging_curve, kan_aging, skill_development). The `small` preset includes 6 groups (rolling, efficiency, momentum, pace, opponent_strength, archetype).
 
 ### `src/preprocessing/features/`
 
@@ -190,6 +207,10 @@ Important files:
   - `injury_opportunity.py` — `InjuryAdjustedOpportunityFeatureGroup` (missing high-usage teammate detection, same-minutes missing count, MIN/usage boost, team absence rolling count)
   - `teammate_usage.py` — `TeammateUsageFeatureGroup` (top-usage teammate active flag, missing teammate FGA/AST/REB shares, missing shot volume, active scoring depth)
   - `defense_position.py` — `DefensePositionFeatureGroup` (opponent defensive stats by position group — guard/wing/big — including PTS/REB/AST/STL/BLK/TOV allowed, defensive rank, recent PTS allowed)
+  - **`injury_risk.py` (NEW)** — `InjuryRiskFeatureGroup`: METIC-style workload + injury history signals from `data/injury_history.csv`. Outputs: `INJURY_RISK_CAREER_COUNT`, `INJURY_RISK_LAST_90D`, etc.
+  - **`aging_curve.py` (NEW)** — `AgingCurveFeatureGroup`: B-Ianus Bayesian model features. Outputs: `AGING_PLAYER_AGE`, `AGING_PEAK_AGE_EST`, `AGING_CURVE_FACTOR`, etc.
+  - **`kan_aging.py` (NEW)** — `KANAgingFeatureGroup`: KAN nonlinear age features. Outputs: `KAN_AGE_NONLIN_FACTOR`, `KAN_AGE_INFLECTION_AGE`, `KAN_AGE_VOLATILITY`.
+  - **`skill_development.py` (NEW)** — `SkillDevelopmentFeatureGroup`: growth velocity metrics. Outputs: `SKILL_DEV_PTS_VELOCITY`, `SKILL_DEV_EFF_VELOCITY`, etc.
   - `__init__.py` — re-exports all feature group classes
 - Safe entry point for adding new features if the feature schema contract is respected.
 - All new feature groups follow the batched-column pattern: accumulate columns in a `dict[str, pd.Series]`, then `_concat_new_columns(df, new_columns)` once per group.
@@ -255,6 +276,38 @@ Important files:
 - Lazy-import wrapper for training package.
 - Small file, but important for import behavior and backward compatibility.
 
+### `src/training/nexus_loss.py` (NEW — 2026-05-22)
+
+- Role: `GaussianNLLLoss` — multivariate Gaussian negative log-likelihood with Cholesky covariance.
+- Used by the Nexus multi-modal model for end-to-end training.
+- Natively penalizes mathematically impossible stat combinations (negative variances, non-PSD correlation matrices).
+- Risk level: low (only used by Nexus model, not yet wired as active training path).
+
+## Lifecycle Layer (NEW — 2026-05-22)
+
+### `src/lifecycle/aging_model.py`
+
+- Role: B-Ianus Bayesian aging curve model. Separates development (pre-peak) from decline (post-peak) with position-specific priors.
+- High-value objects/functions:
+  - `BIanusAgingModel` — main class with `precompute_all()` and `fit_player_curve()`
+  - `normalize_position()` — maps NBA position strings to canonical 5 positions
+  - Position-specific priors: `POSITION_PEAK_PRIORS`, `POSITION_DECLINE_PRIORS`
+- Cache: writes `data/cache/aging_curves.csv`.
+- Risk level: low to medium. Non-fatal on missing bio data — defaults all aging features to neutral (1.0 factor).
+
+### `src/lifecycle/kan_age_model.py`
+
+- Role: KAN (Kolmogorov-Arnold Network) for nonlinear age curves.
+- High-value objects:
+  - `KANAgeModel` — main class with `precompute_all()` and grid-based spline computation
+- Always runs on CPU (`device='cpu'`) to avoid GPU contention with CatBoost/Transformer.
+- Cache: writes `data/cache/kan_aging_outputs.csv`.
+- Risk level: low. Non-fatal on failure.
+
+### `src/lifecycle/__init__.py`
+
+- Empty init — package marker only.
+
 ## Model Runtime Layer
 
 ### `src/models/model_manager.py`
@@ -277,6 +330,45 @@ Important files:
 - Current note: `_validate_blend_contract()` raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug.
 - Current note: Transformer predictions flow through `TransformerWrapper.predict()`, which now defaults to eager inference and can force a math SDPA backend on CUDA when backend controls are available.
 
+### `src/models/nexus_model.py` (NEW — 2026-05-22)
+
+- Role: Nexus multi-modal architecture — unified deep-learning model (SSM + FT-Transformer + GAT + Copula head).
+- High-value classes:
+  - `SimplifiedSSMBlock` — Mamba-2-style SSM using standard PyTorch ops (CPU/macOS fallback)
+  - `FTTransformerEncoder` — Tabular backbone for scalar/contextual features
+  - `GATRelationalLayer` — Lightweight Graph Attention Network for lineup synergy
+  - `NexusModel` — top-level model with fusion & copula head returning 6-dim mean + 6x6 Cholesky covariance
+- Loss: uses `GaussianNLLLoss` from `src/training/nexus_loss.py`.
+- Risk level: low to medium. Import-tested but not yet the active training path.
+- Status: implemented; CatBoost + Transformer remains the active stack.
+
+### `src/preprocessing/feature_engineer_gpu.py` (NEW — 2026-05-22)
+
+- Role: GPU-accelerated feature engineering via NVIDIA cuDF with transparent CPU fallback.
+- Mirrors the public API of `FeatureEngineer` for drop-in compatibility.
+- Offloads heavy groupby/rolling operations to GPU; complex groups (Python loops, scipy) fall back to CPU.
+- Risk level: medium. Depends on cuDF availability; CPU fallback preserves correctness.
+- Activation: automatic when `FeatureEngineer(use_gpu=True)` — no separate CLI flag.
+
+### `src/data/player_bio_scraper.py` (NEW — 2026-05-22)
+
+- Role: fetches player biographical data (AGE, POSITION, HEIGHT, WEIGHT, DRAFT_YEAR) from NBA API `commonplayerinfo` endpoint.
+- High-value methods:
+  - `fetch_all_bios(player_ids)` — batch-fetches bio data with rate limiting
+  - `resolve_name_to_id(player_name)` — name-to-ID resolution for injury logging
+- Cache: reads/writes `data/player_bios.csv`.
+- Called from: `update_data.py` via `enrich_with_player_bios()`.
+- Risk level: low. Non-fatal on failure — aging features default to neutral.
+
+### `src/data/injury_history_logger.py` (NEW — 2026-05-22)
+
+- Role: persists injury events across `update_data.py` runs into a longitudinal CSV log (`data/injury_history.csv`).
+- High-value methods:
+  - `log_injuries(events)` — appends and deduplicates by (PLAYER_ID, DATE, INJURY_TYPE)
+  - `get_history()` — loads complete history as DataFrame
+- Called from: `update_data.py` via `log_injury_snapshot()`.
+- Risk level: low. Non-fatal on failure — injury risk features default to near-zero.
+
 ### `src/models/transformer_model.py`
 
 - Transformer wrapper and checkpoint compatibility logic.
@@ -298,7 +390,38 @@ Important files:
   - `_simulate_matchup_reactive`
 - Pulls together model inference, scrapers, adjustments, and repeated simulation logic.
 - Highest-risk file in the repo from a coupling perspective.
-- Current caution: contains a dead legacy simulation block after an early return.
+- **Refactored (2026-05-09):** dead legacy code removed, delegates to PhaseSimulator, uses typed dataclasses from sim_types.
+- **Strict mode (DR-025, 2026-05-22):** `__init__` now accepts `strict_mode: bool = False`. When True, `_simulate_matchup_reactive()` raises `RuntimeError` if any optional InputHealth source reports `failed` or `fallback`.
+
+### `src/simulation/phase_simulator.py` (NEW — 2026-05-09)
+
+- Phase-by-phase Monte Carlo game loop, extracted from GameSimulator.
+- High-value methods: `simulate`, `_build_game_environment`, `_run_phase`.
+- Isolates the core simulation logic for independent testing.
+
+### `src/simulation/archetype.py` (NEW — 2026-05-09)
+
+- ArchetypeEngine: infers player archetypes from projection shape.
+- Defines ARCHETYPE_PROFILES (heliocentric star guard, 3&D wing, stretch big, etc.).
+- Provides volatility/style priors for each archetype.
+
+### `src/simulation/role_sampler.py` (NEW — 2026-05-09)
+
+- Samples role states (limited/normal/expanded/starter/bench/closer) with archetype-aware adjustments.
+- Uses pre-defined state profiles with multipliers for minutes, usage, efficiency, etc.
+
+### `src/simulation/sim_types.py` (NEW — 2026-05-09)
+
+- Typed dataclasses (RoleSample, PhaseDefinition, GameEnvironment, PlayerProjection, TeamContext) replacing raw dicts throughout the simulation pipeline.
+- Risk level: medium — changing these types impacts all simulation consumers.
+
+### `src/simulation/sim_cache.py` (NEW — 2026-05-09)
+
+- JSON disk-cache mixin for GameSimulator. Uses content-hash keys for deterministic caching.
+
+### `src/simulation/stat_utils.py` (NEW — 2026-05-09)
+
+- Shared statistical helpers: `compute_mode` (KDE-based mode estimation), `compute_summary_stats`.
 
 ### `src/simulation/season_simulator.py`
 
@@ -307,12 +430,13 @@ Important files:
 
 ### `src/simulation/report_generator.py`
 
-- Console/report export layer for simulation results.
+- Prints projections and exports to CSV under `data/sim_results/`.
 - High-value methods:
-  - `format_console_report`
+  - `export_player_projections` — now includes `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`)
   - `export_to_csv`
-  - `export_player_projections`
-- Risk level: high because query-time behavior depends on its CSV schema.
+  - `display_quick_summary`
+  - `_data_quality_from_result` — static helper deriving quality from input_health metadata
+- Risk level: high (export schema impacts query layer).
 - Current caution: exported player projection columns appear incomplete for `STL`, `BLK`, and `TOV`.
 
 ### `src/simulation/input_health.py`
@@ -330,6 +454,50 @@ Important files:
 - `src/simulation/error_calibration.py`
 
 These are important but secondary to the main orchestration files above.
+
+## Evaluation Layer (NEW — 2026-05-09)
+
+### `src/evaluation/metrics.py`
+
+- Role: backtest metrics and result types.
+- Key types: `BacktestResult`, `TargetMetrics`, `compute_target_metrics`.
+- Tracks: MAE, RMSE, R², MAPE, calibration (P10/P90), bias, prediction interval coverage.
+- Risk level: medium.
+
+### `src/evaluation/backtest_runner.py`
+
+- Role: runs model predictions against completed games and compares to actual box scores.
+- High-value methods: `run`, `set_weights`, `_prepare_player_context`, `_evaluate_predictions`.
+- Depends on: `ModelManager` for predictions, `DataLoader` for actual box scores, `FeatureEngineer` for feature context.
+- Risk level: medium to high — this is the bridge between predictions and reality.
+
+### `src/evaluation/ensemble_optimizer.py`
+
+- Role: self-optimizing ensemble weight tuner using scipy.optimize.
+- High-value methods: `optimize`, `accept`, `_build_candidate_weights`, `_evaluate_candidate`.
+- Tunes 13 parameters: 6 per-target CatBoost/Transformer ratios + 6 per-target intercepts + 1 CatBoost-MAE blend.
+- Accept/verify gates prevent regressions from being deployed.
+- Risk level: medium — modifies production weight config.
+
+### `src/evaluation/weight_store.py`
+
+- Role: versioned JSON weight storage with atomic writes and rollback.
+- Key types: `WeightStore`, `EnsembleWeights`, `TargetBlend`.
+- Replaces opaque binary `blend_weights.pkl` with human-readable versioned JSON.
+- Default location: `data/weights/` with `current.json` pointer.
+- Risk level: medium — is the single source of truth for active ensemble weights.
+
+### `src/evaluation/drift_detector.py`
+
+- Role: statistical process control for model performance.
+- Key types: `DriftDetector`, `DriftStatus`, `DriftReport`.
+- Flags when rolling MAE exceeds 2σ above historical baseline.
+- Distinguishes minor drift (retune weights) from major drift (retrain models).
+- Risk level: medium — needs live backtest data to establish baseline.
+
+### `src/evaluation/__init__.py`
+
+- Re-exports: `BacktestResult`, `TargetMetrics`, `BacktestRunner`.
 
 ## Query Layer
 
@@ -448,8 +616,8 @@ These are important but secondary to the main orchestration files above.
   - currently empty
   - do not assume it owns anything yet
 - `src/evaluation/`
-  - currently only `__init__.py`
-  - likely placeholder for future evaluation work
+  - now contains 5 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`
+  - no longer a placeholder
 - `plans/`, `cline_docs/`, and local PDFs
   - useful historical context, not active runtime code
 

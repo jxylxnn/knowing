@@ -1058,3 +1058,139 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 
 - If additional feature groups need roster context, evaluate whether `_teammate_utils.py` should be promoted to a public module.
 - If data scale grows to the point where even the vectorised paths become bottlenecks, consider numba or polars.
+
+---
+
+## DR-020: Refactor GameSimulator Into Typed, Modular Components
+
+- Status: active
+- Date: 2026-05-09
+- Confidence: high
+
+### Context
+
+- `game_simulator.py` was a monolithic 1900+ line file with dead legacy code, raw dict data flow, and tightly coupled simulation logic.
+- The simulation layer needed to be split into independently testable, typed components.
+
+### Options Considered
+
+1. Leave as monolithic file with minor cleanup.
+2. Extract into typed dataclasses + separate modules for phase simulation, archetype inference, and role sampling.
+3. Full rewrite with a new simulation engine.
+
+### Decision
+
+- Option 2: extract simulation logic into modular, typed components while preserving the existing reactive simulation algorithm.
+- `game_simulator.py` retains orchestration but delegates to PhaseSimulator, ArchetypeEngine, and RoleSampler.
+- All inter-component data flows through typed dataclasses defined in `sim_types.py`.
+
+### Tradeoffs
+
+- More files to track, but each is focused and testable in isolation.
+- Typed dataclasses add boilerplate but eliminate key-typo bugs and make contracts explicit.
+- Phase simulator extraction means changing simulation logic now only requires touching `phase_simulator.py`.
+
+### Consequences
+
+- Six new simulation modules: `phase_simulator.py`, `archetype.py`, `role_sampler.py`, `sim_types.py`, `sim_cache.py`, `stat_utils.py`.
+- Dead legacy simulation code removed from `game_simulator.py`.
+- Full test suite: `178 passed, 0 failed`.
+
+### Revisit Triggers
+
+- If the phase-simulation algorithm needs fundamental changes, the extraction should make that simpler.
+
+---
+
+## DR-021: Build Self-Optimizing Ensemble Weight System
+
+- Status: active
+- Date: 2026-05-09
+- Confidence: high
+
+### Context
+
+- The current system computed ensemble blend weights once at training time and froze them forever in `blend_weights.pkl`.
+- There were three frozen weight points: CatBoost-MAE split (hardcoded 0.7/0.3), CatBoost-Transformer blend (loaded once), and per-target blend weights (training-time only).
+- New games, shifting player roles, and model accuracy drift could not be adapted to without full retraining.
+
+### Options Considered
+
+1. Keep frozen training-time weights; manually retrain when accuracy degrades.
+2. Build a cron-based weight retuning system triggered by drift detection.
+3. Build an on-demand self-optimization system: backtest → optimize → verify → deploy.
+
+### Decision
+
+- Option 3: on-demand self-optimization with human-in-the-loop accept/verify gates.
+- `backtest.py` evaluates model accuracy on recent completed games.
+- `optimize_weights.py` uses scipy.optimize to find better blend coefficients.
+- `WeightStore` provides versioned, atomic JSON storage with rollback.
+- `DriftDetector` monitors performance and alerts when retuning may help.
+- All blend coefficients now come from a single `EnsembleWeights` config object, hot-reloadable at runtime.
+
+### Tradeoffs
+
+- Adds complexity (new entry points, evaluation subsystem, versioned storage).
+- Requires operator to run backtest/optimize periodically — not fully automated.
+- Human-in-the-loop accept gate prevents bad automated weight changes.
+- Versioned JSON storage is simpler and safer than opaque binary pickle.
+
+### Consequences
+
+- New entry points: `backtest.py`, `optimize_weights.py`.
+- New subsystem: `src/evaluation/` (5 modules: metrics, backtest_runner, ensemble_optimizer, weight_store, drift_detector).
+- `ModelManager` refactored to accept hot-reloadable `EnsembleWeights`.
+- `config/default.yaml` now supports `self_optimization:` section.
+- Full test suite: `178 passed, 0 failed`.
+- The old `blend_weights.pkl` binary format is superseded by the versioned JSON store.
+
+### Revisit Triggers
+
+- If the self-optimization loop proves the system can converge reliably, consider adding a cron-based auto-retune mode.
+- If 13 parameters are too many to optimize reliably, reduce the parameter space (e.g., per-target intercepts only).
+- If the weight store needs to be shared across users (service deployment), consider a database-backed store.
+
+---
+
+## DR-025: Enforce Strict Mode and Data Quality Schema for Simulator Degradation
+
+- Status: active
+- Date: 2026-05-22
+- Confidence: high
+
+### Context
+
+- DR-005 and DR-009 established resilient fallbacks and visible degradation summaries for optional scrapers, but the query layer remained blind to which specific player projections relied on fallback math.
+- Advanced operators lacked a fail-fast mechanism for production-grade runs.
+
+### Options Considered
+
+1. Add a `--strict` flag to `simulate_season.py` that halts on any degraded optional source.
+2. Append a `DATA_QUALITY` column to the export schema so the query layer can surface degradation.
+3. Both (strict mode for CLI + data quality for exports).
+
+### Decision
+
+- Option 3: both fail-fast (strict mode) and persistent quality tracking (data quality column).
+- `GameSimulator.__init__` accepts `strict_mode: bool = False`. When True, raises `RuntimeError` if any optional `InputHealth` source reports `failed` or `fallback`.
+- `SeasonSimulator` threads `strict_mode` through to the game simulator.
+- `ReportGenerator.export_player_projections()` appends `DATA_QUALITY` (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`).
+- `ProjectionLoader.find_player()` reads `DATA_QUALITY` and emits a visible warning during interactive queries.
+
+### Tradeoffs
+
+- Strict mode trades resilience for safety — operators must decide which matters more for their run.
+- Data quality column adds export schema surface area but requires no new pipeline state.
+
+### Consequences
+
+- `simulate_season.py --strict` exits with `RuntimeError` on first degraded optional source.
+- `player_projections_<timestamp>.csv` includes a `DATA_QUALITY` column.
+- Projection queries show warnings when using degraded data.
+- Full test suite: 178 passed, 0 failed (plus new strict mode tests).
+
+### Revisit Triggers
+
+- If the data quality schema needs to carry more granular information (e.g., per-source quality breakdown per player), extend `DATA_QUALITY` to a composite enum or structured field.
+- If strict mode proves too brittle for production use, consider adding a `--warn-only` variant.

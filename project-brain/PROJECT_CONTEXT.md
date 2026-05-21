@@ -11,6 +11,8 @@
   - `train.py`
   - `simulate_season.py`
   - `query_prob.py`
+  - `backtest.py` (NEW)
+  - `optimize_weights.py` (NEW)
   - `clear_cache.py`
 
 ## What The Project Is
@@ -57,9 +59,14 @@ Not supported by repo evidence:
 
 - Run `python update_data.py`.
 - The script pulls player game logs and team game logs through `nba_api`.
+- Also enriches player data with biographical info (AGE, POSITION) via `PlayerBioScraper` → `data/player_bios.csv`.
+- Logs current injury report to longitudinal history (`data/injury_history.csv`) via `InjuryHistoryLogger`.
+- Writes Parquet dual-write (`nba_players.parquet`, `nba_games.parquet`) for GPU-direct storage reads.
 - Output artifacts:
   - `data/nba_players.csv`
   - `data/nba_games.csv`
+  - `data/player_bios.csv` (optional)
+  - `data/injury_history.csv` (optional)
 - This is the raw-data prerequisite for model training.
 
 ### 2. Train Models
@@ -67,7 +74,8 @@ Not supported by repo evidence:
 - Run `python train.py`.
 - The script loads the CSV data through `src/preprocessing/data_loader.py`.
 - It resolves a named training preset from `config/default.yaml` plus `src/training/presets.py` before feature engineering starts.
-- It engineers features through `src/preprocessing/feature_engineer.py`.
+- **Precomputes lifecycle aging curves** (B-Ianus Bayesian + KAN nonlinear) at startup, before feature engineering, so caches exist for feature groups to load. Non-fatal on missing bio data.
+- It engineers features through `src/preprocessing/feature_engineer.py` (or the GPU-accelerated `feature_engineer_gpu.py` when use_gpu=True and cuDF is available).
 - It trains the model stack through `src/training/pipeline.py`.
 - The `small` preset keeps the six canonical targets, disables the Transformer, uses the `rolling`, `efficiency`, `momentum`, `pace`, `opponent_strength`, and `archetype` feature groups, and trims to the most recent two seasons when `SEASON_ID` is available.
 - In Colab, `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage so code can run from `/content/knowing` while `data/` and `models/` stay in Google Drive.
@@ -86,6 +94,7 @@ Not supported by repo evidence:
 ### 3. Simulate Upcoming Games
 
 - Run `python simulate_season.py --today`, `--date`, `--week`, or `--season`.
+- Pass `--strict` to fail fast if optional context (injuries, lineups, betting) is degraded.
 - The script uses:
   - `src/models/model_manager.py`
   - `src/simulation/game_simulator.py`
@@ -93,7 +102,7 @@ Not supported by repo evidence:
   - `src/simulation/report_generator.py`
 - Outputs:
   - `data/sim_results/sim_results_<timestamp>.csv`
-  - `data/sim_results/player_projections_<timestamp>.csv`
+  - `data/sim_results/player_projections_<timestamp>.csv` — now includes `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`)
 - This is the bridge between trained models and query-time projection usage.
 
 ### 4. Query Projection Probabilities
@@ -103,6 +112,7 @@ Not supported by repo evidence:
   - over/under probability
   - direct projection lookup
   - player comparisons
+- Projections relying on fallback data show a `DATA_QUALITY` warning.
 - Supported stat aliases in query code:
   - `pts`
   - `reb`
@@ -116,6 +126,21 @@ Not supported by repo evidence:
 
 - Run `python clear_cache.py`.
 - This removes generated caches, models, experiments, and simulation outputs while intentionally preserving raw source data files in `data/`.
+
+### 6. Backtest Prediction Accuracy (NEW)
+
+- Run `python backtest.py --recent 14` (or `--from`/`--to`).
+- Loads trained models and evaluates predictions against historical completed games.
+- Computes per-stat MAE, RMSE, R², calibration error, and prediction interval coverage.
+- Output: JSON results and console summary of `BacktestResult` with per-target `TargetMetrics`.
+
+### 7. Optimize Ensemble Weights (NEW)
+
+- Run `python optimize_weights.py --recent 14` (or `--from`/`--to`).
+- Runs backtesting to establish baseline, then uses scipy.optimize to find better blend coefficients.
+- 13 tunable parameters: 6 per-target CatBoost/Transformer ratios + 6 per-target intercepts + 1 CatBoost-MAE blend.
+- Accept/verify gates prevent regression. Output: versioned JSON weights in `data/weights/`.
+- Supports `--dry-run`, `--rollback N`, and `--list` modes.
 
 ## Core Features That Actually Exist
 

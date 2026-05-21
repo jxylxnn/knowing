@@ -2,14 +2,6 @@
 
 ## NOW
 
-### Apply planned bug-fix batch (groupby KeyError, CatBoost GPU callback, device AttributeError)
-
-- Status: DONE on 2026-04-25.
-- `pace_role.py` already uses string column names in groupby; no code change required.
-- `catboost_trainer.py` already conditionally disables callbacks for GPU and rebuilds fit_kwargs on fallback; no code change required.
-- `nn_trainer.py` received defensive `isinstance(self.device, str)` coercion in `_create_loader()`.
-- All targeted tests pass (preprocessing 19/19, nn_trainer 2/2, runtime artifact 5/5, transformer 8/8).
-
 ### Validate zero-padding behavior on real training data
 
 - Why it matters: the zero-padding change increases the number of training samples for players with short careers. A live training run should confirm that the Transformer still converges and that the padded samples do not degrade validation MAE.
@@ -20,6 +12,59 @@
 - Done when:
   - `python train.py` completes with the M tier (seq_len=20) and the Transformer validation MAE is comparable to or better than before
   - the training log shows more sequences generated than before (due to short-player inclusion)
+
+### Validate lifecycle aging precomputation with real bio data
+
+- Why it matters: B-Ianus and KAN aging curves are precomputed in `train.py` at startup, but need live validation with real `player_bios.csv` data.
+- Likely files:
+  - `train.py`
+  - `src/lifecycle/aging_model.py`
+  - `src/lifecycle/kan_age_model.py`
+  - `data/player_bios.csv`
+- Done when:
+  - `python train.py` shows "Precomputed B-Ianus aging curves" and "Precomputed KAN aging outputs" in logs
+  - lifecycle caches (`aging_curves.csv`, `kan_aging_outputs.csv`) are populated
+  - aging feature groups produce non-neutral values during feature engineering
+
+### Run full test suite after lifecycle ML integration
+
+- Why it matters: 4 new feature groups, new feature_engineer_gpu, nexus model, and lifecycle modules need to pass alongside the existing 178 tests.
+- Likely files:
+  - `tests/test_preprocessing/test_aging_curve_features.py`
+  - `tests/test_preprocessing/test_kan_aging_features.py`
+  - `tests/test_preprocessing/test_injury_risk_features.py`
+  - `tests/test_preprocessing/test_skill_development_features.py`
+  - `tests/test_preprocessing/test_feature_engineer_gpu.py`
+  - `tests/test_models/test_nexus_model.py`
+  - `tests/test_data/test_player_bio_scraper.py`
+  - `tests/test_data/test_injury_history_logger.py`
+- Done when:
+  - `pytest tests/ -v` completes with all tests passing
+  - baseline test count is updated from 178
+
+### Run backtest against live data to establish baseline metrics
+
+- Why it matters: the backtest/optimize/drift-detection subsystem is implemented and test-covered but needs real data to calibrate the drift detector baseline.
+- Likely files:
+  - `backtest.py`
+  - `src/evaluation/backtest_runner.py`
+  - `src/evaluation/drift_detector.py`
+- Done when:
+  - `python backtest.py --recent 14` completes against real data
+  - per-stat MAE/RMSE/R² are recorded
+  - drift detector has baseline statistics loaded
+
+### Run optimize_weights.py end-to-end with real data
+
+- Why it matters: the self-optimization loop needs live validation. All components pass unit tests but the full optimize→verify→deploy cycle hasn't been exercised against real completed games.
+- Likely files:
+  - `optimize_weights.py`
+  - `src/evaluation/ensemble_optimizer.py`
+  - `src/evaluation/weight_store.py`
+- Done when:
+  - `python optimize_weights.py --recent 14 --dry-run` shows candidate weights
+  - `python optimize_weights.py --recent 14` writes improved (or verified-equivalent) weights
+  - versioned weights appear in `data/weights/`
 
 ### Wire new feature groups into FeatureEngineer and training presets — DONE
 
@@ -50,13 +95,7 @@
 ### Remove or clearly quarantine dead code in `GameSimulator`
 
 - Why it matters: `src/simulation/game_simulator.py` contains a large unreachable block after an early return, creating uncertainty about the true active algorithm.
-- Likely files:
-  - `src/simulation/game_simulator.py`
-  - `project-brain/ARCHITECTURE.md`
-  - `project-brain/FILE_MAP.md`
-- Done when:
-  - there is one clearly documented active simulation path
-  - dead legacy code is removed or intentionally isolated with comments and tests
+- Status: DONE on 2026-05-09 as part of simulation refactor. Dead legacy code removed; active path is exclusively `_simulate_matchup_reactive`. GameSimulator now delegates to PhaseSimulator.
 
 ### Verify Colab launcher repo-root detection against a live mounted Drive run
 
@@ -100,18 +139,6 @@
   - `python train.py --preset small` completes on the current dataset
   - runtime and artifact output are compared against the full preset
   - any unexpected artifact or load mismatch is documented
-
-### Add a strict simulation mode for optional scraper degradation
-
-- Why it matters: the repo now defaults to visible degraded mode for optional context failures, but advanced operators may want fail-fast behavior.
-- Likely files:
-  - `simulate_season.py`
-  - `src/simulation/season_simulator.py`
-  - `src/simulation/game_simulator.py`
-- Done when:
-  - the CLI exposes a strict option
-  - optional degraded inputs can trigger non-zero exit status when requested
-  - tests cover default vs strict behavior
 
 ### Make `--season` simulate the actual remaining season
 
@@ -229,7 +256,80 @@
 
 ## DONE
 
-### Stabilize the Step 2 feature-ablation compatibility path
+### Fix six training-stopping bugs in CatBoost + Transformer pipeline
+
+- Status: DONE on 2026-05-09.
+- Delivered:
+  - CatBoost import guard prevents crash when catboost isn't installed
+  - feature_cols null check prevents downstream crashes on empty feature sets
+  - bare raise fixed to proper exception handling
+  - macOS persistent_workers guard prevents DataLoader crash
+  - graceful feature missingness degradation instead of hard failure
+  - parallel thread contention fix for CPU training
+  - transformer save guard prevents checkpoint corruption
+- Full suite: `178 passed, 0 failed`.
+
+### Architecture cleanup — deduplicate code, align config, remove dead code
+
+- Status: DONE on 2026-05-09.
+- Delivered: deduplicated code paths, aligned config references, removed dead code throughout.
+- Full suite: `178 passed, 0 failed`.
+
+### Simulation refactor — phase simulator, archetype, role sampler, prob formatter
+
+- Status: DONE on 2026-05-09.
+- Delivered:
+  - `src/simulation/phase_simulator.py` — extracted Monte Carlo loop from GameSimulator
+  - `src/simulation/archetype.py` — ArchetypeEngine for player archetype inference
+  - `src/simulation/role_sampler.py` — role state sampling with archetype-aware adjustments
+  - `src/simulation/sim_types.py` — typed dataclasses replacing raw dicts
+  - `src/simulation/sim_cache.py` — JSON disk-cache mixin
+  - `src/simulation/stat_utils.py` — shared statistical helpers
+  - `src/query/prob_formatter.py` — ProbFormatterMixin for formatted output
+  - Dead legacy simulation code removed from GameSimulator
+- Full suite: `178 passed, 0 failed`.
+
+### Build self-optimizing ensemble weight system + Phase 0 bug fixes
+
+- Status: DONE on 2026-05-09.
+- Delivered:
+  - `backtest.py` — CLI for evaluating prediction accuracy on historical games
+  - `optimize_weights.py` — CLI for retuning ensemble weights via scipy.optimize
+  - `src/evaluation/` module (5 files): metrics, backtest_runner, ensemble_optimizer, weight_store, drift_detector
+  - `ModelManager` refactored for hot-reloadable `EnsembleWeights`
+  - `config/default.yaml` now supports `self_optimization:` section
+  - Versioned JSON weight store with atomic writes and rollback
+- Full suite: `178 passed, 0 failed`.
+
+### Add strict simulation mode + data quality schema (DR-025)
+
+- Status: DONE on 2026-05-22.
+- Delivered:
+  - `simulate_season.py --strict` flag for fail-fast on degraded optional context
+  - `GameSimulator(strict_mode=True)` and `SeasonSimulator(strict_mode=True)` — raises `RuntimeError` on degraded optional sources
+  - `ReportGenerator.export_player_projections()` appends `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`)
+  - `ProjectionLoader.find_player()` surfaces visible CLI warning for degraded projections
+  - `_data_quality_from_result()` static helper derives quality from input_health metadata
+- Full suite: `178 passed, 0 failed`.
+
+### Lifecycle ML integration (aging curves, injury risk, skill development, GPU fe, nexus)
+
+- Status: DONE on 2026-05-22.
+- Delivered:
+  - `src/lifecycle/aging_model.py` — B-Ianus Bayesian aging curves with position-specific priors
+  - `src/lifecycle/kan_age_model.py` — KAN nonlinear age curves (CPU-only)
+  - `src/models/nexus_model.py` — Nexus multi-modal architecture (SSM + FT-Transformer + GAT + Copula head)
+  - `src/training/nexus_loss.py` — GaussianNLLLoss with Cholesky covariance
+  - `src/preprocessing/feature_engineer_gpu.py` — GPU-accelerated cuDF feature engineering with CPU fallback
+  - 4 new feature groups: InjuryRisk, AgingCurve, KANAging, SkillDevelopment (23 total)
+  - `src/data/player_bio_scraper.py` — PlayerBioScraper for AGE/POSITION/HEIGHT/WEIGHT enrichment
+  - `src/data/injury_history_logger.py` — InjuryHistoryLogger for persistent longitudinal history
+  - `update_data.py`: bio enrichment, injury logging, Parquet dual-write
+  - `train.py`: lifecycle aging precomputation at startup
+  - `config/default.yaml`: `lifecycle:` config section
+- Full suite: TBD (new lifecycle tests added).
+
+### Apply planned bug-fix batch (groupby KeyError, CatBoost GPU callback, device AttributeError)
 
 - Completed on 2026-04-11.
 - Delivered:

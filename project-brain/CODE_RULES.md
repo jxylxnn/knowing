@@ -93,7 +93,47 @@
 ### Simulation
 
 - `src/simulation/game_simulator.py` is a critical orchestrator. Keep interface changes small and documented.
+- New simulation logic should use typed dataclasses from `sim_types.py` rather than raw dicts.
 - If a simulation path becomes obsolete, remove it or mark it clearly. Do not leave large unreachable blocks without explanation.
+- New simulation components (phase simulation, archetype inference, role sampling) should be independent modules in `src/simulation/` rather than embedded in GameSimulator.
+- **Strict mode**: `GameSimulator(strict_mode=True)` raises `RuntimeError` on degraded optional InputHealth sources. When adding new optional context sources, integrate them into the `input_health` contract and check them in strict mode.
+- **Data quality**: `ReportGenerator.export_player_projections()` must include the `DATA_QUALITY` column. New simulation result metadata that affects projection trustworthiness should be reflected here.
+
+### Lifecycle & Bio-Mechanical (NEW)
+
+- `src/lifecycle/` owns player aging, career trajectory, and injury risk computation.
+- `BIanusAgingModel` and `KANAgeModel` must be precomputed at training startup (before feature engineering) so their caches exist for `AgingCurveFeatureGroup` and `KANAgingFeatureGroup` to load.
+- Lifecycle precomputation is non-fatal. Missing player bio data defaults aging features to neutral (1.0 factor) and injury risk features to near-zero. Never crash training because of missing bio data.
+- KAN aging always runs on CPU (`device='cpu'`) to avoid CUDA context contention with CatBoost/Transformer training.
+- New lifecycle caches (`aging_curves.csv`, `kan_aging_outputs.csv`) go in `data/cache/`. Delete them to force recomputation after retraining.
+- `PlayerBioScraper` fetches from NBA API `commonplayerinfo` endpoint. Cache results to `data/player_bios.csv`. Called from `update_data.py` — non-fatal on failure.
+- `InjuryHistoryLogger` appends and deduplicates by (PLAYER_ID, DATE, INJURY_TYPE). Never overwrite the full history — only append.
+- `update_data.py` outputs Parquet files alongside CSVs for GPU-direct storage reads. Both formats must stay in sync.
+
+### Nexus Multi-Modal Model (NEW)
+
+- `NexusModel` is implemented and import-tested but is NOT the active training path. CatBoost + Transformer remains the active stack.
+- If Nexus is wired into the training pipeline, update all decision records, CODE_RULES, and the simulation artifact contract simultaneously.
+- The nexus loss (`GaussianNLLLoss`) may be ported as a secondary loss even if the full Nexus model stays inactive.
+- The simplified SSM block in `SimplifiedSSMBlock` uses standard PyTorch ops as a fallback. If CUDA `mamba_ssm` kernels become available, the fallback must preserve exact parameter shapes for weight-porting.
+
+### GPU Feature Engineering (NEW)
+
+- `FeatureEngineerGPU` mirrors `FeatureEngineer`'s public API for drop-in compatibility. Keep the two engines aligned when adding new feature groups.
+- The GPU engine transparently falls back to CPU when cuDF is unavailable or CUDA is missing. Never crash feature engineering because of GPU unavailability.
+- Complex feature groups (Python loops, scipy) execute on CPU after pandas conversion — do not attempt full GPU port of groups that are fundamentally iterative.
+
+### Evaluation And Optimization (NEW)
+
+- `src/evaluation/` is the evaluation and optimization subsystem. All backtesting, weight optimization, drift detection, and weight versioning lives here.
+- Backtest results flow through `BacktestResult` and `TargetMetrics` dataclasses — do not return raw dicts or ad hoc metrics.
+- `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores. Both must be available for backtesting to work.
+- `EnsembleOptimizer` uses scipy.optimize with 13 parameters. If the parameter space changes, update `_TUNABLE_DIMS` and all code that builds/flattens weight vectors.
+- `WeightStore` is the single source of truth for active ensemble weights. Never bypass it with direct `blend_weights.pkl` writes.
+- Weight versions are numbered and stored under `data/weights/`. The `current.json` pointer indicates the active version.
+- `optimize_weights.py` always writes through `WeightStore`. Use `--rollback N` to revert, not manual file edits.
+- `DriftDetector` uses SPC (2σ threshold). The baseline window and detection threshold are configurable through `config/default.yaml` under `self_optimization:`.
+- Keep the blend-weight / Transformer artifact contract enforced at load time. `ModelManager.set_weights()` must validate the new weights before applying them.
 
 ### Query
 

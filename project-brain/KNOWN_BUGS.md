@@ -386,13 +386,13 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ## KB-008: `GameSimulator` Contains Large Unreachable Legacy Logic After An Early Return
 
-- Status: fixed in code on 2026-04-25
+- Status: fixed in code on 2026-04-25, confirmed removed on 2026-05-09 as part of simulation refactor
 - Severity: medium
 - Confidence: high
 
 ### Symptom
 
-- The file contained a large simulation block that was dead, making it unclear which algorithm was truly active.
+- The file previously contained a large simulation block that was dead, making it unclear which algorithm was truly active.
 
 ### Expected Behavior
 
@@ -400,23 +400,12 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 
 ### Evidence
 
-- `simulate_matchup(...)` returned `self._simulate_matchup_reactive(...)` and then retained a long block of older simulation code below that return (lines 1134–1373).
-
-### Reproduction
-
-- Static inspection during this audit.
-
-### Suspected Cause
-
-- Partial migration from an older vectorized/legacy implementation to a newer reactive path.
-
-### Workaround
-
-- None needed after fix.
+- `simulate_matchup(...)` returned `self._simulate_matchup_reactive(...)` and then retained a long block of older simulation code below that return (formerly lines 1134–1373).
+- **2026-05-09:** Dead code fully removed as part of simulation refactor. GameSimulator now delegates to PhaseSimulator for the core Monte Carlo loop.
 
 ### Fix
 
-- Removed the entire unreachable legacy block (lines 1134–1373). The active path is now exclusively `_simulate_matchup_reactive`.
+- Removed the entire unreachable legacy block. The active path is now exclusively `_simulate_matchup_reactive`, which delegates to `PhaseSimulator.simulate()`.
 
 ### Risks
 
@@ -425,6 +414,51 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 ### Related Files
 
 - `src/simulation/game_simulator.py`
+- `src/simulation/phase_simulator.py`
+
+---
+
+## KB-011: Six Training-Stopping Bugs in CatBoost + Transformer Pipeline
+
+- Status: fixed in code on 2026-05-09
+- Severity: critical
+- Confidence: high
+
+### Symptom
+
+- Training could crash in multiple places depending on environment: missing CatBoost install, empty feature sets, DataLoader on macOS, parallel thread contention, Transformer checkpoint corruption.
+
+### Evidence
+
+- CatBoost import path would crash when catboost not installed.
+- feature_cols could be None, crashing downstream consumers.
+- A bare `raise` statement swallowed the original exception.
+- macOS DataLoader with persistent_workers=True would crash.
+- Feature missingness could cause hard crash instead of graceful degradation.
+- CPU CatBoost training with multiple workers could cause thread contention.
+- Transformer checkpoint save was not guarded against partial writes.
+
+### Fix
+
+- CatBoost: import guard + informative error message.
+- feature_cols: null check with fallback to empty list.
+- Bare raise: replaced with proper `raise ValueError(...) from e`.
+- macOS: `persistent_workers=False` guard when platform is Darwin.
+- Missing features: graceful degradation with logged warning.
+- Thread contention: `max_workers=1` for CPU training when OMP_NUM_THREADS is set.
+- Transformer save: temp file + atomic rename pattern for checkpoint persistence.
+
+### Risks
+
+- None remaining.
+
+### Related Files
+
+- `src/training/catboost_trainer.py`
+- `src/training/pipeline.py`
+- `src/training/nn_trainer.py`
+- `src/models/transformer_model.py`
+- `train.py`
 
 ---
 
