@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List
 from scipy import stats
 import numpy as np
+import pandas as pd
 
 from src.query.prob_formatter import ProbFormatterMixin
 
@@ -143,8 +144,16 @@ class ProbabilityCalculator(ProbFormatterMixin):
     COUNT_STATS = {'stl', 'blk', 'tov'}
     CONTINUOUS_STATS = {'pts', 'reb', 'ast'}
 
-    def __init__(self):
+    def __init__(self, cov_cache: Optional['CovarianceCache'] = None):
         self._rng = np.random.default_rng()
+        self._cov_cache = cov_cache
+
+    @property
+    def cov_cache(self) -> 'CovarianceCache':
+        if self._cov_cache is None:
+            from src.query.empirical_covariance import CovarianceCache
+            self._cov_cache = CovarianceCache()
+        return self._cov_cache
 
     def _normalize_stat(self, stat: str) -> str:
         return (stat or 'pts').lower().strip()
@@ -728,6 +737,67 @@ class ProbabilityCalculator(ProbFormatterMixin):
             fallback_used=computation.fallback_used,
             sample_count=computation.sample_count,
         )
+
+    def run_copula_simulation(
+        self,
+        projections: Dict[str, Dict[str, float]],
+        archetype: str = "GLOBAL",
+        num_sims: int = 10000,
+    ) -> pd.DataFrame:
+        """Run a correlated multi-stat Monte Carlo using the archetype copula.
+
+        Uses the archetype-conditioned empirical correlation matrix to
+        generate draws that respect the natural covariance between stats
+        (e.g. high AST correlates with high TOV).
+
+        Args:
+            projections: Dict mapping stat -> {mean, std, skew, zero_prob, lambda}.
+                         Example: {"PTS": {"mean": 25.0, "std": 6.0, "skew": 0.2}, ...}
+            archetype: Archetype label for correlation matrix lookup.
+            num_sims: Number of Monte Carlo iterations.
+
+        Returns:
+            DataFrame with columns PTS, REB, AST, STL, BLK, TOV and ``num_sims`` rows.
+        """
+        from scipy import stats as sp_stats
+        from src.query.empirical_covariance import STAT_ORDER
+
+        corr = self.cov_cache.get_correlation(archetype)
+        cholesky = np.linalg.cholesky(corr)
+
+        z = self._rng.standard_normal((num_sims, 6))
+        z_corr = z @ cholesky.T
+        u_draws = sp_stats.norm.cdf(z_corr)
+
+        results = {}
+        for i, stat in enumerate(STAT_ORDER):
+            proj = projections.get(stat, {"mean": 0.0, "std": 1.0})
+            mean = proj.get("mean", 0.0)
+            std = max(proj.get("std", 1.0), 0.1)
+            skew = proj.get("skew", 0.0)
+            zero_prob = proj.get("zero_prob", 0.0)
+            lam = max(proj.get("lambda", mean), 0.01)
+
+            u = u_draws[:, i]
+
+            if stat in ("STL", "BLK", "TOV"):
+                # Zero-inflated count: ZIP via copula uniforms
+                is_zero = u < zero_prob
+                poisson_u = np.clip((u - zero_prob) / max(1 - zero_prob, 1e-6), 0, 0.999)
+                samples = sp_stats.poisson.ppf(poisson_u, mu=lam)
+                samples = np.where(is_zero, 0.0, samples).astype(float)
+            elif abs(skew) > 0.1:
+                # Skew-normal for continuous stats with palpable skew
+                samples = sp_stats.skewnorm.ppf(u, a=skew, loc=mean, scale=std)
+                samples = np.maximum(np.round(samples), 0.0)
+            else:
+                # Normal approximation
+                samples = sp_stats.norm.ppf(u, loc=mean, scale=std)
+                samples = np.maximum(np.round(samples), 0.0)
+
+            results[stat] = samples
+
+        return pd.DataFrame(results)
 
     def calculate_from_simulations(
         self,

@@ -443,8 +443,10 @@ class ReportGenerator:
                     # Data quality
                     'DATA_QUALITY': self._data_quality_from_result(res),
                 })
-        
+
         df = pd.DataFrame(rows)
+        # Enrich with distribution parameters from quantile models
+        df = self._enrich_with_distributions(df)
         df.to_csv(filepath, index=False)
         logger.info(f"Player projections exported to {filepath}")
         return filepath
@@ -472,3 +474,49 @@ class ReportGenerator:
         if 'fallback' in statuses:
             return 'DEGRADED_FALLBACK'
         return 'FULL'
+
+    @staticmethod
+    def _enrich_with_distributions(df: pd.DataFrame) -> pd.DataFrame:
+        """Append distribution parameters (STD, SKEW, ZERO_PROB, LAMBDA) to projection CSV.
+
+        Uses the DistributionFitter to derive parameters from existing
+        P10/P50/P90 columns, falling back to mean-based defaults when
+        quantile columns are not present.
+        """
+        from src.query.distribution_fitter import DistributionFitter
+
+        STATS = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+        for stat in STATS:
+            p50_col = f"PROJ_{stat}_MEAN"
+            p10_col = None
+            p90_col = None
+
+            # Check for quantile columns (e.g. _P50, _P10, _P90 from quantile models)
+            for candidate_p50 in [f"{stat}_P50", f"PROJ_{stat}_MODE", p50_col]:
+                if candidate_p50 in df.columns:
+                    p50_col = candidate_p50
+                    break
+            for candidate_p10 in [f"{stat}_P10", f"{stat}_CI_LOW", f"{stat}_99_CI_LOW"]:
+                if candidate_p10 in df.columns:
+                    p10_col = candidate_p10
+                    break
+            for candidate_p90 in [f"{stat}_P90", f"{stat}_CI_HIGH", f"{stat}_99_CI_HIGH"]:
+                if candidate_p90 in df.columns:
+                    p90_col = candidate_p90
+                    break
+
+            dists = []
+            for _, row in df.iterrows():
+                p50 = float(row.get(p50_col, 0)) if p50_col else float(row.get(f"PROJ_{stat}_MEAN", 0))
+                p10 = float(row.get(p10_col, p50 * 0.7)) if p10_col else p50 * 0.7
+                p90_val = float(row.get(p90_col, p50 * 1.3)) if p90_col else p50 * 1.3
+
+                dist = DistributionFitter.fit_from_quantiles(p50, p10, p90_val, stat)
+                dists.append(dist)
+
+            df[f"{stat}_STD"] = [d.std for d in dists]
+            df[f"{stat}_SKEW"] = [d.skew for d in dists]
+            df[f"{stat}_ZERO_PROB"] = [d.zero_prob for d in dists]
+            df[f"{stat}_LAMBDA"] = [d.lambda_param for d in dists]
+
+        return df

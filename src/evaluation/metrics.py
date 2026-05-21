@@ -210,3 +210,39 @@ def compute_target_metrics(
     )
 
     return metrics
+
+
+def calculate_empirical_crps(simulations: np.ndarray, actual: float) -> float:
+    """Continuous Ranked Probability Score for a probabilistic forecast.
+
+    Evaluates the quality of a probabilistic (ensemble) forecast.
+    Lower CRPS = better.  Rewards sharp (narrow) distributions that
+    still capture the actual outcome.
+
+    Uses a fast O(n log n) approximation based on the Gini mean
+    difference.
+
+    Args:
+        simulations: Array of Monte Carlo simulation draws.
+        actual: The actual observed value.
+
+    Returns:
+        CRPS value (lower is better).
+    """
+    sims = np.asarray(simulations, dtype=float)
+    sims = sims[np.isfinite(sims)]
+    if len(sims) < 2:
+        return float("nan")
+
+    n = len(sims)
+    sorted_sims = np.sort(sims)
+
+    # term1 = E|X - y| — mean absolute error of simulations vs actual
+    term1 = float(np.mean(np.abs(sorted_sims - actual)))
+
+    # term2 = E|X - X'| — Gini mean difference approximation
+    # Fast O(n) formula: (2 / n^2) * sum(i * x_i) - (n+1)/n * mean(x)
+    weights = np.arange(1, n + 1, dtype=float)
+    term2 = float(2.0 * np.sum(weights * sorted_sims) / (n * n) - (n + 1.0) / n * np.mean(sorted_sims))
+
+    return term1 - term2
