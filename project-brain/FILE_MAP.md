@@ -43,6 +43,7 @@
 - Current note: `train.py` now performs explicit preflight checks for the writable model/cache directories and required raw CSV inputs before expensive work begins, and it logs stage names so subprocess callers can surface a failure stage clearly.
 - Current note: Step 2 feature-engineering setup should go through `src/preprocessing/feature_engineer.py:build_feature_engineer(...)` so mixed-version checkouts tolerate older constructor signatures; `tests/test_training/test_train_entrypoint.py` statically guards that call shape.
 - Current note: the active training presets now include `archetype`, the deterministic player-style similarity group used to support cold-start prediction.
+- Current note: `train.py` exposes `--feature-selection {off,smart}` and `--selection-profile {fast,balanced,max_accuracy}`. When smart selection is enabled, `train.py` runs `SmartFeatureSelector` between Step 2 (feature engineering) and Step 3 (training) and feeds the resulting `SelectionManifest` into `TrainingPipeline.apply_feature_selection_manifest()`. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list.
 
 ### `train_colab.ipynb`
 
@@ -66,14 +67,14 @@
 - Risk level: high.
 - Current caveat: depends on runtime paths with known scraper regressions.
 
-### `backtest.py` (NEW — 2026-05-09)
+### `backtest.py` (NEW — 2026-05-09, extended 2026-06-04)
 
 - Role: evaluate prediction accuracy on historical completed games.
 - High-value functions: `run_backtest`, `parse_args`, `setup_logging`.
-- Calls into: `BacktestRunner`, `ModelManager`, `DataLoader`.
+- Calls into: `BacktestRunner`, `ModelManager`, `DataLoader`, `src.evaluation.metrics.backtest_result_to_json_dict`.
 - Outputs: per-stat MAE, RMSE, R², calibration error, prediction interval coverage.
 - Risk level: medium. Depends on trained models and historical data being available.
-- CLI modes: `--from`/`--to` for date range, `--recent N` for last N days, `--output <path>` for JSON export.
+- CLI modes: `--from`/`--to` for date range, `--recent N` for last N days, `--output <path>` for the existing pretty JSON, `--json-output <path>` for the stable machine-readable JSON payload (new — used by downstream tooling that needs to consume metrics without scraping terminal output).
 
 ### `optimize_weights.py` (NEW — 2026-05-09)
 
@@ -94,6 +95,24 @@
 - Role: safe cleanup for generated artifacts.
 - Risk level: low to medium.
 - Important behavior: preserves raw source data in `data/`.
+
+### `optimize_variance.py` (NEW — 2026-05-21)
+
+- Role: tune context-specific volatility multipliers via CRPS.
+- High-value functions: `main`, `load_backtest_data`, `crps_objective`, `_parse_args`.
+- Calls into: `src.evaluation.metrics.calculate_empirical_crps`.
+- Tunes 7 multipliers: B2B, Rookie, Blowout, Home, Away, Playoff, RestAdvantage.
+- CLI modes: `--recent N`, `--from`/`--to`, `--target <STAT>`, `--sims N`, `--dry-run`.
+- Risk level: low. Independent of training artifacts — operates on raw CSVs.
+
+### `calibrate_residual_intervals.py` (NEW — 2026-06-12)
+
+- Role: builds conformal confidence interval artifacts from residual prediction errors.
+- Calls into: `src.correction.calibration.ResidualIntervalCalibrator`.
+- Input: `data/evaluation/residual_training.parquet`.
+- Outputs: `models/calibration/calibration_metadata.json` and one `{stat}_intervals.json` file for each calibrated target.
+- CLI modes: `--confidence-levels`, `--min-bucket-rows`, `--targets`.
+- Risk level: low to medium. It does not retrain the base model, but its artifacts influence runtime interval/confidence output.
 
 ## Configuration
 
@@ -130,6 +149,7 @@ Important files:
   - Used by simulation CLI.
   - Currently appears broken by config attribute naming regressions.
   - High-risk edit area.
+  - **Schedule contract wiring (2026-06-04):** every read path (cached schedule hit, fresh API, cache fallback, season cache) calls `normalize_schedule_frame(...)` before returning. Empty frames are skipped from normalization. The contract normalizes `GAME_ID`, `GAME_DATE`, `HOME_TEAM`, and `AWAY_TEAM` and rejects frames with nulls in required columns.
 - `src/data/lineup_scraper.py`
   - Used by `GameSimulator`.
   - Currently appears broken by unreachable initialization and undefined names.
@@ -148,6 +168,22 @@ Important files:
   - Treat as confusing/possibly inactive.
 - `src/data/nba_defense_scraper.py`
   - Supplies opponent-defense context used in parts of simulation/query logic.
+
+## Residual Correction And Calibration
+
+### `src/correction/`
+
+- Ownership: walk-forward residual datasets, residual correction models, residual runtime application, and conformal residual interval calibration.
+- Important files:
+  - `walk_forward_residuals.py` — builds walk-forward base predictions for mistake-learning datasets.
+  - `residual_dataset.py` — canonical residual row/dataframe schema (`STAT`, `BASE_PREDICTION`, `ACTUAL`, `ERROR`, `MODEL_FOLD`, `DATA_QUALITY`, etc.).
+  - `correction_features.py` — training/runtime residual-model feature builder; maps `DATA_QUALITY` into numeric quality score.
+  - `residual_trainer.py` — trains one CatBoost residual model per target and writes `models/residual/`.
+  - `residual_model.py`, `correction_store.py`, `correction_applier.py` — runtime load/apply path for residual corrections.
+  - `calibration.py` — `ResidualIntervalCalibrator`; computes conformal half-widths from absolute residual errors and writes bucketed JSON artifacts.
+  - `interval_store.py` — `CalibrationIntervalStore`; non-fatal runtime loader with stat/bucket fallback.
+  - `confidence_scorer.py` — `ConfidenceScorer`; maps interval/context signals to `HIGH`, `MEDIUM`, `LOW`, or `NO_EDGE`.
+- Risk level: medium. Residual correction changes point predictions; interval calibration changes operator trust/risk output and projection CSV schema. Missing calibration artifacts must remain non-fatal.
 
 ## Preprocessing And Feature Engineering
 
@@ -176,6 +212,7 @@ Important files:
 - Owns feature-group registration, diagnostics, and main feature build flow.
 - Risk level: high.
 - Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.
+- Current note: `FeatureEngineeringResult` now records `n_rows` and `n_features` for selector diagnostics. The `get_group_columns()` output is consumed by `SmartFeatureSelector.run` to map columns back to their groups for ablation scoring.
 
 ### `src/training/presets.py`
 
@@ -187,6 +224,7 @@ Important files:
   - `apply_recent_history_window`
 - Risk level: medium to high because it now controls the feature-stack shape and Transformer enablement used by the main training CLI.
 - Current note: the built-in `full` preset includes all 23 feature groups (19 original + 4 lifecycle: injury_risk, aging_curve, kan_aging, skill_development). The `small` preset includes 6 groups (rolling, efficiency, momentum, pace, opponent_strength, archetype).
+- Current note: `TrainingPreset` now carries optional `feature_selection` and `feature_selection_profile` fields. Presets can opt into smart selection through `config/default.yaml` under `training_presets.<name>.feature_selection`.
 
 ### `src/preprocessing/features/`
 
@@ -250,8 +288,11 @@ Important files:
 - Risk level: very high.
 - Current caution: any artifact filename or format change here must stay aligned with `CatBoostTrainer`, `ModelManager`, and `simulate_season.py`.
 - Current note: Transformer validation no longer calls the compiled model directly; it delegates through `TransformerWrapper.predict_batch()` so the validation seam stays on the eager-safe path.
-- Current note: `_save_model_stack_metadata()` records whether the Transformer was active and can now include the selected training preset and enabled feature groups when `train.py` provides them.
+- Current note: `_save_model_stack_metadata()` records whether the Transformer was active and can now include the selected training preset and enabled feature groups when `train.py` provides them. When smart selection ran, the metadata also records `feature_selection_enabled`, `feature_selection_target_specific`, `feature_selection_profile`, and `selected_features_by_target` for runtime auditability.
 - Current note: `_build_sequence_batch()` now produces zero-padded sequences for players with fewer than `seq_len + 1` games instead of skipping them entirely.
+- Current note: `_feature_cols_for_target(target)` returns the per-target feature list when smart selection is active, falling back to `self.feature_cols` otherwise. Used by `_train_catboost_parallel`, the empty-data fallback path, and the constant-regressor fallback.
+- Current note: `apply_feature_selection_manifest(payload)` parses a `SelectionManifest` dict and populates `self.target_feature_cols` plus audit fields (`feature_selection_manifest`, `feature_selection_profile`).
+- Current note: `_save_blend_weights()` now also persists the training-time blend to `WeightStore` (versioned JSON) so the `ModelManager` bootstrap path can pick it up on the next load.
 
 ### `src/training/catboost_trainer.py`
 
@@ -332,6 +373,8 @@ Important files:
 - Current note: `validate_runtime_artifacts()` now treats `model_stack_metadata.pkl` as part of the shared runtime set so the loader and training pipeline stay aligned on the same contract.
 - Current note: `_validate_blend_contract()` raises when blend weights expect a Transformer that is missing or failed to load, eliminating the partial-blend bug.
 - Current note: Transformer predictions flow through `TransformerWrapper.predict()`, which now defaults to eager inference and can force a math SDPA backend on CUDA when backend controls are available.
+- Current note: `load_models()` now bootstraps `EnsembleWeights` from `WeightStore` after the legacy `blend_weights.pkl` is loaded. If a `current.json` exists, `use_ensemble_weights()` overrides the legacy blend so the runtime uses data-driven weights. The bootstrap is non-fatal — if the WeightStore is missing or the read fails, the legacy blend is used. (DR-030, 2026-06-04.)
+- **Load-time feature alignment (2026-06-04):** `predict_player_stats` calls `load_expected_feature_cols(models_dir)` to read the saved column list and `align_feature_frame(df, expected_cols)` to reorder / drop extras before the leakage-safe selector runs. Inference frames with missing or non-numeric features raise a typed `FeatureSchemaContractError`.
 
 ### `src/models/nexus_model.py` (NEW — 2026-05-22)
 
@@ -430,17 +473,20 @@ Important files:
 
 - Iterates over schedules and runs multiple matchup simulations.
 - Risk level: high because it depends on schedule output shape and simulator return contracts.
+- **Schedule contract wiring (2026-06-04):** `simulate_season` converts the schedule frame to `ScheduleGame` records via `schedule_rows_to_games(...)` before iterating matchups (both ThreadPoolExecutor and sequential paths). The game iterator uses the typed `home_team`, `away_team`, and `game_date` attributes rather than raw dict lookups.
 
 ### `src/simulation/report_generator.py`
 
 - Prints projections and exports to CSV under `data/sim_results/`.
 - High-value methods:
-  - `export_player_projections` — now includes `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`)
+  - `export_player_projections` — writes the strict 6-stat x 14-column schema (mean, `{STAT}_P10`, `{STAT}_P50`, `{STAT}_P90`, `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`, `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, `{STAT}_CONFIDENCE_SCORE` for all 6 stats, plus `DATA_QUALITY` column with values `FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`). Calls `validate_projection_frame(...)` on the assembled DataFrame before writing the CSV.
   - `export_to_csv`
   - `display_quick_summary`
   - `_data_quality_from_result` — static helper deriving quality from input_health metadata
+  - `_enrich_with_distributions` (NEW) — derives and appends distribution parameters from quantile columns via `DistributionFitter`
+  - `_ensure_confidence_interval_columns` (NEW) — keeps interval/confidence columns present even when calibration artifacts are absent
 - Risk level: high (export schema impacts query layer).
-- Current caution: exported player projection columns appear incomplete for `STL`, `BLK`, and `TOV`.
+- Current caution: any new projection column must be reflected in `src/contracts/projections.py` and query fixtures before it is considered complete.
 
 ### `src/simulation/input_health.py`
 
@@ -465,6 +511,8 @@ These are important but secondary to the main orchestration files above.
 - Role: backtest metrics and result types.
 - Key types: `BacktestResult`, `TargetMetrics`, `compute_target_metrics`.
 - Tracks: MAE, RMSE, R², MAPE, calibration (P10/P90), bias, prediction interval coverage.
+- **New**: `calculate_empirical_crps()` — fast O(n log n) CRPS via Gini mean difference. Evaluates probabilistic forecast quality (lower is better). Used by `optimize_variance.py`.
+- **New**: `backtest_result_to_json_dict(result)` — stable JSON serializer for `BacktestResult` payloads. Produces `{"targets": {...}, "overall": {...}}`. Used by `backtest.py --json-output` and any downstream tool that consumes backtest metrics without scraping terminal output. Tolerant to dataclass and `__dict__`-shaped inputs.
 - Risk level: medium.
 
 ### `src/evaluation/backtest_runner.py`
@@ -487,7 +535,7 @@ These are important but secondary to the main orchestration files above.
 - Role: versioned JSON weight storage with atomic writes and rollback.
 - Key types: `WeightStore`, `EnsembleWeights`, `TargetBlend`.
 - Replaces opaque binary `blend_weights.pkl` with human-readable versioned JSON.
-- Default location: `data/weights/` with `current.json` pointer.
+- Default location: `models/blend_weights/` with `current.json` pointer. The legacy `blend_weights.pkl` (next to it under `models/`) is still written by `TrainingPipeline._save_blend_weights()` for backward compatibility with `validate_runtime_artifacts()`, and `WeightStore.migrate_from_legacy()` reads from it on first run. (Earlier brain revisions called this `data/weights/` — corrected 2026-06-04 to match the actual default.)
 - Risk level: medium — is the single source of truth for active ensemble weights.
 
 ### `src/evaluation/drift_detector.py`
@@ -501,6 +549,32 @@ These are important but secondary to the main orchestration files above.
 ### `src/evaluation/__init__.py`
 
 - Re-exports: `BacktestResult`, `TargetMetrics`, `BacktestRunner`.
+- **New (2026-06-04)**: re-exports the smart feature selection types — `AblationReport`, `FeatureGroupAblator`, `GroupScore`, `SHADOW_COLUMNS`, `ShadowFeatureFilter`, `ShadowFilterResult`, `ProfileConfig`, `SelectionManifest`, `SelectorConfig`, `SmartFeatureSelector`, `TargetSelection`, `load_manifest`.
+
+### `src/evaluation/feature_group_ablation.py` (NEW — 2026-06-04)
+
+- Role: train-and-compare loop that scores feature groups by per-target MAE delta.
+- Key types: `FeatureGroupAblator`, `AblationReport`, `GroupScore`, `filter_group_columns`.
+- High-value method: `FeatureGroupAblator.run(df, feature_cols, group_columns, targets, val_ratio, min_gain)` — trains a baseline `HistGradientBoostingRegressor` plus a leave-one-out model per group, then averages MAE deltas across targets.
+- `AblationReport.average_score_by_group()` provides the broadcast scores that feed `SmartFeatureSelector._backtest_gain_per_feature`.
+- Risk level: low to medium. Uses sklearn models (not CatBoost) for speed — results are an approximation, not the exact CatBoost gain.
+
+### `src/evaluation/shadow_feature_filter.py` (NEW — 2026-06-04)
+
+- Role: cheap supervised screening that uses random control columns as a noise floor.
+- Key types: `ShadowFeatureFilter`, `ShadowFilterResult`, `ShadowImportance`, `SHADOW_COLUMNS`.
+- Inject columns: `SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET`.
+- Drops real features whose importance falls below the median shadow importance.
+- Risk level: low. Pure sklearn — no GPU/CatBoost dependency.
+
+### `src/evaluation/smart_feature_selector.py` (NEW — 2026-06-04)
+
+- Role: combines 5 signals into a per-target final score and writes a per-target `SelectionManifest`.
+- Key types: `SmartFeatureSelector`, `ProfileConfig`, `SelectorConfig`, `SelectionManifest`, `TargetSelection`, `WEIGHTS`, `load_manifest`.
+- Final score: `0.40 * backtest_gain + 0.25 * stability + 0.20 * catboost_importance + 0.10 * permutation_importance - 0.05 * missingness_penalty`.
+- Profiles: `fast` (group ablation only), `balanced` (group ablation + per-target pruning + shadow filter), `max_accuracy` (everything + time-stability check).
+- Output: `models/feature_selection_manifest.json` with `selected_features_by_target`, `selected_features_global`, per-target scores, dropped features, shadow-dropped features, and metadata.
+- Risk level: low to medium. `WEIGHTS` are documented as the ticket spec; revisit if signals prove noisy on real data.
 
 ## Query Layer
 
@@ -520,7 +594,7 @@ These are important but secondary to the main orchestration files above.
 
 - Loads the latest projection export and enriches it for query use.
 - High-value methods:
-  - `load_projections`
+  - `load_projections` — calls `validate_projection_frame(...)` on every load; raises the typed `ProjectionSchemaContractError` if the CSV is missing distribution, interval/confidence, or `DATA_QUALITY` columns. Legacy CSVs (pre-2026-06-12) are no longer loadable without regeneration.
   - `find_player`
   - `_row_to_projection`
   - `get_recent_games`
@@ -537,14 +611,53 @@ These are important but secondary to the main orchestration files above.
 - High-value methods:
   - `calculate_from_projection`
   - `run_monte_carlo_simulation`
+  - `run_copula_simulation` — correlated multi-stat draws via archetype copula (NEW)
   - `evaluate_calibration`
+- Accepts optional `CovarianceCache`; lazy-loads default on first use.
 - Well-covered by tests relative to other areas.
 - Risk level: medium.
+
+### `src/query/distribution_fitter.py` (NEW — 2026-05-21)
+
+- Derives distribution parameters from P10/P50/P90 quantile outputs.
+- Key types: `DistributionFitter`, `StatDistribution` (mean, std, skew, zero_prob, lambda_param).
+- Continuous stats → skew-normal approximation. Count stats → ZIP approximation.
+- Used by `ReportGenerator._enrich_with_distributions()` and `ProbabilityCalculator.run_copula_simulation()`.
+- Risk level: low. Pure math, no external dependencies.
+
+### `src/query/empirical_covariance.py` (NEW — 2026-05-21)
+
+- Archetype-conditioned 6x6 correlation matrices from residual analysis.
+- Key types: `CovarianceCache` — `build_and_save()`, `load()`, `get_correlation()`.
+- PSD-clipped eigenvalues ensure valid Cholesky decomposition for copula simulation.
+- Falls back to identity matrix when archetype or cache unavailable.
+- Persisted to `data/cache/archetype_covariances.npz`.
+- Risk level: low to medium. Non-fatal fallback to identity.
 
 ### `src/query/query_parser.py`
 
 - Parses user phrases into supported query operations.
 - Risk level: medium.
+
+## Contracts Layer (NEW — 2026-06-04)
+
+### `src/contracts/`
+
+- Role: inter-step artifact contract validation. The seam that lets training, simulation, optimizer, and selector swap independently while keeping a single source of truth on what each step must produce and consume.
+- Important modules:
+  - `artifacts.py` — `ArtifactContract` (frozen dataclass: `models_dir`, `transformer_required`, `max_age_hours`) + `validate_runtime_artifacts()`. Canonical target set is the 6 stats: `PTS, REB, AST, STL, BLK, TOV`. Validates per-target `*_catboost.cbm` and `*_metadata.joblib`, plus the shared `feature_schema.pkl`, `feature_cols.pkl`, `blend_weights.pkl`, `model_stack_metadata.pkl`, and (when transformer required) `attention_transformer.pkl`. Also unpickles `model_stack_metadata.pkl` and verifies its `targets` field matches the canonical set.
+  - `features.py` — `FeatureSchema` contract used by `FeatureSelector` and the trainer to align training-time and inference-time feature layouts.
+  - `projections.py` — `validate_projection_csv()` checks the `player_projections_*.csv` schema, including `DATA_QUALITY`, all six stat distribution columns, and all residual interval/confidence columns.
+  - `schedule.py` — schedule input contract for the simulator.
+  - `errors.py` — `ContractError` base + `ArtifactContractError`, `FeatureSchemaContractError`, `ProjectionSchemaContractError`, `ScheduleContractError` typed exceptions.
+  - `__init__.py` — re-exports the five error types.
+- Risk level: medium — this is the contract seam for the whole pipeline; any new mandatory artifact or schema change must be added here in lockstep with the producers and consumers.
+
+### `check_contracts.py` (root)
+
+- Role: standalone CLI to validate the artifact contract and projection CSV between pipeline steps.
+- CLI: `python check_contracts.py [--models-dir models] [--projection-csv <path>] [--transformer-required]`. Exits 0 on success, raises the typed `ContractError` on failure and prints a human-readable summary.
+- Both `train.py` and `simulate_season.py` invoke `validate_runtime_artifacts()` at startup. `train.py` re-invokes it at the bottom of its flow as a post-train check (DR-031, 2026-06-04). Use `check_contracts.py` to debug contract failures in isolation.
 
 ## Pipeline Compatibility Layer
 
@@ -564,6 +677,7 @@ These are important but secondary to the main orchestration files above.
 - Owns `FeatureSchema`, selectors, fallback predictors, and temporal weighting helpers.
 - High-risk because training and inference compatibility depend on it.
 - `src/utils/__init__.py` re-exports `FeatureSchema` and the other shared helpers so compatibility-sensitive callers can import from the package namespace too.
+- **New (2026-06-04)**: `FeatureSelector.select_features_for_target(df, target, allowed_features=None)` — builds a target-specific `FeatureSchema` from an allow-list. When `allowed_features` is provided, the leakage-safe filter is skipped (trusting the upstream smart selector) but the schema still drops non-numeric / unsafe columns. When `allowed_features` is None, the call falls through to the existing `select_features()` path.
 
 ## Tests
 
@@ -576,6 +690,7 @@ These are important but secondary to the main orchestration files above.
   - model wrappers
   - query logic
   - portions of simulation
+  - **smart feature selection** (`tests/test_evaluation/`) — new in 2026-06-04
 - Coverage gaps:
   - live scraper behavior
   - schedule-scraper runtime health
@@ -590,6 +705,8 @@ These are important but secondary to the main orchestration files above.
   - `tests/test_training/test_training_pipeline_colab.py`
   - `tests/test_training/test_nn_trainer.py`
   - `tests/test_models/test_transformer_model.py` — now includes config, zero-padding, and regression tests for the transformer sequence builder
+  - **`tests/test_evaluation/test_smart_feature_selector.py` (NEW)** — covers the `SmartFeatureSelector` end-to-end (manifest round-trip, per-target pruning, shadow filter integration, group ablation, time stability, `load_manifest`).
+  - **`tests/test_evaluation/test_backtest_json_output.py` (NEW)** — covers `backtest_result_to_json_dict` for both dataclass and `__dict__`-shaped inputs and the `overall` aggregate calculation.
 
 ## Generated State And Non-Source Directories
 
@@ -619,7 +736,7 @@ These are important but secondary to the main orchestration files above.
   - currently empty
   - do not assume it owns anything yet
 - `src/evaluation/`
-  - now contains 5 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`
+  - now contains 8 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`, `feature_group_ablation.py`, `shadow_feature_filter.py`, `smart_feature_selector.py`
   - no longer a placeholder
 - `plans/`, `cline_docs/`, and local PDFs
   - useful historical context, not active runtime code

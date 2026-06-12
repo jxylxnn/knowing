@@ -58,7 +58,7 @@ def test_season_simulator_aggregates_optional_degraded_inputs():
         'details': {},
     })
 
-    games_df = pd.DataFrame([{'HOME_TEAM': 'LAL', 'AWAY_TEAM': 'BOS', 'GAME_DATE': '2024-01-01'}])
+    games_df = pd.DataFrame([{'GAME_ID': '0022300001', 'HOME_TEAM': 'LAL', 'AWAY_TEAM': 'BOS', 'GAME_DATE': '2024-01-01'}])
     results = simulator.simulate_games(games_df, num_sims=10, max_workers=1)
 
     assert len(results) == 1

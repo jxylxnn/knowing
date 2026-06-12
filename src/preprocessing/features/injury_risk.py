@@ -97,25 +97,28 @@ class InjuryRiskFeatureGroup(FeatureGroup):
         # Load injury history
         injury_hist = self._load_injury_history()
 
-        # Build career injury count per player (cumulative, shifted)
-        if not injury_hist.empty and 'PLAYER_ID' in injury_hist.columns:
-            injury_counts = (
-                injury_hist[injury_hist['PLAYER_ID'].notna()]
-                .groupby('PLAYER_ID').size()
-                .rename('INJURY_RISK_CAREER_COUNT_raw')
-            )
-            df = df.merge(
-                injury_counts,
-                left_on='PLAYER_ID',
-                right_index=True,
+        # Build career injury count per player, counting only injuries that
+        # occurred before the current game date to avoid future leakage.
+        if not injury_hist.empty and 'PLAYER_ID' in injury_hist.columns and 'DATE' in injury_hist.columns:
+            valid_hist = injury_hist[
+                injury_hist['PLAYER_ID'].notna() & injury_hist['DATE'].notna()
+            ].copy()
+            tmp = df.reset_index(drop=False).rename(columns={'index': '_orig_idx'})
+            merged = tmp[['_orig_idx', 'PLAYER_ID', 'GAME_DATE']].merge(
+                valid_hist[['PLAYER_ID', 'DATE']],
+                on='PLAYER_ID',
                 how='left',
             )
-            df['INJURY_RISK_CAREER_COUNT_raw'] = df['INJURY_RISK_CAREER_COUNT_raw'].fillna(0)
+            merged = merged[merged['DATE'] < merged['GAME_DATE']]
+            career_counts = merged.groupby('_orig_idx').size()
+            tmp['INJURY_RISK_CAREER_COUNT_raw'] = (
+                tmp['_orig_idx'].map(career_counts).fillna(0)
+            )
             # Shift within player group so we never see today's injury
-            df['INJURY_RISK_CAREER_COUNT'] = df.groupby('PLAYER_ID')[
+            tmp['INJURY_RISK_CAREER_COUNT'] = tmp.groupby('PLAYER_ID')[
                 'INJURY_RISK_CAREER_COUNT_raw'
             ].shift(1).fillna(0)
-            df = df.drop(columns=['INJURY_RISK_CAREER_COUNT_raw'])
+            df = tmp.drop(columns=['_orig_idx', 'INJURY_RISK_CAREER_COUNT_raw'])
         else:
             df['INJURY_RISK_CAREER_COUNT'] = 0.0
 

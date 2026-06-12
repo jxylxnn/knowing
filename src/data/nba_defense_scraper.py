@@ -454,7 +454,10 @@ class NBADefenseScraper:
         all_teams = self.get_all_team_defense(season)
         
         if team_abbr in all_teams:
-            return all_teams[team_abbr]
+            result = dict(all_teams[team_abbr])
+            if 'pts_allowed_per_100' in result and 'opp_pts_per_100' not in result:
+                result['opp_pts_per_100'] = result['pts_allowed_per_100']
+            return result
         
         cache_key = f"{team_abbr}_{season}"
         cache_file = os.path.join(self.cache_dir, f"defense_{cache_key}.json")

@@ -2,6 +2,9 @@ import os
 import re
 import logging
 from dataclasses import dataclass
+
+from src.contracts.errors import ProjectionSchemaContractError
+from src.contracts.projections import validate_projection_frame
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime
@@ -184,6 +187,7 @@ class ProjectionLoader:
         
         try:
             self._projections_cache = pd.read_csv(projection_file)
+            validate_projection_frame(self._projections_cache)
             self._cache_file = str(projection_file)
             self._last_load_time = datetime.now()
             self._build_player_index()
@@ -191,6 +195,8 @@ class ProjectionLoader:
             logger.info(f"Loaded {len(self._projections_cache)} projections from {projection_file.name}")
             return self._projections_cache
             
+        except ProjectionSchemaContractError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load projections: {e}")
             return pd.DataFrame()

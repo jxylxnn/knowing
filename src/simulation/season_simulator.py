@@ -6,6 +6,7 @@ from tqdm import tqdm
 from typing import List, Dict, Any
 from src.simulation.game_simulator import GameSimulator
 from src.data.schedule_scraper import ScheduleScraper
+from src.contracts.schedule import schedule_rows_to_games
 from src.simulation.input_health import summarize_input_health
 
 logger = logging.getLogger(__name__)
@@ -94,8 +95,9 @@ class SeasonSimulator:
         if missing_cols:
             raise ValueError(f"Missing required columns in games_df: {missing_cols}")
         
+        games = schedule_rows_to_games(games_df)
         results = []
-        logger.info(f"Simulating {len(games_df)} games with {num_sims} simulations each (GPU Mode)...")
+        logger.info(f"Simulating {len(games)} games with {num_sims} simulations each (GPU Mode)...")
 
         # Prepare context once
         self.game_simulator.prepare_simulation_context()
@@ -111,12 +113,12 @@ class SeasonSimulator:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_game = {
                     executor.submit(
-                        self.game_simulator.simulate_matchup, 
-                        row['HOME_TEAM'], 
-                        row['AWAY_TEAM'], 
+                        self.game_simulator.simulate_matchup,
+                        game.home_team,
+                        game.away_team,
                         num_sims,
-                        row.get('GAME_DATE')
-                    ): row for _, row in games_df.iterrows()
+                        game.game_date,
+                    ): game for game in games
                 }
 
                 completed = 0
@@ -125,41 +127,41 @@ class SeasonSimulator:
                     try:
                         sim_result = future.result()
                         if sim_result and 'error' not in sim_result:
-                            sim_result['game_id'] = game_row.get('GAME_ID', 'UNK')
-                            sim_result['status'] = game_row.get('STATUS', 'Scheduled')
-                            sim_result['date'] = game_row.get('GAME_DATE', '')
+                            sim_result['game_id'] = game_row.game_id
+                            sim_result['status'] = 'Scheduled'
+                            sim_result['date'] = game_row.game_date
                             results.append(sim_result)
                             completed += 1
-                            print(f"Simulation Complete: {game_row['AWAY_TEAM']} @ {game_row['HOME_TEAM']} ({completed}/{len(future_to_game)})", flush=True)
+                            print(f"Simulation Complete: {game_row.away_team} @ {game_row.home_team} ({completed}/{len(future_to_game)})", flush=True)
                         else:
-                            logger.warning(f"Simulation failed for {game_row['AWAY_TEAM']} @ {game_row['HOME_TEAM']}: {sim_result.get('error') if sim_result else 'Unknown'}")
+                            logger.warning(f"Simulation failed for {game_row.away_team} @ {game_row.home_team}: {sim_result.get('error') if sim_result else 'Unknown'}")
                     except Exception as e:
-                        logger.error(f"Error simulating {game_row['AWAY_TEAM']} @ {game_row['HOME_TEAM']}: {e}", exc_info=True)
+                        logger.error(f"Error simulating {game_row.away_team} @ {game_row.home_team}: {e}", exc_info=True)
         else:
             # Sequential execution (Best for GPU)
             logger.info("Running simulations sequentially (Single-threaded / Optimized for GPU)...")
-            total_games = len(games_df)
-            for idx, (_, row) in enumerate(games_df.iterrows(), 1):
+            total_games = len(games)
+            for idx, game in enumerate(games, 1):
                 try:
                     sim_result = self.game_simulator.simulate_matchup(
-                        row['HOME_TEAM'], 
-                        row['AWAY_TEAM'], 
+                        game.home_team,
+                        game.away_team,
                         num_sims,
-                        row.get('GAME_DATE')
+                        game.game_date,
                     )
                     
                     if sim_result and 'error' not in sim_result:
-                        sim_result['game_id'] = row.get('GAME_ID', 'UNK')
-                        sim_result['status'] = row.get('STATUS', 'Scheduled')
-                        sim_result['date'] = row.get('GAME_DATE', '')
+                        sim_result['game_id'] = game.game_id
+                        sim_result['status'] = 'Scheduled'
+                        sim_result['date'] = game.game_date
                         results.append(sim_result)
-                        print(f"Simulation Complete: {row['AWAY_TEAM']} @ {row['HOME_TEAM']} ({idx}/{total_games})", flush=True)
+                        print(f"Simulation Complete: {game.away_team} @ {game.home_team} ({idx}/{total_games})", flush=True)
                     else:
-                        logger.warning(f"Simulation failed for {row['AWAY_TEAM']} @ {row['HOME_TEAM']}: {sim_result.get('error') if sim_result else 'Unknown'}")
+                        logger.warning(f"Simulation failed for {game.away_team} @ {game.home_team}: {sim_result.get('error') if sim_result else 'Unknown'}")
                 except Exception as e:
-                    logger.error(f"Error simulating {row['AWAY_TEAM']} @ {row['HOME_TEAM']}: {e}", exc_info=True)
+                    logger.error(f"Error simulating {game.away_team} @ {game.home_team}: {e}", exc_info=True)
 
-        self._finalize_run_summary(results, len(games_df))
+        self._finalize_run_summary(results, len(games))
         return results
 
     def simulate_today(self, num_sims: int = 100, max_workers: int = 1) -> List[Dict[str, Any]]:

@@ -629,6 +629,17 @@ class GameSimulator(SimCacheMixin):
         for stat in self.STAT_NAMES:
             proj[f'mean_{stat.lower()}'] = means[stat]
             proj[f'std_{stat.lower()}'] = stds[stat]
+            for conf in (80, 90):
+                proj[f'{stat.lower()}_interval_{conf}_low'] = pred_row.get(
+                    f'{stat}_INTERVAL_{conf}_LOW',
+                    np.nan,
+                )
+                proj[f'{stat.lower()}_interval_{conf}_high'] = pred_row.get(
+                    f'{stat}_INTERVAL_{conf}_HIGH',
+                    np.nan,
+                )
+            proj[f'{stat.lower()}_confidence'] = pred_row.get(f'{stat}_CONFIDENCE', 'NO_EDGE')
+            proj[f'{stat.lower()}_confidence_score'] = pred_row.get(f'{stat}_CONFIDENCE_SCORE', 0.0)
         return proj
 
     def _get_matchup_seed(self, team_a, team_b, num_sims, seed=None):
@@ -848,8 +859,8 @@ class GameSimulator(SimCacheMixin):
         def_adj_a = defense_result_a['data']
         def_adj_b = defense_result_b['data']
 
-        preds_a = self.manager.predict_player_stats_batch(ctx_a, hist_a)
-        preds_b = self.manager.predict_player_stats_batch(ctx_b, hist_b)
+        preds_a = self.manager.predict_player_stats_batch(ctx_a, hist_a, include_confidence=True)
+        preds_b = self.manager.predict_player_stats_batch(ctx_b, hist_b, include_confidence=True)
         if preds_a.empty or preds_b.empty:
             return {'error': 'Model predictions unavailable'}
 
@@ -1132,10 +1143,12 @@ class GameSimulator(SimCacheMixin):
             simulations.append(game)
 
         player_averages = []
+        projection_by_name = {p['name']: p for p in roster_a + roster_b}
         for name, stats in results['player_stats'].items():
             played = stats['played']
             pa = {'name': name, 'team': stats['team'], 'play_probability': stats['play_probability'],
                   'games_played_pct': played.mean() * 100}
+            source_player = projection_by_name.get(name, {})
             for stat in self.STAT_NAMES:
                 sl = stat.lower()
                 pa[sl] = round(float(stats[sl].mean()), 1)
@@ -1143,6 +1156,12 @@ class GameSimulator(SimCacheMixin):
                 pa[f'{sl}_95_ci'] = [round(float(np.percentile(stats[sl], 2.5)), 1), round(float(np.percentile(stats[sl], 97.5)), 1)]
                 pa[f'{sl}_99_ci'] = [round(float(np.percentile(stats[sl], 0.5)), 1), round(float(np.percentile(stats[sl], 99.5)), 1)]
                 pa[f'{sl}_std'] = round(float(stats[sl].std()), 2)
+                pa[f'{sl}_interval_80_low'] = source_player.get(f'{sl}_interval_80_low', np.nan)
+                pa[f'{sl}_interval_80_high'] = source_player.get(f'{sl}_interval_80_high', np.nan)
+                pa[f'{sl}_interval_90_low'] = source_player.get(f'{sl}_interval_90_low', np.nan)
+                pa[f'{sl}_interval_90_high'] = source_player.get(f'{sl}_interval_90_high', np.nan)
+                pa[f'{sl}_confidence'] = source_player.get(f'{sl}_confidence', 'NO_EDGE')
+                pa[f'{sl}_confidence_score'] = source_player.get(f'{sl}_confidence_score', 0.0)
             player_averages.append(pa)
 
         return {

@@ -412,7 +412,7 @@ class TestGameSimulatorUpgrade:
                 return ctx_a, hist_a, info_a
             return ctx_b, hist_b, info_b
 
-        def predict_batch(context_df, histories_map):
+        def predict_batch(context_df, histories_map, include_confidence=False):
             team = context_df.iloc[0]['TEAM_ABBREVIATION']
             return pred_a if team == 'LAL' else pred_b
 
@@ -501,7 +501,7 @@ class TestGameSimulatorUpgrade:
                 return ctx_a, hist_a, info_a
             return ctx_b, hist_b, info_b
 
-        def predict_batch(context_df, histories_map):
+        def predict_batch(context_df, histories_map, include_confidence=False):
             return pred_a if context_df.iloc[0]['TEAM_ABBREVIATION'] == 'LAL' else pred_b
 
         with patch.object(simulator, 'prepare_simulation_context'), \

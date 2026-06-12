@@ -4,6 +4,8 @@ This file records confirmed or strongly inferred architectural decisions visible
 
 When a decision is labeled "inferred", it means the repo shows a clear implementation choice but does not contain explicit historical rationale.
 
+> **Numbering note (2026-06-04)**: DR-020 and DR-021 are each used twice in this file (DR-020 appears once for the Batch-1 feature groups and again for the deterministic playstyle templates; DR-021 appears once for the Transformer seq_len/zero-padding work and again for the self-optimizing ensemble weight system). DR-022 is missing. The duplicates and the gap were preserved rather than renumbered to avoid churning cross-references in `CODE_RULES.md`, `ARCHITECTURE.md`, and the existing TASK log. New decisions should pick the next unused number (DR-029 for the contracts layer).
+
 ---
 
 ## DR-020: Batch-1 Feature Groups — Minutes Confidence, Recency Form, Lineup Stability, Rest Density
@@ -1239,3 +1241,328 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 
 - If actual team injury/rest data becomes available, the tanking/load-management proxy can be replaced with real load-management tracking.
 - If the 30-day cap on `DAYS_SINCE_SEASON_START` proves too tight or too loose for the early-season effect, adjust the cap based on empirical validation.
+
+---
+
+## DR-027: Distribution Fitter, Empirical Copula, and CRPS-Based Variance Optimization
+
+- Status: active
+- Date: 2026-05-21
+- Confidence: high
+
+### Context
+
+- The existing probability system used per-stat projections (mean, std) with independent Monte Carlo draws, ignoring correlation between stats (e.g., high AST correlates with high TOV).
+- The existing ensemble optimizer (`optimize_weights.py`) tuned the *mean* (MAE/RMSE) but not the *variance* — volatility context multipliers (B2B, playoff, etc.) were fixed at 1.0.
+- Quantile model outputs (P10/P50/P90) were generated during training but not used to derive full distribution parameters for downstream consumers.
+- The Nexus model's copula head could produce correlated draws, but Nexus was not (and may never be) the active training path.
+
+### Options Considered
+
+1. Block entirely on Nexus copula head being wired into the active pipeline.
+2. Build a lightweight empirical copula using archetype-conditioned residual correlations + Gaussian copula, with distribution parameters derived from quantile outputs.
+3. Keep independent Monte Carlo (no correlation) — simplest but least accurate.
+
+### Decision
+
+- Option 2: lightweight empirical copula pipeline.
+- `DistributionFitter` derives Std/Skew/Zero-Prob/Lambda from P10/P50/P90 quantile outputs (no Nexus needed).
+- `CovarianceCache` computes 6x6 archetype-conditioned correlation matrices from historical residuals (actual - projected).
+- `ProbabilityCalculator.run_copula_simulation()` generates correlated multi-stat draws via Gaussian copula (Cholesky + inverse CDF per stat).
+- `calculate_empirical_crps()` in metrics.py provides the objective function for variance optimization.
+- `optimize_variance.py` tunes 7 context-specific volatility multipliers via scipy Nelder-Mead using CRPS.
+- `ReportGenerator._enrich_with_distributions()` writes distribution params into every projection CSV export.
+
+### Tradeoffs
+
+- Empirical copula needs historical data to build residual matrices — cold-start archetypes fall back to identity matrix.
+- CRPS optimization is per-target and independent of the mean optimizer — two-step tuning (mean then variance).
+- Distribution parameters derived from P10/P50/P90 are an approximation, not the exact posterior from a full copula head.
+- Lightweight and testable — no neural network training required.
+
+### Consequences
+
+- New entry point: `optimize_variance.py`.
+- New modules: `distribution_fitter.py` (86 lines), `empirical_covariance.py` (135 lines).
+- Modified: `probability_calculator.py` (run_copula_simulation + CovarianceCache support), `metrics.py` (CRPS), `report_generator.py` (distribution enrichment).
+- Projection CSVs now carry `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` columns for all 6 stats.
+- Archetype correlation matrices cached to `data/cache/archetype_covariances.npz`.
+- Full test suite: `169 passed, 0 failed`.
+
+### Revisit Triggers
+
+- If the empirical copula proves insufficiently accurate compared to the Nexus copula head, wire Nexus into the active pipeline and deprecate the empirical engine.
+- If 7 CRPS context multipliers per target are too many to optimize reliably, reduce the parameter space or share multipliers across related stats.
+- If the `calculate_empirical_crps()` approximation (Gini mean difference) diverges from exact CRPS, switch to the exact O(n²) computation for small-n regimes.
+
+---
+
+## DR-028: Smart Per-Target Feature Selection
+
+- Status: active
+- Date: 2026-06-04
+- Confidence: high
+
+### Context
+
+- The 26 feature groups produce a feature matrix that grew to 150+ columns. Empirically, only a subset is useful per stat — `STL` and `BLK` benefit from lineup/role signals but not from pace or efficiency signals, while `PTS` and `AST` benefit from usage signals. Training all 6 targets on the full feature set wastes capacity on noise and risks overfitting on weak signals.
+- There is no per-target feature list — every CatBoost model sees the same `self.feature_cols` list.
+- Existing tools (`optimize_weights.py`, `optimize_variance.py`) tune the mean and variance after training but cannot undo a feature set that includes strong noise.
+- Manual feature pruning doesn't scale — different game contexts (regular vs playoff, early vs late season) need different subsets.
+
+### Options Considered
+
+1. Block on a separate feature-pruning research project that uses CatBoost importance + a held-out backtest loop.
+2. Build a self-contained `SmartFeatureSelector` that combines 5 signals (group ablation, per-target pruning, shadow filtering, stability, missingness) into a per-target feature score, runnable from `train.py` with one CLI flag.
+3. Keep the canonical `self.feature_cols` list and rely on CatBoost's built-in L2/regularization.
+
+### Decision
+
+- Option 2: a self-contained selector with a documented signal weight recipe and a profile-driven stage gate.
+- `FeatureGroupAblator` produces per-group MAE deltas (backtest_gain signal, 40% weight).
+- `SmartFeatureSelector._per_target_signals` runs an 80/20 temporal split, fits a fast `HistGradientBoostingRegressor`, and records catboost-style gain importance (20%), permutation importance (10%), and stability (correlation between gain importances on the first vs second half of training data, 25%).
+- A missingness penalty (5%, subtracted) drops features with too many NaN/zero rows.
+- `ShadowFeatureFilter` injects `SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET` control columns and uses their median importance as a noise floor.
+- Profile gating: `fast` (group ablation only), `balanced` (+ per-target pruning + shadow filter), `max_accuracy` (+ time-stability check).
+- The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` and `TrainingPipeline.apply_feature_selection_manifest()` parses it for the current run.
+- `ModelManager` now bootstraps `EnsembleWeights` from `WeightStore` at load time (so the runtime uses data-driven weights even before `optimize_weights.py` runs). `TrainingPipeline._save_blend_weights()` also writes the training-time blend to `WeightStore`.
+- `backtest_result_to_json_dict()` exposes a stable JSON contract for downstream tooling.
+
+### Tradeoffs
+
+- `HistGradientBoostingRegressor` is faster than CatBoost but the gain importances don't exactly match the production trainer. The selector's score is a useful approximation, not a final answer.
+- Per-target lists double the per-target feature bookkeeping. The manifest JSON is the source of truth, but if the manifest goes missing, the pipeline falls back to the canonical `self.feature_cols` list — there is no error.
+- Profile gating trades coverage for runtime: `max_accuracy` adds a second temporal sub-split for stability, which roughly doubles selector runtime.
+- The signal-weight recipe (`WEIGHTS` in `smart_feature_selector.py`) is fixed in code. If the signals prove miscalibrated, both the weights and the test assertions need to move in lockstep.
+- WeightStore bootstrap in `ModelManager` is non-fatal — if no `current.json` exists, the legacy `blend_weights.pkl` blend stands. The bootstrap doesn't validate that the versioned weights are *better* than the legacy blend.
+
+### Consequences
+
+- New CLI flags: `train.py --feature-selection {off,smart}`, `train.py --selection-profile {fast,balanced,max_accuracy}`.
+- New YAML config: `feature_selection:` and `feature_selection_profiles:` blocks in `config/default.yaml`.
+- `Config` dataclass carries `feature_selection` and `feature_selection_profiles`.
+- `TrainingPreset` carries optional `feature_selection` and `feature_selection_profile` fields.
+- `TrainingPipeline` carries `target_feature_cols`, `feature_selection_manifest`, `feature_selection_profile`, `feature_selection_config`. `_feature_cols_for_target(target)` returns the per-target list with fallback to `self.feature_cols`.
+- `model_stack_metadata.pkl` records `feature_selection_enabled`, `feature_selection_target_specific`, `feature_selection_profile`, and `selected_features_by_target` when smart selection ran.
+- `FeatureSelector.select_features_for_target(df, target, allowed_features=None)` accepts an allow-list and skips the leakage-safe filter when the upstream selector already validated the columns.
+- `ModelManager.load_models()` bootstraps `EnsembleWeights` from `WeightStore` after the legacy blend is loaded.
+- `backtest.py --json-output <path>` writes a stable machine-readable JSON payload.
+- New modules: `feature_group_ablation.py` (289 lines), `shadow_feature_filter.py` (279 lines), `smart_feature_selector.py` (680 lines).
+- New test files: `tests/test_evaluation/test_smart_feature_selector.py` (19 tests), `tests/test_evaluation/test_backtest_json_output.py` (1 test).
+
+### Revisit Triggers
+- If the 5-signal score proves noisy on real data, retune `WEIGHTS` and the test assertions together. Do not change one without the other.
+- If `HistGradientBoostingRegressor` importances diverge too much from CatBoost's, switch the per-target signal to a small CatBoost trainer (slower but closer to production).
+
+---
+
+## DR-029: Add a Contracts Layer for Inter-Step Artifact Validation
+
+- Status: active
+- Date: 2026-06-04
+- Confidence: high
+
+### Context
+
+- The pipeline is a sequence of CLI steps (`update_data.py` → `train.py` → `simulate_season.py` → `query_prob.py`) connected entirely by file-based artifacts in `data/` and `models/`.
+- DR-007 (2026-04-01) established that the training-to-runtime artifact contract must be enforced at both boundaries, but the contract was implemented as ad hoc file existence checks scattered across `train.py`, `simulate_season.py`, `ModelManager`, `TrainingPipeline`, and the loader.
+- The self-optimizing loop (DR-021, 2026-05-09) and the smart per-target feature selector (DR-028, 2026-06-04) introduce more contract-shaped artifacts (`models/blend_weights/current.json`, `models/feature_selection_manifest.json`). The training/runtime code path now depends on the union of these contracts but has no single source of truth.
+- Scrapers drift, retraining can land on a different feature set, and the optimizer writes a new weight version — all of these are seam failures that are hard to attribute when the contract checks are scattered.
+
+### Options Considered
+
+1. Keep adding per-call-site `os.path.exists()` checks and accept the drift between training, simulation, and query loaders.
+2. Build a dedicated `src/contracts/` module that owns the canonical contract for each artifact class (runtime artifacts, projection CSV, feature schema, schedule input) and is invoked at every step boundary.
+3. Move contract checks to a third-party schema validator (e.g., pydantic, jsonschema) and treat the contracts as data, not code.
+
+### Decision
+
+- Option 2: a dedicated `src/contracts/` module with one file per artifact class, plus a typed exception hierarchy in `errors.py`.
+- `contracts/artifacts.py::ArtifactContract` is the canonical list of required runtime artifacts. `validate_runtime_artifacts(contract)` checks the union of: per-target `*_catboost.cbm` + `*_metadata.joblib` for all 6 stats, plus `feature_schema.pkl`, `feature_cols.pkl`, `blend_weights.pkl`, `model_stack_metadata.pkl`, and (when `transformer_required=True`) `attention_transformer.pkl`. It also unpickles `model_stack_metadata.pkl` and verifies its `targets` field matches the canonical 6-stat set. Optional `max_age_hours` enforces staleness.
+- `contracts/projections.py::validate_projection_csv()` checks the `player_projections_*.csv` schema, including the `DATA_QUALITY` column added by DR-025.
+- `contracts/features.py::FeatureSchema` is the single source of truth for training-time and inference-time feature layout.
+- `contracts/schedule.py` validates the schedule input.
+- `contracts/errors.py` defines `ContractError` and the four typed subclasses (`ArtifactContractError`, `FeatureSchemaContractError`, `ProjectionSchemaContractError`, `ScheduleContractError`).
+- Standalone entry: `check_contracts.py` (root) — CLI for debugging contract failures in isolation. Flags: `--models-dir`, `--projection-csv`, `--transformer-required`. Exits 0 on success, raises the typed exception on failure.
+- `train.py` and `simulate_season.py` both invoke `validate_runtime_artifacts()` at startup. `ProjectionLoader` calls `validate_projection_csv()` when loading `player_projections_*.csv`.
+
+### Tradeoffs
+
+- A new module is more code than a single helper, but the typed exceptions and the per-artifact file layout make the seam obvious to future contributors.
+- Adding the contract layer means there is now a third place (alongside training and runtime) where a new mandatory artifact must be registered. CODE_RULES.md mandates updating all three in lockstep.
+- The contract validator currently does not check the `WeightStore` (`models/blend_weights/current.json`) or the smart-selection manifest (`models/feature_selection_manifest.json`) — those are opt-in/optional and have their own validators downstream. Future work may fold them in.
+- DR-022 was supposed to capture this decision but is missing. Recorded here as DR-029 to avoid renumbering existing cross-references.
+
+### Consequences
+
+- New CLI: `python check_contracts.py [--models-dir models] [--projection-csv <path>] [--transformer-required]`.
+- `src/contracts/` is the canonical seam. New mandatory runtime artifacts go in `_required_files()`; new CSV schemas go in `projections.py`; new feature layout rules go in `features.py`.
+- Both `train.py` and `simulate_season.py` now fail fast at startup if the contract is violated, instead of producing partial-success results.
+- `ProjectionLoader` raises `ProjectionSchemaContractError` (typed) on schema mismatch, replacing what was previously a silent fallback.
+- New test: `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
+- When a new artifact is added, CODE_RULES.md mandates updating `src/contracts/`, the producer, and the consumer in the same change.
+
+### Revisit Triggers
+- If the per-artifact file layout becomes unwieldy, consider a single `contracts.py` that owns all schemas declaratively (Option 3 above).
+- If the typed exceptions need richer cross-artifact correlation (e.g., a single report covering all failed contracts), add an aggregator.
+- If the WeightStore and the smart-selection manifest become required runtime artifacts, fold their validators into `validate_runtime_artifacts()`.
+
+
+---
+
+## DR-030: WeightStore Bootstrap in ModelManager.load_models()
+
+- Status: active
+- Date: 2026-06-04
+- Confidence: high
+
+### Context
+
+- The training pipeline produces an `EnsembleWeights` object and persists it via the legacy binary `blend_weights.pkl` (used by the `ModelManager` loader and the `ArtifactContract` validator). DR-021 introduced `WeightStore` for versioned JSON weights, but `ModelManager` still defaulted to the legacy blend at load time.
+- `optimize_weights.py` writes to `WeightStore` rather than to the legacy `blend_weights.pkl`. If `optimize_weights.py` has never been run, the runtime uses the training-time blend, which is the same data the legacy `blend_weights.pkl` carries — but operators who only ran training did not have a way to inspect or hot-reload the blend without restarting the simulator.
+- A new agent on a freshly trained project would discover that the runtime silently uses the training-time blend even when a `current.json` exists in `models/blend_weights/`. There was no explicit path that prefers the versioned blend.
+
+### Options Considered
+
+1. Force operators to run `optimize_weights.py` after every `train.py` run so the versioned blend is the canonical source of truth.
+2. Make `ModelManager.load_models()` non-fatally bootstrap from `WeightStore.current.json` at load time; if a versioned blend exists, override the legacy blend; otherwise keep the legacy blend.
+3. Drop the legacy `blend_weights.pkl` path entirely and require `WeightStore` to be the only source of truth.
+
+### Decision
+
+- Option 2: non-fatal bootstrap from `WeightStore` at `ModelManager.load_models()`.
+- After the legacy `blend_weights.pkl` is loaded, `ModelManager.load_models()` calls `WeightStore.load_current()` and, when the result is non-None, overrides the active blend via `use_ensemble_weights(...)`. The bootstrap is wrapped in a try/except so a broken store is logged and the legacy blend stands.
+- `TrainingPipeline._save_blend_weights()` writes the training-time blend to both the legacy `blend_weights.pkl` (so `ArtifactContract` validation continues to pass) and the versioned `WeightStore` (so the bootstrap path can pick it up on the next load).
+- `WeightStore` remains the single source of truth for hot-reload, accept/verify gates, and rollback. The legacy `blend_weights.pkl` stays as a fallback for fresh process loads that have not yet had the bootstrap fire.
+
+### Tradeoffs
+
+- Two storage locations for the same data is a maintenance hazard. We accept it for now because the legacy path is what `ArtifactContract` validates against, and dropping it would break `validate_runtime_artifacts(...)` until a new contract check is wired in.
+- The bootstrap is non-fatal, so a broken `WeightStore` does not crash simulation. Operators see the legacy blend in use and a `WeightStore bootstrap skipped` debug log line. This trades strictness for the ability to run a fresh simulator with no `WeightStore` on disk.
+- `_blend_requires_transformer()` inspects the active blend weights to decide whether the runtime requires a Transformer artifact; the bootstrap path therefore influences the contract check indirectly.
+
+### Consequences
+
+- New behavior: `ModelManager.load_models()` logs "Bootstrapped ensemble weights vN from WeightStore (score=...)" at INFO when a versioned blend is picked up.
+- `TrainingPipeline._save_blend_weights()` now writes twice (legacy + WeightStore) per training run.
+- Hot-reload via `ModelManager.set_weights()` continues to work — the bootstrap only fires on a fresh load.
+- The decision is cross-referenced from `project-brain/ARCHITECTURE.md` (Flow 2 contract notes), `project-brain/FILE_MAP.md` (ModelManager notes), and `project-brain/CURRENT_STATE.md` (Areas That Need Confirmation, rewritten to status).
+
+### Revisit Triggers
+
+- If `ArtifactContract` is updated to check `WeightStore.current.json` instead of `blend_weights.pkl`, the legacy dual-write can be removed.
+- If `set_weights()` hot-reload proves brittle under concurrent loads, replace the bootstrap with a load-time cache invalidation hook.
+- If the bootstrap debug line becomes noise, gate it behind a verbose flag rather than always-on at INFO.
+
+---
+
+## DR-031: Cross-Boundary Contract Wiring in Production Code Paths
+
+- Status: active
+- Date: 2026-06-04
+- Confidence: high
+
+### Context
+
+- DR-029 introduced the `src/contracts/` layer as the canonical seam, but at the time the contracts lived in the seam file only — the production code paths that should have invoked them did not. The schedule, projection, and feature-schema validators were defined and unit-tested but not called from the read/write paths in the simulator, the projection loader, the report generator, or the model manager.
+- `tests/test_query/test_six_stat_contract.py::test_missing_tov_columns_loads_with_defaults` was a deliberate design choice (legacy CSVs loaded with zero defaults) that no longer matched the new schema reality. The contracts layer cannot succeed if the boundary code does not invoke it.
+- Scrapers and report generators drift, retraining can land on a different feature set, and downstream tools evolve. The contracts layer is the safety net, but it only catches drift if the boundary code consults it.
+
+### Options Considered
+
+1. Trust the contracts layer to catch problems in isolation (e.g., via `check_contracts.py` run ad hoc).
+2. Wire the contract validators into the actual read/write paths in the production code, so the contract is enforced at the seam by construction.
+3. Move all boundary code to a third-party schema library (pydantic, jsonschema) and centralize the validation declaratively.
+
+### Decision
+
+- Option 2: wire the contract validators into the boundary code paths.
+- `src/data/schedule_scraper.py::ScheduleScraper` calls `normalize_schedule_frame(...)` on every read path (cached schedule hit, fresh API, cache fallback, season cache). Empty frames are skipped from normalization.
+- `src/simulation/season_simulator.py::SeasonSimulator.simulate_season` converts the schedule frame to `ScheduleGame` records via `schedule_rows_to_games(...)` before iterating matchups (both ThreadPoolExecutor and sequential paths). The iterator uses the typed `home_team`, `away_team`, `game_date`, `game_id` attributes rather than raw dict lookups.
+- `src/query/projection_loader.py::ProjectionLoader.load_projections` calls `validate_projection_frame(...)` on every load and re-raises the typed `ProjectionSchemaContractError`. Legacy CSVs missing distribution or `DATA_QUALITY` columns are now rejected; the previous default-fallback behavior is gone.
+- `src/simulation/report_generator.py::ReportGenerator.export_player_projections` calls `validate_projection_frame(...)` on the assembled DataFrame before writing the CSV. The CSV schema is strict: 6 stats x 8 columns plus `DATA_QUALITY`.
+- `src/models/model_manager.py::ModelManager.predict_player_stats` calls `load_expected_feature_cols(models_dir)` and `align_feature_frame(df, expected_cols)` before the leakage-safe selector runs, so reordered or extra-column inference frames are coerced to the trained layout.
+- `train.py` calls `validate_runtime_artifacts(ArtifactContract(...))` at the bottom of the training flow as a post-train check, in addition to the `ModelManager` and `simulate_season.py` startup checks.
+- `tests/test_query/test_six_stat_contract.py` is updated: `test_missing_tov_columns_loads_with_defaults` becomes `test_missing_tov_columns_fails_loudly` and asserts the typed exception.
+
+### Tradeoffs
+
+- Strictness is the right default for projection CSVs, but it is a breaking change for any operator with legacy CSVs on disk. The workaround is documented in `KNOWN_BUGS.md` (KB-021) and `PROJECT_CONTEXT.md` (Journey 4) — regenerate from the current `simulate_season.py`.
+- Adding a `load_expected_feature_cols(...)` call in `predict_player_stats` is a one-time inference-frame alignment; in exchange, reordered or extra-column inference frames are now caught at the seam rather than producing subtly wrong predictions.
+- The contract seam is now load-bearing — bypassing it (e.g., a direct `pd.read_csv(...)` in a new consumer) silently produces a result that the contract should have rejected. `CODE_RULES.md` (Contracts Layer) calls this out.
+
+### Consequences
+
+- `ProjectionLoader` raises `ProjectionSchemaContractError` on missing columns; `tests/test_query/test_six_stat_contract.py` guards the load path.
+- `ScheduleScraper` and `SeasonSimulator` can no longer accept malformed schedule frames; the contract catches null or missing `GAME_ID`, `GAME_DATE`, `HOME_TEAM`, `AWAY_TEAM` at the seam.
+- `ModelManager.predict_player_stats` is now defensive about inference frame layout; future drift in the trained feature set is caught at prediction time rather than after the first incorrect batch.
+- `train.py` fails fast if a training run produces an incomplete artifact set, even if the pipeline itself reported success.
+- The decision is cross-referenced from `project-brain/ARCHITECTURE.md` (contracts layer paragraph), `project-brain/CODE_RULES.md` (Contract wiring at seams + Strict projection schema), `project-brain/FILE_MAP.md` (production call-site bullets), and `project-brain/KNOWN_BUGS.md` (KB-021).
+
+### Revisit Triggers
+
+- If the per-call-site validators become unwieldy, consider moving to a central boundary middleware (e.g., a single `validate_artifact(...)` decorator on the seam functions) — Option 3 above.
+- If the strict projection schema blocks legitimate operator workflows, add an explicit `--allow-legacy-csv` flag to `ProjectionLoader.load_projections` that logs a clear warning rather than disabling the validator globally.
+- If the schedule scraper needs to ingest an API that does not match the canonical column shape, add a per-source normalizer under `src/data/normalizers/` rather than relaxing `normalize_schedule_frame(...)`.
+
+---
+
+## DR-032: Residual-Calibrated Confidence Intervals Are JSON Artifacts Loaded Best-Effort
+
+- Status: active
+- Date: 2026-06-12
+- Confidence: high
+
+### Context
+
+- Tickets 1-3 added a residual correction path: build walk-forward residual data, train per-target residual models, and apply corrections during runtime prediction.
+- The next missing capability was uncertainty around corrected predictions. The system already had distribution-enriched projection columns and probability tooling, but it did not have a residual-error calibration layer that could say how wide the prediction range should be after correction.
+- The project is CLI-first and file-based. Any new calibration layer needs to fit the existing local artifact style and must not make simulation unusable when artifacts have not been generated yet.
+
+### Options Considered
+
+1. Fold interval widths into residual model metadata under `models/residual/`.
+2. Create separate JSON interval artifacts under `models/calibration/` and load them best-effort at runtime.
+3. Recompute interval widths directly inside `ModelManager` from the residual parquet on every load.
+
+### Decision
+
+- Option 2: separate JSON calibration artifacts under `models/calibration/`.
+- `calibrate_residual_intervals.py` is the explicit CLI for building these artifacts from `data/evaluation/residual_training.parquet`.
+- `ResidualIntervalCalibrator` writes one `{stat}_intervals.json` file per target plus `calibration_metadata.json`.
+- `CalibrationIntervalStore` loads artifacts non-fatally. Missing files disable interval output; missing bucket falls back to `GLOBAL`; missing stat produces no interval.
+- `ModelManager.predict_player_stats(..., include_confidence=True)` is opt-in. Default prediction output remains backward-compatible.
+- Projection CSVs always include the new interval/confidence columns so the strict query contract remains stable even when calibration is absent.
+
+### Why
+
+- Keeping calibration separate from residual models lets operators rebuild intervals without retraining correction models.
+- JSON artifacts are inspectable and match the repository's file-based persistence style.
+- Best-effort runtime loading prevents a missing optional calibration step from breaking normal simulation.
+- The projection CSV schema must still be strict; optional calibration is represented as blank interval bounds plus `NO_EDGE`, not missing columns.
+
+### Tradeoffs
+
+- There are now two residual-related artifact directories (`models/residual/` and `models/calibration/`), so docs and operator workflows must distinguish point correction from uncertainty calibration.
+- The confidence scorer is intentionally coarse. It is useful for surfacing risk, but it is not a betting recommendation and should not be treated as a calibrated probability by itself.
+- Real empirical coverage is not proven until `calibrate_residual_intervals.py` is run on current residual data and checked against holdout outcomes.
+
+### Consequences
+
+- New files:
+  - `calibrate_residual_intervals.py`
+  - `src/correction/calibration.py`
+  - `src/correction/interval_store.py`
+  - `src/correction/confidence_scorer.py`
+  - `tests/test_correction/test_calibration.py`
+- Updated runtime/export seam:
+  - `ModelManager` loads `models/calibration/` and appends interval keys only when `include_confidence=True`.
+  - `GameSimulator` requests confidence-aware batch predictions.
+  - `ReportGenerator` writes interval/confidence columns for all six stats.
+  - `src/contracts/projections.py` now validates the 6-stat x 14-column projection schema plus confidence labels.
+
+### Revisit Triggers
+
+- If live calibration coverage is materially off target, revise bucket definitions, confidence thresholds, or quantile selection.
+- If probability calculation needs calibrated intervals directly, Ticket 5 should consume these artifacts through `CalibrationIntervalStore` rather than re-reading JSON ad hoc.
+- If operators need backwards-compatible legacy projection loading, add an explicit migration/regeneration command rather than weakening `validate_projection_frame(...)`.

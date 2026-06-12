@@ -2,11 +2,16 @@
 
 ## Snapshot
 
-- Observed date: 2026-05-23
+- Observed date: 2026-06-12
 - Repository health: good
 - Test status in this workspace:
+  - full non-slow suite on 2026-06-12 after bug-fix batch: `pytest -m "not slow" -q` -> `368 passed, 1 skipped, 1 deselected`.
+  - targeted subset on 2026-06-12 after residual interval calibration: `pytest tests/test_correction/ tests/test_query/ tests/test_contracts/ tests/test_simulation/test_game_simulator.py::TestGameSimulatorUpgrade -q` -> `90 passed`.
+  - targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). This is on top of the 2026-06-04 baseline.
+  - full suite after smart feature selection + weight bootstrap (2026-06-04): `313 passed, 1 skipped` (slow tests deselected)
+  - full suite after calibration & probability upgrade (2026-05-21): `169 passed, 0 failed`
   - full suite after season-context feature groups (2026-05-23): `279 passed, 1 skipped`
-  - full suite after lifecycle ML integration (2026-05-22): TBD
+  - full suite after lifecycle ML integration (2026-05-22): `294 passed, 1 skipped`
   - full suite (2026-05-18): `178 passed, 0 failed`
   - full suite after evaluation module + ensemble optimizer: `178 passed, 0 failed`
   - full suite after simulation refactor (phase simulator, archetype, role sampler): `178 passed, 0 failed`
@@ -67,6 +72,17 @@
   - `GameSimulator` and `SeasonSimulator` accept `strict_mode` parameter. Raises `RuntimeError` on degraded optional source when strict.
   - `ReportGenerator.export_player_projections()` appends `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`).
   - `ProjectionLoader.find_player()` surfaces visible CLI warning when loading degraded projections.
+- **Bug-fix batch applied 2026-06-12** (KB-022 through KB-032):
+  - Fixed `TrainingPipeline._save_blend_weights()` crash (`self.targets` -> `self.TARGETS`).
+  - Fixed Transformer runtime inference using categorical ID columns; now aligns to `nn_features = feature_cols - cat_features`.
+  - Fixed pytest torch shim `importlib.util` import failure on PyTorch-less machines.
+  - Fixed `MinutesPredictor` `MINS_LAST_3` rolling-sum misalignment that produced NaN fatigue scores.
+  - Fixed defense scraper key mismatch (`pts_allowed_per_100` vs `opp_pts_per_100`).
+  - Fixed injury scraper missing `TEAM_ABBR` on disk-cache loads and guarded `LineupScraper` against missing column.
+  - Fixed player bio `AGE` leakage by computing age relative to each row's `GAME_DATE` in `update_data.py::enrich_with_player_bios()`.
+  - Fixed Basketball Reference scraper season URL format (uses ending year instead of `202425`).
+  - Fixed `InjuryRiskFeatureGroup` career count to count only pre-game injuries.
+  - Fixed `SkillDevelopmentFeatureGroup` to use expanding season-to-date averages instead of full-season aggregates, eliminating future in-season leakage.
 - **New: Season-context feature groups** (2026-05-23):
   - `SeasonPhaseFeatureGroup` — early-season rust detection: `DAYS_SINCE_SEASON_START` (capped at 30), `IS_SEASON_OPENER`, `GAMES_WITH_CURRENT_TEAM` (resets on trade), `IS_RECENT_TRADE` (≤5 games with new team).
   - `TeamMotivationFeatureGroup` — late-season signals: `TEAM_CUMULATIVE_WIN_PCT` (shift-1, no leakage), `IS_LATE_SEASON` (Mar+), `IS_TANKING_PROXY` (<.35 win %), `IS_PLAYOFF_LOCK_PROXY` (>0.65 win %).
@@ -76,13 +92,55 @@
   - `DriftDetector.record()` and `detect()` accept a `phase` parameter (`REGULAR`/`PLAYOFF`).
   - Auto-infers phase from date (Apr 15–Jun 20 = playoff).
   - Prevents false "major drift" alerts when the playoffs naturally lower scoring and pace.
+- **New: Calibration & probability upgrade — distribution fitter, copula, CRPS** (2026-05-21):
+  - `src/query/distribution_fitter.py` — `DistributionFitter`: derives Mean/Std/Skew/Zero-Prob/Lambda from P10/P50/P90 quantile outputs. Enables full distribution parameters without the Nexus copula head.
+  - `src/query/empirical_covariance.py` — `CovarianceCache`: archetype-conditioned 6x6 empirical correlation matrices from residual analysis. Cached to `data/cache/archetype_covariances.npz` as .npz.
+  - `ProbabilityCalculator.run_copula_simulation()` — correlated multi-stat Monte Carlo using Gaussian copula + archetype correlations + per-stat inverse CDF (skew-normal for continuous, ZIP for count stats).
+  - `ReportGenerator._enrich_with_distributions()` — appends `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` to every exported projection CSV.
+  - `calculate_empirical_crps()` in `src/evaluation/metrics.py` — fast O(n log n) CRPS via Gini mean difference, for probabilistic forecast quality evaluation.
+  - `optimize_variance.py` — standalone CLI to tune 7 context-specific volatility multipliers (B2B, rookie, blowout, home, away, playoff, rest) via CRPS using scipy Nelder-Mead.
+  - `ProbabilityCalculator` accepts optional `CovarianceCache`; lazy-loads default on first use.
+- **New: Contracts layer** (2026-06-04):
+  - `src/contracts/` module with 5 files: `artifacts.py` (the `ArtifactContract` runtime validator), `features.py` (the `FeatureSchema` contract), `projections.py` (the projection-CSV schema validator), `schedule.py` (the schedule input contract), and `errors.py` (typed `ContractError` hierarchy).
+  - `check_contracts.py` (root) — standalone CLI to validate the artifact contract and projection CSV between pipeline steps. Flags `--models-dir`, `--projection-csv`, `--transformer-required`.
+  - Both `train.py` and `simulate_season.py` invoke `validate_runtime_artifacts()` at startup. The optimizer/selector/sim stack is now swappable behind this seam without breaking the training/runtime contract.
+  - `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
+- **New: Smart per-target feature selection** (2026-06-04):
+  - `src/evaluation/feature_group_ablation.py` — `FeatureGroupAblator`: trains baseline + leave-one-out `HistGradientBoostingRegressor` per feature group, computes per-target MAE deltas (`GroupScore` / `AblationReport`). Backbone of the `backtest_gain` signal.
+  - `src/evaluation/shadow_feature_filter.py` — `ShadowFeatureFilter`: injects `SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET` control columns, trains a fast model, and treats the median shadow importance as a noise floor. Features scoring below the floor are flagged as `below_shadow_median`.
+  - `src/evaluation/smart_feature_selector.py` — `SmartFeatureSelector` combines 5 signals per target (`0.40 * backtest_gain + 0.25 * stability + 0.20 * catboost_importance + 0.10 * permutation_importance - 0.05 * missingness_penalty`), writes a per-target `SelectionManifest` to `models/feature_selection_manifest.json`, and gates each stage by a `ProfileConfig` (fast / balanced / max_accuracy).
+  - `TrainingPipeline.apply_feature_selection_manifest()` and `_feature_cols_for_target()` — per-target feature lists consumed by CatBoost training; when no manifest is loaded, the canonical `self.feature_cols` list is used (preserves the original contract).
+  - `TrainingPreset` now carries optional `feature_selection` and `feature_selection_profile` fields; presets can opt into smart selection through `config/default.yaml`.
+  - `Config` dataclass now exposes `feature_selection` and `feature_selection_profiles` blocks from `config/default.yaml`.
+  - `train.py` flags: `--feature-selection {off,smart}` and `--selection-profile {fast,balanced,max_accuracy}`. Runs between Step 2 (feature engineering) and Step 3 (training). Failure is non-fatal — falls back to the full feature set with a warning.
+  - `FeatureSelector.select_features_for_target()` — accepts an `allowed_features` allow-list to build a target-specific `FeatureSchema` without re-running the leakage-safe filter.
+  - `FeatureEngineeringResult` now records `n_rows` and `n_features` for selector diagnostics.
+  - `ModelManager` now bootstraps `EnsembleWeights` from `WeightStore` at load time (after legacy `blend_weights.pkl` is loaded) so the runtime uses data-driven weights even before `optimize_weights.py` is run.
+  - `TrainingPipeline._save_blend_weights()` also writes the training-time blend to `WeightStore` (versioned JSON) so the new bootstrap path can pick it up.
+  - `backtest_result_to_json_dict()` in `metrics.py` — machine-readable JSON serializer (used by `backtest.py --json-output`) so downstream tools don't have to scrape terminal output.
+  - `backtest.py --json-output <path>` — writes a stable JSON payload including per-target metrics and `overall` aggregates.
+  - `tests/test_evaluation/test_smart_feature_selector.py` (19 tests) and `tests/test_evaluation/test_backtest_json_output.py` (1 test) cover the manifest contract, end-to-end selector, JSON serialization, and feature schema round-tripping.
 - Transformer M tier now uses `seq_len=20` (up from 10), matching L tier's context window.
 - Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) use zero-padding for short players instead of skipping them.
-- Training presets and feature engineering remain stable; 26 feature groups in the `full` preset (23 existing + 3 season-context).
+- Training presets and feature engineering remain stable; 26 feature groups in the `full` preset (19 original + 4 lifecycle: injury_risk, aging_curve, kan_aging, skill_development + 3 season-context: season_phase, team_motivation, postseason_context). The `small` preset enables 6 groups (rolling, efficiency, momentum, pace, opponent_strength, archetype) and disables the Transformer.
 - All six target stats exported from report generator and loaded correctly by projection loader.
 - Training-to-simulation artifact contract is enforced at both boundaries.
 - Dead code in `GameSimulator` has been removed.
 - The evaluation module now provides quantitative backtest metrics for drift detection and weight optimization.
+- **New: Contracts layer wiring in production seams (2026-06-04)**:
+  - `src/data/schedule_scraper.py` now calls `normalize_schedule_frame(...)` on every read path (cached schedule hit, fresh API, cache fallback, season cache). Empty frames are skipped from normalization.
+  - `src/simulation/season_simulator.py` converts the schedule frame to `ScheduleGame` dataclasses via `schedule_rows_to_games(...)` before iterating matchups (both ThreadPoolExecutor and sequential paths).
+  - `src/query/projection_loader.py::ProjectionLoader.load_projections` calls `validate_projection_frame(...)` on every load and re-raises `ProjectionSchemaContractError` typed. Legacy CSVs missing distribution or `DATA_QUALITY` columns are rejected.
+  - `src/simulation/report_generator.py::ReportGenerator.export_player_projections` writes the strict 6-stat x 8-column schema (mean, P10, P50, P90, STD, SKEW, ZERO_PROB, LAMBDA per stat, plus `DATA_QUALITY`) and calls `validate_projection_frame(...)` on the resulting DataFrame before writing the CSV.
+  - `src/models/model_manager.py::ModelManager.predict_player_stats` now calls `load_expected_feature_cols(models_dir)` and `align_feature_frame(df, expected_cols)` before the leakage-safe selector runs, so reordered or extra-column inference frames are coerced to the trained layout before any prediction is computed.
+- **New: Residual conformal interval calibration (Ticket 4, 2026-06-12)**:
+  - `calibrate_residual_intervals.py` reads `data/evaluation/residual_training.parquet` and writes per-stat conformal interval artifacts to `models/calibration/`.
+  - `src/correction/calibration.py` builds quantile half-widths (`q80`, `q90`, `q95` by default) from absolute residual errors, preferring `CORRECTED_PREDICTION` / `CORRECTED_ERROR` when present and falling back to `abs(ERROR)`.
+  - `src/correction/interval_store.py` loads `models/calibration/*_intervals.json` non-fatally; missing artifacts disable interval output without breaking prediction.
+  - `src/correction/confidence_scorer.py` maps interval width, `DATA_QUALITY`, minutes-confidence signals, and residual-model availability into `HIGH` / `MEDIUM` / `LOW` / `NO_EDGE`.
+  - `ModelManager.predict_player_stats(..., include_confidence=True)` appends `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE` when calibration artifacts are loaded. Default calls remain backward-compatible.
+  - `GameSimulator` requests confidence-aware batch predictions and carries interval/confidence metadata into `player_averages`; `ReportGenerator.export_player_projections()` writes the new columns for all six stats and validates them before saving.
+  - Projection CSV contract now requires all six stats x 14 columns: the previous 8 projection/distribution columns plus 80/90 calibrated interval bounds, confidence label, and confidence score.
 
 ## What Partially Works
 
@@ -94,10 +152,14 @@
 - Lifecycle aging curves and KAN precomputation are implemented but need live validation with real player bio data.
 - Nexus multi-modal model is implemented and import-tested but not yet wired as the active training path.
 - GPU feature engineering (cuDF) is implemented with CPU fallback but needs GPU-equipped runtime validation.
+- Copula simulation and variance optimization are implemented and import-tested but need live validation against real forecast data.
+- Residual interval calibration is implemented and unit-tested, but needs a real `data/evaluation/residual_training.parquet` calibration run to populate `models/calibration/` and verify empirical coverage on current residuals.
+- Smart per-target feature selection is implemented and unit-tested but needs live validation on real data: confirm the per-target selected lists converge, that the manifest JSON is loaded by the pipeline, and that downstream MAE improves (or at minimum doesn't regress) versus the canonical `self.feature_cols` list.
+- WeightStore bootstrap in `ModelManager` is non-fatal — if no versioned weights exist, the legacy `blend_weights.pkl` blend is used. Verify the bootstrap path actually fires on a real training run with no manual `optimize_weights.py` invocation.
 
 ## What Is Broken Or Very Likely Broken
 
-- No currently known critical bugs. The six training-stopping bugs, dead code, and legacy scraper regressions have all been fixed.
+- No currently known critical bugs. The six training-stopping bugs, dead code, legacy scraper regressions, and the 2026-06-12 bug-fix batch (KB-022 through KB-032) have all been fixed.
 - Upstream scraper availability remains the primary operational risk — but degraded inputs are now surfaced explicitly.
 
 ## Current Limitations
@@ -121,22 +183,33 @@
 - `optimize_weights.py --rollback N` can revert to previous weight versions if a retune degrades accuracy.
 - If `player_bios.csv` is missing, aging features default to neutral (1.0 factor). Run `update_data.py` with `--interactive` to populate it.
 - Delete `data/cache/aging_curves.csv` and `data/cache/kan_aging_outputs.csv` to force recomputation of lifecycle caches after retraining.
+- Delete `data/cache/archetype_covariances.npz` to force recomputation of archetype correlation matrices for the copula engine.
+- Delete `models/feature_selection_manifest.json` to force a fresh smart selection run on the next `train.py` invocation with `--feature-selection smart`. If the manifest is missing or invalid, the pipeline silently falls back to the canonical `feature_cols` list.
+- `backtest.py --json-output <path>` writes machine-readable metrics for downstream tooling (e.g. `optimize_weights.py` data prep, dashboards). The `targets` map and `overall` aggregates are the stable contract.
+- Legacy projection CSVs that omit distribution columns (P10/P50/P90/STD/SKEW/ZERO_PROB/LAMBDA per stat) or the `DATA_QUALITY` column are no longer loadable; `ProjectionLoader.load_projections` raises `ProjectionSchemaContractError` instead of falling back to defaults. Re-run `simulate_season.py` after upgrading to regenerate the CSVs in the strict schema.
+- Projection CSVs generated before Ticket 4 also lack `{STAT}_INTERVAL_80_*`, `{STAT}_INTERVAL_90_*`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE`; regenerate projections after upgrading so `ProjectionLoader` sees the current strict schema.
 
 ## Immediate Priorities
 
-1. Run `backtest.py` against a completed historical window (e.g., `--recent 14`) to establish baseline metrics and feed the drift detector.
+1. Run `backtest.py --recent 14 --json-output data/backtest_baseline.json` to establish baseline metrics and feed the drift detector.
 2. Run `optimize_weights.py --recent 14` to validate the self-optimization loop end-to-end with real completed games.
-3. Benchmark `python train.py --preset small` against the full preset on live CSVs to confirm iteration-speed improvement.
+3. Run `optimize_variance.py --recent 14` against real data to validate the CRPS-based volatility multiplier optimization.
+4. Run `python calibrate_residual_intervals.py --input data/evaluation/residual_training.parquet --output-dir models/calibration` after the residual dataset exists, then run a small simulation/query smoke test to confirm interval columns and confidence labels are populated from real artifacts.
+4. Benchmark `python train.py --preset small` against the full preset on live CSVs to confirm iteration-speed improvement.
 4. ~~Add a strict simulation mode for optional scraper degradation (CLI flag to fail-fast).~~ **DONE (DR-025, 2026-05-22)**
-5. Run one live `train.py` -> `ModelManager.load_models()` -> `simulate_season.py` smoke test in a healthy local environment with real CSV inputs.
+5. Run one live `train.py -> ModelManager.load_models() -> simulate_season.py` smoke test in a healthy local environment with real CSV inputs.
 6. Collect real-data performance profile for the rolling feature path to compare against the synthetic benchmark.
 7. ~~Run full test suite after lifecycle ML integration to update baseline test count.~~ **DONE (279 passed, 1 skipped)**
 8. Validate lifecycle aging precomputation in `train.py` with real player bio data.
 9. Run training smoke test with season-context features active to confirm `WL` and `SEASON_TYPE` columns propagate through the pipeline.
+10. Run `train.py --feature-selection smart --selection-profile balanced` end-to-end on real CSVs, inspect `models/feature_selection_manifest.json`, and confirm the per-target CatBoost models train on the selected subsets (check `model_stack_metadata.pkl` `feature_selection_enabled` flag).
+11. Verify the `ModelManager` WeightStore bootstrap path fires on a fresh process load (no manual `optimize_weights.py` invocation); confirm the training-time blend appears as the current version in `models/blend_weights/`.
 
 ## Testing Status
 
-- Verified on 2026-05-23: full suite `279 passed, 1 skipped` after season-context feature groups + lifecycle ML integration.
+- Verified on 2026-06-12: full non-slow suite `368 passed, 1 skipped, 1 deselected` after the KB-022–KB-032 bug-fix batch.
+- Verified on 2026-06-04: full suite `313 passed, 1 skipped` after smart feature selection + contracts layer + weight bootstrap (slow tests deselected).
+- Verified on 2026-05-22: full suite `294 passed, 1 skipped` after calibration & probability upgrade.
 - Verified on 2026-05-18: full suite `178 passed, 0 failed` after evaluation module + simulation refactor + training bug fixes.
 - Earlier test runs documented:
   - 2026-04-25: full suite `178 passed, 0 failed` in 74.82s
@@ -152,3 +225,9 @@
 - Whether the drift detector correctly identifies real performance degradation vs. noise.
 - Whether a full `python train.py` smoke run completes with all required runtime artifacts from real CSV data.
 - Whether the new weight store format interoperates correctly with legacy `blend_weights.pkl` consumers.
+- Whether the copula simulation (`run_copula_simulation()`) produces realistic correlated stat draws compared to independent Monte Carlo.
+- Whether `optimize_variance.py` converges on volatility multipliers that improve CRPS over the default 1.0 values.
+- Whether the smart per-target feature selector produces meaningful per-target lists on real data (i.e., the lists differ across stats and removing low-scoring features improves MAE).
+- Whether the `max_accuracy` profile (group ablation + per-target pruning + shadow filter + time-stability check) converges in a reasonable time on the full historical dataset.
+- The WeightStore bootstrap path is wired (DR-030, 2026-06-04): `ModelManager.load_models()` calls `WeightStore.load_current()` after the legacy blend is loaded; if a versioned blend exists, it overrides the legacy blend. Hot-reload through `set_weights()` is unchanged. Live validation against a fresh training run is still pending.
+- `backtest.py --json-output` is the stable machine-readable contract; the payload schema is `{"targets": {...}, "overall": {...}}` and any new downstream tool should consume it via `src/evaluation/metrics.py::backtest_result_to_json_dict`. Live round-trip with the Beast Mode training script is still pending.

@@ -422,6 +422,38 @@ self_optimization:
   retry_on_failure: true
   max_retries: 3
 
+# Smart feature selection (per-target) — ticket: smart-feature-selection
+feature_selection:
+  enabled: false
+  mode: smart             # smart | off
+  profile: balanced       # fast | balanced | max_accuracy
+  min_backtest_gain: 0.0  # minimum MAE gain (negative = improvement) to keep a group
+  use_shadow_features: true
+  target_specific: true   # keep separate feature lists per target
+  output_path: models/feature_selection_manifest.json
+  random_state: 42
+
+# Selection profiles — control which steps run during smart selection
+feature_selection_profiles:
+  fast:
+    description: "Group ablation only — fastest."
+    run_group_ablation: true
+    run_individual_pruning: false
+    run_shadow_filter: false
+    run_time_stability_check: false
+  balanced:
+    description: "Group ablation + per-target pruning + shadow filter."
+    run_group_ablation: true
+    run_individual_pruning: true
+    run_shadow_filter: true
+    run_time_stability_check: false
+  max_accuracy:
+    description: "All selectors + time-stability check."
+    run_group_ablation: true
+    run_individual_pruning: true
+    run_shadow_filter: true
+    run_time_stability_check: true
+
 # Player lifecycle & bio-mechanical configuration
 lifecycle:
   injury_risk_enabled: true
@@ -448,3 +480,10 @@ lifecycle:
   youth_age_threshold: 25
   veteran_age_threshold: 30
   efficiency_stability_band: 0.02
+
+# Residual correction — second-stage models that learn base-model mistakes
+residual_correction:
+  enabled: true
+  model_dir: models/residual
+  clip_min: 0.0
+  include_metadata: false

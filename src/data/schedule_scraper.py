@@ -7,6 +7,8 @@ from typing import List, Dict, Any, Optional
 from nba_api.stats.endpoints import leaguegamefinder, scoreboardv2
 from nba_api.stats.static import teams as nba_teams
 
+from src.contracts.schedule import normalize_schedule_frame
+
 logger = logging.getLogger(__name__)
 
 
@@ -99,6 +101,8 @@ class ScheduleScraper:
                 logger.info(f"Loading cached schedule for {game_date}")
                 try:
                     cached_df = pd.read_csv(cache_file)
+                    if not cached_df.empty:
+                        cached_df = normalize_schedule_frame(cached_df)
                     self._set_last_fetch_status(
                         'success',
                         f"Loaded cached schedule for {game_date}",
@@ -190,6 +194,7 @@ class ScheduleScraper:
                 except Exception as e:
                     logger.warning(f"Failed to save cache: {e}")
                 
+                matchups_df = normalize_schedule_frame(matchups_df)
                 logger.info(f"Found {len(matchups_df)} games for {game_date}")
                 self._set_last_fetch_status(
                     'success',
@@ -236,6 +241,8 @@ class ScheduleScraper:
             logger.warning(f"All API attempts failed, loading cached data for {game_date}")
             try:
                 cached_df = pd.read_csv(cache_file)
+                if not cached_df.empty:
+                    cached_df = normalize_schedule_frame(cached_df)
                 self._set_last_fetch_status(
                     'fallback',
                     f"Schedule API failed for {game_date}; using cached schedule",
@@ -294,6 +301,8 @@ class ScheduleScraper:
             file_time = datetime.fromtimestamp(os.path.getmtime(cache_file))
             if datetime.now() - file_time < timedelta(days=self.season_cache_ttl_days):
                 cached_df = pd.read_csv(cache_file)
+                if not cached_df.empty:
+                    cached_df = normalize_schedule_frame(cached_df)
                 self._set_last_fetch_status(
                     'success',
                     f"Loaded cached remaining-season schedule for {season}",
@@ -347,6 +356,8 @@ class ScheduleScraper:
                 return pd.DataFrame()
 
             full_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
+            if not full_df.empty:
+                full_df = normalize_schedule_frame(full_df)
             full_df.to_csv(cache_file, index=False)
             self._set_last_fetch_status(
                 'success',

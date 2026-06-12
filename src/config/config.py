@@ -429,6 +429,8 @@ class Config:
     ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
     self_optimization: SelfOptimizationConfig = field(default_factory=SelfOptimizationConfig)
     lifecycle: Dict[str, Any] = field(default_factory=dict)
+    feature_selection: Dict[str, Any] = field(default_factory=dict)
+    feature_selection_profiles: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
     def from_yaml(cls, path: Path) -> "Config":
@@ -492,7 +494,11 @@ class Config:
             config.self_optimization = SelfOptimizationConfig(**data['self_optimization'])
         if 'lifecycle' in data:
             config.lifecycle = data['lifecycle']
-            
+        if 'feature_selection' in data:
+            config.feature_selection = data['feature_selection']
+        if 'feature_selection_profiles' in data:
+            config.feature_selection_profiles = data['feature_selection_profiles']
+
         return config
     
     def to_dict(self) -> Dict[str, Any]:

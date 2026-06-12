@@ -38,9 +38,7 @@
   - `tests/test_models/test_nexus_model.py`
   - `tests/test_data/test_player_bio_scraper.py`
   - `tests/test_data/test_injury_history_logger.py`
-- Done when:
-  - `pytest tests/ -v` completes with all tests passing
-  - baseline test count is updated from 178
+- Status: DONE on 2026-05-22. Full suite: `294 passed, 1 skipped` (baseline updated from 178). 2026-06-04 update: `313 passed, 1 skipped` after smart feature selection + contracts layer + weight bootstrap. 2026-06-11 update: targeted `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` on top of the 2026-06-04 baseline.
 
 ### Run backtest against live data to establish baseline metrics
 
@@ -54,6 +52,89 @@
   - per-stat MAE/RMSE/R² are recorded
   - drift detector has baseline statistics loaded
 
+### Run optimize_variance.py against real data
+
+- Why it matters: the CRPS-based variance optimization is implemented and import-tested but needs live validation against real historical game data to confirm it converges on useful volatility multipliers.
+- Likely files:
+  - `optimize_variance.py`
+  - `data/nba_players.csv`
+- Done when:
+  - `python optimize_variance.py --recent 30 --dry-run` shows current multipliers and baseline CRPS
+  - `python optimize_variance.py --recent 30` converges on multipliers that improve CRPS over the default 1.0 values
+  - results are physically interpretable (e.g., playoff multiplier > 1.0, B2B multiplier > 1.0)
+
+### Run smart feature selection end-to-end with real data
+
+- Why it matters: the smart per-target feature selector is implemented and unit-tested but needs live validation on real data: confirm the per-target selected lists converge, that the manifest JSON is loaded by the pipeline, and that downstream MAE improves (or at minimum doesn't regress) versus the canonical `self.feature_cols` list.
+- Likely files:
+  - `train.py`
+  - `src/evaluation/smart_feature_selector.py`
+  - `src/evaluation/feature_group_ablation.py`
+  - `src/evaluation/shadow_feature_filter.py`
+  - `src/training/pipeline.py`
+  - `data/nba_players.csv`
+  - `models/feature_selection_manifest.json`
+- Done when:
+  - First, `python train.py --feature-selection smart --selection-profile fast` completes on real data (group ablation only — fastest path through the new handshake).
+  - Then, `python train.py --feature-selection smart --selection-profile balanced` completes on real data.
+  - `models/feature_selection_manifest.json` is populated and the per-target lists differ across stats.
+  - `model_stack_metadata.pkl` records `feature_selection_enabled=True` with the active profile and selected lists.
+  - Downstream MAE on the same date range is not worse than a baseline run with the full feature set.
+  - The `max_accuracy` profile (with the time-stability check) runs in a reasonable time on the full historical dataset.
+
+### Verify WeightStore bootstrap on a fresh process load
+
+- Why it matters: `ModelManager.load_models()` now bootstraps `EnsembleWeights` from `WeightStore` (DR-030) after the legacy `blend_weights.pkl` is loaded, so the runtime uses data-driven weights even before `optimize_weights.py` is invoked. The bootstrap is non-fatal — a broken store falls back to the legacy blend. The bootstrap needs live validation to confirm it actually fires and that the resulting weights are loaded as the active set.
+- Likely files:
+  - `src/models/model_manager.py`
+  - `src/evaluation/weight_store.py`
+  - `models/blend_weights/`
+- Done when:
+  - **(a) Bootstrap line fires:** `python train.py` followed by a fresh `ModelManager.load_models()` invocation logs "Bootstrapped ensemble weights vN from WeightStore (score=...)" at INFO. Confirm in the log that `vN` matches the version that `TrainingPipeline._save_blend_weights()` wrote.
+  - **(b) Self-sufficient bootstrap path:** a fresh process with no manual `optimize_weights.py` invocation finds `models/blend_weights/current.json` after `train.py` completes. The `current.json` is the versioned training-time blend, and `ModelManager` picks it up at load.
+  - **(c) Fallback path:** delete `models/blend_weights/` (or rename `current.json`), reload, and confirm the legacy `blend_weights.pkl` blend is used and a `WeightStore bootstrap skipped` debug log line is emitted.
+  - **(d) Hot-reload still works:** `ModelManager.set_weights(new_weights)` continues to override the active blend even after the bootstrap fired (i.e. bootstrap is a one-shot on `load_models`, not a permanent lock).
+
+### Verify contracts layer in a live train→simulate cycle
+
+- Why it matters: `src/contracts/` is the seam for inter-step artifact validation, and `check_contracts.py` is the top-level CLI for debugging contract failures in isolation. DR-031 wired the validators into the production read/write paths (`ScheduleScraper`, `SeasonSimulator`, `ProjectionLoader`, `ReportGenerator`, `ModelManager.predict_player_stats`, and a post-train `train.py` check), so the contract is enforced at every producer/consumer boundary by construction. Live validation is needed to confirm the boundary code actually catches the realistic failure modes before treating the contracts layer as the canonical contract boundary.
+- Likely files:
+  - `src/contracts/artifacts.py`
+  - `src/contracts/projections.py`
+  - `src/contracts/schedule.py`
+  - `src/contracts/features.py`
+  - `check_contracts.py`
+  - `src/data/schedule_scraper.py`
+  - `src/simulation/season_simulator.py`
+  - `src/query/projection_loader.py`
+  - `src/simulation/report_generator.py`
+  - `src/models/model_manager.py`
+  - `tests/test_contracts/test_pipeline_contract_smoke.py`
+- Done when:
+  - **Happy path:** `python check_contracts.py --models-dir models` exits 0 against a healthy artifact set. A fully run `python train.py` followed by `python simulate_season.py --today` passes the contract validator at both boundaries and `train.py`'s post-train check logs the `validate_runtime_artifacts` call.
+  - **Missing CatBoost backbone:** deleting one of the required `*_catboost.cbm` files makes `check_contracts.py` raise `ArtifactContractError` and exit nonzero, and `ModelManager.load_models()` raises the same typed error on the next load.
+  - **Mismatched metadata:** `model_stack_metadata.pkl` with the wrong `targets` set is rejected by `_validate_metadata(...)` inside `validate_runtime_artifacts(...)`.
+  - **Stale projection CSV:** a pre-2026-06-04 `player_projections_*.csv` is rejected by `ProjectionLoader.load_projections(...)` with a typed `ProjectionSchemaContractError`. The operator workflow is to regenerate from the current `simulate_season.py` (KB-021).
+  - **Schedule frame nulls:** a schedule DataFrame with null `GAME_ID` is rejected by `normalize_schedule_frame(...)` (typed `ScheduleContractError`), and the `ScheduleScraper` and `SeasonSimulator` call sites both surface the failure.
+  - **Inference frame drift:** `ModelManager.predict_player_stats` with an inference frame that is missing one of the saved `feature_cols.pkl` columns raises `FeatureSchemaContractError` rather than silently using a fallback.
+
+### Run residual interval calibration on real residual data
+
+- Why it matters: Ticket 4 is implemented and unit-tested, but `models/calibration/` must be generated from the real walk-forward residual dataset before live predictions can show meaningful calibrated ranges.
+- Likely files:
+  - `calibrate_residual_intervals.py`
+  - `data/evaluation/residual_training.parquet`
+  - `models/calibration/`
+  - `src/correction/calibration.py`
+  - `src/models/model_manager.py`
+  - `src/simulation/report_generator.py`
+- Done when:
+  - `python calibrate_residual_intervals.py --input data/evaluation/residual_training.parquet --output-dir models/calibration` completes.
+  - `models/calibration/calibration_metadata.json` records nonzero rows for all six stats.
+  - All six `{stat}_intervals.json` artifacts exist and contain at least a `GLOBAL` bucket with `q80`, `q90`, and `q95` widths.
+  - A small `simulate_season.py --date YYYY-MM-DD` or targeted `ModelManager.predict_player_stats(..., include_confidence=True)` smoke test returns populated interval bounds and non-`NO_EDGE` confidence labels for calibrated stats.
+
+
 ### Run optimize_weights.py end-to-end with real data
 
 - Why it matters: the self-optimization loop needs live validation. All components pass unit tests but the full optimize→verify→deploy cycle hasn't been exercised against real completed games.
@@ -64,7 +145,7 @@
 - Done when:
   - `python optimize_weights.py --recent 14 --dry-run` shows candidate weights
   - `python optimize_weights.py --recent 14` writes improved (or verified-equivalent) weights
-  - versioned weights appear in `data/weights/`
+  - versioned weights appear in `models/blend_weights/`
 
 ### Wire new feature groups into FeatureEngineer and training presets — DONE
 
@@ -209,14 +290,6 @@
   - `train.py`
   - `README.md`
 
-### Add clearer calibration/backtesting reporting
-
-- Why it matters: probability outputs are more trustworthy if calibration quality is surfaced alongside raw projections.
-- Likely files:
-  - `src/query/probability_calculator.py`
-  - `src/simulation/report_generator.py`
-  - evaluation-oriented modules that may need to be created
-
 ### Clean up empty or placeholder module areas
 
 - Why it matters: `src/services/` and `src/evaluation/` create ambiguity about planned architecture versus active code.
@@ -255,6 +328,46 @@
   - live integration checks or scheduled smoke tests
 
 ## DONE
+
+### Fix critical/high bug batch KB-022 through KB-032 — DONE
+
+- Completed 2026-06-12.
+- Delivered:
+  - `src/training/pipeline.py`: fixed `self.targets` -> `self.TARGETS` so blend weights are persisted.
+  - `src/models/model_manager.py`: Transformer runtime inference now uses `nn_features = feature_cols - cat_features`.
+  - `src/__init__.py`: torch shim now imports `importlib.util` directly.
+  - `src/models/minutes_predictor.py`: `MINS_LAST_3` rolling sum aligned with `reset_index(level=0, drop=True)`.
+  - `src/data/nba_defense_scraper.py`: `get_team_defense_allowed()` normalizes `pts_allowed_per_100` to `opp_pts_per_100`.
+  - `src/data/injury_scraper.py`: disk-cache loads now derive `TEAM_ABBR` and set `_cache_timestamp`.
+  - `src/data/lineup_scraper.py`: guards against missing `TEAM_ABBR` by deriving it from `TEAM`.
+  - `update_data.py`: `enrich_with_player_bios()` recomputes `AGE` from `BIRTHDATE` and `GAME_DATE` to prevent future-age leakage.
+  - `src/data/basketball_ref_scraper.py`: season URLs now use the ending year via `_season_end_year()`.
+  - `src/preprocessing/features/injury_risk.py`: career injury count is filtered to `DATE < GAME_DATE`.
+  - `src/preprocessing/features/skill_development.py`: replaced full-season current-season averages with expanding season-to-date averages (shifted by 1) to remove future in-season leakage.
+- Regression coverage updated:
+  - `tests/test_models/test_model_manager.py` still passes (21/21).
+  - `tests/test_preprocessing/test_skill_development_features.py` still passes (13/13).
+  - `tests/test_preprocessing/test_injury_risk_features.py` still passes (10/10).
+  - `tests/test_data/test_player_bio_scraper.py` still passes (16/16).
+  - `tests/test_training/test_runtime_artifact_contract.py` fixed to clear versioned WeightStore after editing legacy `blend_weights.pkl`.
+  - `tests/test_simulation/test_simulation_health_reporting.py` fixed to include required `GAME_ID` in schedule fixture.
+- Full non-slow suite result: `368 passed, 1 skipped, 1 deselected`.
+
+### Add calibrated residual confidence intervals — DONE
+
+- Completed 2026-06-12.
+- Delivered:
+  - `calibrate_residual_intervals.py` CLI for building `models/calibration/` from `data/evaluation/residual_training.parquet`.
+  - `src/correction/calibration.py` with `ResidualIntervalCalibrator`, corrected-error precedence, global/context bucket generation, clipped interval helper, and metadata output.
+  - `src/correction/interval_store.py` with non-fatal runtime artifact loading and `GLOBAL` bucket fallback.
+  - `src/correction/confidence_scorer.py` with `HIGH` / `MEDIUM` / `LOW` / `NO_EDGE` labels from interval width, data quality, minutes confidence, and residual-model status.
+  - `ModelManager.predict_player_stats(..., include_confidence=True)` appends 80%/90% interval bounds and confidence labels when calibration artifacts are loaded.
+  - `GameSimulator` requests confidence-aware predictions and carries interval/confidence metadata into `player_averages`.
+  - `ReportGenerator.export_player_projections()` writes the new interval/confidence columns for all six stats and keeps `NO_EDGE` / blank numeric bounds when calibration is absent.
+  - `src/contracts/projections.py` now validates the 6-stat x 14-column projection schema and confidence-label enum.
+  - Tests: `tests/test_correction/test_calibration.py`, plus updated projection/contract fixtures.
+- Verified:
+  - `pytest tests/test_correction/ tests/test_query/ tests/test_contracts/ -q` -> `84 passed`.
 
 ### Fix six training-stopping bugs in CatBoost + Transformer pipeline
 
@@ -517,3 +630,52 @@
     - All 6 stats return real values, not 0.0 defaults
     - `STAT_DISPLAY_NAMES` contains all 6 stats
   - Full regression run: `132 passed, 0 failed`.
+
+### Calibration & probability upgrade — distribution fitter, copula, CRPS, variance optimizer
+
+- Status: DONE on 2026-05-21.
+- Delivered:
+  - `src/query/distribution_fitter.py` — `DistributionFitter` derives Mean/Std/Skew/Zero-Prob/Lambda from P10/P50/P90 quantile outputs.
+  - `src/query/empirical_covariance.py` — `CovarianceCache`: archetype-conditioned 6x6 empirical correlation matrices from residual analysis. Cached as `.npz`.
+  - `ProbabilityCalculator.run_copula_simulation()` — correlated multi-stat Monte Carlo using Gaussian copula + archetype correlations.
+  - `ReportGenerator._enrich_with_distributions()` — appends `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` to projection CSV exports.
+  - `calculate_empirical_crps()` in `src/evaluation/metrics.py` — O(n log n) CRPS via Gini mean difference.
+  - `optimize_variance.py` — standalone CLI to tune 7 context-specific volatility multipliers via CRPS + scipy Nelder-Mead.
+  - `ProbabilityCalculator` accepts optional `CovarianceCache`; lazy-loads default on first use.
+- Full suite: `169 passed, 0 failed`.
+
+### Smart per-target feature selection + weight bootstrap + backtest JSON
+
+- Status: DONE on 2026-06-04.
+- Delivered:
+  - `src/evaluation/feature_group_ablation.py` — `FeatureGroupAblator` + `AblationReport` + `GroupScore`: per-target MAE deltas from leave-one-out group ablation. Uses fast `HistGradientBoostingRegressor` for screening.
+  - `src/evaluation/shadow_feature_filter.py` — `ShadowFeatureFilter` + `ShadowFilterResult` + `SHADOW_COLUMNS`: injects `SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET` control columns and uses their median importance as a noise floor.
+  - `src/evaluation/smart_feature_selector.py` — `SmartFeatureSelector` + `ProfileConfig` + `SelectorConfig` + `SelectionManifest` + `TargetSelection` + `load_manifest`: combines 5 signals (`0.40 * backtest_gain + 0.25 * stability + 0.20 * catboost_importance + 0.10 * permutation_importance - 0.05 * missingness_penalty`) into a per-target final score. Profiles: `fast` / `balanced` / `max_accuracy`.
+  - `TrainingPipeline.apply_feature_selection_manifest()` + `_feature_cols_for_target()` — per-target feature lists consumed by CatBoost training; falls back to canonical `self.feature_cols` when no manifest is loaded.
+  - `TrainingPreset.feature_selection` + `TrainingPreset.feature_selection_profile` — opt-in via `config/default.yaml`.
+  - `Config.feature_selection` + `Config.feature_selection_profiles` — YAML config block.
+  - `train.py --feature-selection {off,smart}` and `train.py --selection-profile {fast,balanced,max_accuracy}` — CLI flags. Failure is non-fatal.
+  - `FeatureSelector.select_features_for_target(df, target, allowed_features=None)` — inference-time hook for the manifest.
+  - `FeatureEngineeringResult.n_rows` + `n_features` — selector diagnostics.
+  - `ModelManager.load_models()` bootstraps `EnsembleWeights` from `WeightStore` after the legacy blend is loaded.
+  - `TrainingPipeline._save_blend_weights()` writes the training-time blend to `WeightStore` (versioned JSON) so the bootstrap path can pick it up.
+  - `backtest_result_to_json_dict()` in `metrics.py` — stable JSON serializer for `BacktestResult`.
+  - `backtest.py --json-output <path>` — stable machine-readable JSON payload.
+  - `model_stack_metadata.pkl` records `feature_selection_enabled`, `feature_selection_target_specific`, `feature_selection_profile`, and `selected_features_by_target`.
+  - `tests/test_evaluation/test_smart_feature_selector.py` (19 tests) and `tests/test_evaluation/test_backtest_json_output.py` (1 test) cover the manifest contract, end-to-end selector, JSON serialization, and feature schema round-tripping.
+
+### Cross-boundary contract wiring + WeightStore bootstrap (DR-030, DR-031)
+
+- Status: DONE on 2026-06-04.
+- Delivered:
+  - `src/data/schedule_scraper.py::ScheduleScraper` calls `normalize_schedule_frame(...)` on every read path (cached schedule hit, fresh API, cache fallback, season cache). Empty frames are skipped from normalization.
+  - `src/simulation/season_simulator.py::SeasonSimulator.simulate_season` converts the schedule frame to `ScheduleGame` records via `schedule_rows_to_games(...)` before iterating matchups (both ThreadPoolExecutor and sequential paths).
+  - `src/query/projection_loader.py::ProjectionLoader.load_projections` calls `validate_projection_frame(...)` on every load and re-raises the typed `ProjectionSchemaContractError`. The legacy `test_missing_tov_columns_loads_with_defaults` test is renamed to `test_missing_tov_columns_fails_loudly` to match the new strict behavior.
+  - `src/simulation/report_generator.py::ReportGenerator.export_player_projections` writes the strict 6-stat x 8-column schema and calls `validate_projection_frame(...)` on the assembled DataFrame before writing the CSV.
+  - `src/models/model_manager.py::ModelManager.predict_player_stats` calls `load_expected_feature_cols(models_dir)` and `align_feature_frame(df, expected_cols)` before the leakage-safe selector runs.
+  - `train.py` calls `validate_runtime_artifacts(ArtifactContract(...))` at the bottom of its training flow as a post-train check.
+  - `TrainingPipeline._save_blend_weights()` writes the training-time blend to both the legacy `blend_weights.pkl` (so `ArtifactContract` validation continues to pass) and the versioned `WeightStore` (so the bootstrap path can pick it up on the next load).
+  - Decision records: `DR-030` (WeightStore bootstrap), `DR-031` (cross-boundary contract wiring).
+  - `tests/test_query/test_six_stat_contract.py` updated to reflect the strict schema.
+  - `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
+- Targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). Full-suite baseline of `313 passed, 1 skipped` from 2026-06-04 still applies.

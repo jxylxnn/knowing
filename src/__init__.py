@@ -25,7 +25,7 @@ def _install_test_torch_shim() -> None:
         return
 
     try:
-        import importlib
+        import importlib.util
 
         importlib.util.find_spec("torch")
         return

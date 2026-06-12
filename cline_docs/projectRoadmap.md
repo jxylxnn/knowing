@@ -21,13 +21,17 @@ Provide an interactive CLI for probability queries and player comparisons.
 
 ## Key Features
 
-- [x] Multi-model ensemble (CatBoost, LSTM, Transformer, GNN, Joint NN)
-- [x] 150+ engineered features with 15-phase pipeline
-- [x] GPU-accelerated Monte Carlo simulations
+- [x] Multi-model ensemble (CatBoost primary + Transformer secondary)
+- [x] 150+ engineered features with 25+ toggleable FeatureGroup modules
+- [x] GPU-accelerated Monte Carlo simulations with archetype-conditioned correlations
 - [x] Real-time injury/lineup integration
-- [x] Interactive probability query CLI
+- [x] Interactive probability query CLI with distribution zoo
 - [x] Season simulation capabilities
 - [x] Comprehensive configuration system
+- [x] Self-optimizing ensemble weight tuner
+- [x] Smart feature selection (shadow filter + group ablation + permutation importance)
+- [x] Data quality / strict mode for degraded inputs
+- [x] Inter-step artifact contracts validation
 
 ---
 
@@ -35,17 +39,13 @@ Provide an interactive CLI for probability queries and player comparisons.
 
 ### Core System (Completed)
 - [x] Data collection from multiple sources
-- [x] Feature engineering pipeline (15 phases)
+- [x] Modular FeatureGroup architecture (25+ toggleable groups)
 - [x] Model training with temporal decay weighting
-- [x] Stacked ensemble with optimal blending
-- [x] GPU-accelerated game simulation
-- [x] Probability calculation and query system
-
-### Performance Targets (Achieved)
-- [x] PTS prediction: MAE ~4.82, RMSE ~6.31
-- [x] REB prediction: MAE ~2.15, RMSE ~2.89
-- [x] AST prediction: MAE ~1.89, RMSE ~2.54
-- [x] Simulation speed: 1000+ sims/game in <1 second (GPU)
+- [x] CatBoost + Transformer ensemble with versioned blend weights
+- [x] GPU-accelerated game simulation with archetype-conditioned copulas
+- [x] Probability calculation with distribution zoo (empirical/gamma/Poisson/NB/ZIP/Normal)
+- [x] Inter-step artifact contracts (`src/contracts/`)
+- [x] Self-optimizing weight tuner with rollback (`src/evaluation/ensemble_optimizer.py`)
 
 ---
 
@@ -56,34 +56,34 @@ Provide an interactive CLI for probability queries and player comparisons.
 - [x] Injury report integration (ESPN)
 - [x] Betting lines scraper (Action Network)
 - [x] Starting lineup scraper (Rotowire)
-- [x] Feature engineering pipeline with rolling averages, efficiency metrics, Bayesian estimates
+- [x] Player bio scraper (NBA.com — populates AGE + POSITION)
+- [x] Modular FeatureGroup architecture (25+ groups, each independently toggleable)
 - [x] CatBoost model training with multi-loss and quantile regression
-- [x] LSTM temporal model implementation
 - [x] Transformer attention model implementation
-- [x] Graph Neural Network for team chemistry
-- [x] Joint multi-output neural network
-- [x] Stacked ensemble meta-learner
-- [x] GPU-accelerated game simulator
-- [x] Player correlation engine
-- [x] Four factors engine
+- [x] Modular training pipeline v2.0 (parallel targets, feature caching, experiment tracking)
+- [x] GPU-accelerated game simulator with phase-by-phase progression
+- [x] Archetype-conditioned empirical copula correlation engine
+- [x] Role state sampling (limited/normal/expanded/starter/bench/closer)
+- [x] Four factors engine + game context engine
 - [x] Interactive query CLI with probability calculations
+- [x] Distribution zoo (empirical bootstrap, gamma, Poisson, NB, ZIP, Normal)
 - [x] Season simulation capabilities
-- [x] Unit test suite
-- [x] **NEW: Modular training pipeline v2.0**
-  - Parallel training across targets (3x faster)
-  - Smart feature caching
-  - Experiment tracking
-  - Training modes (quick/standard/full)
-  - Unified trainer interface
+- [x] Self-optimizing ensemble weight system (backtest + optimize + drift detection)
+- [x] Smart feature selection (shadow filter + group ablation + permutation + stability)
+- [x] Input health reporting + strict mode (`--strict` flag)
+- [x] DATA_QUALITY column on player projections
+- [x] Inter-step artifact contract validation
+- [x] B-Ianus Bayesian aging curves + KAN aging factors (lifecycle ML)
+- [x] Season phase, team motivation, postseason context feature groups
+- [x] Unit test suite (260+ test functions across 32 test files)
 
 ---
 
 ## Future Enhancements (Potential)
 
 ### Model Improvements
-- [ ] Implement learned ensemble weights (adaptive blending per player-type)
+- [ ] Wire LightGBM / XGBoost into the active training pipeline (installed but not wired)
 - [ ] Add cross-position models (guard/forward/center specific)
-- [ ] Add playoff-specific adjustments (different weighting for playoff games)
 - [ ] Incorporate player tracking data (shot distance, speed, distance to basket)
 - [ ] Add uncertainty calibration with isotonic regression for quantiles
 
@@ -97,15 +97,14 @@ Provide an interactive CLI for probability queries and player comparisons.
 - [ ] REST API for external access
 - [ ] Web dashboard interface
 - [ ] Automated daily predictions
-- [ ] Backtesting framework
-- [ ] Model performance monitoring
-- [ ] Performance drift detection
+- [ ] Model performance monitoring dashboard
 
 ---
 
 ## Notes
 
 - Current system is feature-complete for core use cases
-- Performance metrics based on test set evaluation
+- Active stack: CatBoost (primary) + Transformer (secondary). LSTM and GNN are `enabled: false`.
+- Ensemble weights are versioned in `models/blend_weights/` — not hardcoded in source.
 - GPU acceleration optional but recommended for high-volume simulations
 - Data directories (`data/`, `models/`, `cache/`) are gitignored and created on first use

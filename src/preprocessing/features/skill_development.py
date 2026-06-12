@@ -103,33 +103,53 @@ class SkillDevelopmentFeatureGroup(FeatureGroup):
         else:
             df['_ts_pct'] = 0.56  # league average
 
-        # Season averages per player
-        season_avgs = df.groupby(['PLAYER_ID', '_season']).agg(
-            _pts_per_min_avg=('_pts_per_min', 'mean'),
-            _ts_pct_avg=('_ts_pct', 'mean'),
-            _reb_per_min_avg=('_reb_per_min', 'mean'),
-            _ast_tov_avg=('_ast_tov_ratio', 'mean'),
+        # Compute full-season averages to serve as the prior-season reference.
+        season_avgs_full = df.groupby(['PLAYER_ID', '_season']).agg(
+            _pts_per_min_avg_full=('_pts_per_min', 'mean'),
+            _ts_pct_avg_full=('_ts_pct', 'mean'),
+            _reb_per_min_avg_full=('_reb_per_min', 'mean'),
+            _ast_tov_avg_full=('_ast_tov_ratio', 'mean'),
         ).reset_index()
 
-        # Compute YoY velocity (change from previous season)
-        season_avgs = season_avgs.sort_values(['PLAYER_ID', '_season'])
-        for stat_col in ['_pts_per_min_avg', '_ts_pct_avg', '_reb_per_min_avg', '_ast_tov_avg']:
-            vel_col = stat_col + '_vel'
-            season_avgs[vel_col] = season_avgs.groupby('PLAYER_ID')[stat_col].diff()
+        # Compute season-to-date averages using only prior games in the same
+        # season to avoid leaking future in-season games.
+        for stat_col in ['_pts_per_min', '_ts_pct', '_reb_per_min', '_ast_tov_ratio']:
+            exp_col = stat_col + '_exp'
+            df[exp_col] = (
+                df.groupby(['PLAYER_ID', '_season'])[stat_col]
+                .transform(lambda x: x.expanding().mean().shift(1))
+            )
 
-        # Merge velocity back onto game-level df
-        velocity_cols = [
-            '_pts_per_min_avg_vel', '_ts_pct_avg_vel',
-            '_reb_per_min_avg_vel', '_ast_tov_avg_vel',
-        ]
-        velocity_map = season_avgs[['PLAYER_ID', '_season'] + velocity_cols]
-        df = df.merge(velocity_map, on=['PLAYER_ID', '_season'], how='left')
+        # Map each row to the previous season's full averages.
+        prior_season = season_avgs_full.copy()
+        prior_season['_prior_season'] = prior_season['_season'] + 1
+        df = df.merge(
+            prior_season.rename(
+                columns={
+                    '_pts_per_min_avg_full': '_pts_per_min_avg_last',
+                    '_ts_pct_avg_full': '_ts_pct_avg_last',
+                    '_reb_per_min_avg_full': '_reb_per_min_avg_last',
+                    '_ast_tov_avg_full': '_ast_tov_avg_last',
+                }
+            ),
+            left_on=['PLAYER_ID', '_season'],
+            right_on=['PLAYER_ID', '_prior_season'],
+            how='left',
+        )
 
-        # Assign output columns
-        df['SKILL_DEV_PTS_VELOCITY'] = df['_pts_per_min_avg_vel'].fillna(0)
-        df['SKILL_DEV_EFF_VELOCITY'] = df['_ts_pct_avg_vel'].fillna(0)
-        df['SKILL_DEV_REB_VELOCITY'] = df['_reb_per_min_avg_vel'].fillna(0)
-        df['SKILL_DEV_AST_TOV_TREND'] = df['_ast_tov_avg_vel'].fillna(0)
+        # Assign output columns as current-season-to-date minus last full season.
+        df['SKILL_DEV_PTS_VELOCITY'] = (
+            df['_pts_per_min_exp'] - df['_pts_per_min_avg_last']
+        ).fillna(0)
+        df['SKILL_DEV_EFF_VELOCITY'] = (
+            df['_ts_pct_exp'] - df['_ts_pct_avg_last']
+        ).fillna(0)
+        df['SKILL_DEV_REB_VELOCITY'] = (
+            df['_reb_per_min_exp'] - df['_reb_per_min_avg_last']
+        ).fillna(0)
+        df['SKILL_DEV_AST_TOV_TREND'] = (
+            df['_ast_tov_ratio_exp'] - df['_ast_tov_avg_last']
+        ).fillna(0)
 
         # Youth boost flag: age < 25 AND improving
         if has_age:

@@ -42,6 +42,13 @@ No `--timeout` flag (pytest-timeout not installed); some suites are slow and may
    - `--workers 1` recommended when using GPU (avoid CUDA context contention)
 4. `python query_prob.py` — interactive probability query CLI (requires models + data)
 
+### Optional / Supporting Entry Points
+
+- `python backtest.py` — standalone backtest on a date range (uses `evaluation/backtest_runner.py`)
+- `python optimize_weights.py` — self-optimize ensemble blend weights (uses `evaluation/ensemble_optimizer.py`)
+- `python optimize_variance.py` — CRPS-driven variance reduction
+- `python check_contracts.py` — validate artifact contract between pipeline steps
+
 ### Cleanup
 
 ```bash
@@ -55,18 +62,33 @@ Raw CSV files in `data/` are preserved by clear_cache.
 
 ```
 Root entry points:  update_data.py, train.py, simulate_season.py, query_prob.py
+                    backtest.py, optimize_weights.py, optimize_variance.py, check_contracts.py
 src/
   config/          — config loading (main config: config/default.yaml)
-  data/            — scrapers (NBA API, ESPN injuries, Rotowire lineups, Action Network betting, Basketball Reference)
-  preprocessing/    — 15-phase feature engineering pipeline → 150+ features (incl. lifecycle: injury risk, aging curves, KAN aging, skill dev)
-  models/          — model_manager.py (live bridge), CatBoost (primary), Transformer (secondary)
+  data/            — scrapers (NBA API, ESPN injuries, Rotowire lineups, Action Network betting, Basketball Reference, player bios)
+  preprocessing/   — modular FeatureGroup architecture → 150+ features (25+ toggleable groups)
+    features/      — 21 feature modules: rolling, efficiency, momentum, context, fatigue, matchup,
+                     opponent_strength, pace, team_role, target_encoding, league_rank, minutes_confidence,
+                     recency_form, lineup_stability, rest_density, injury_opportunity, teammate_usage,
+                     defense_position, injury_risk, aging_curve, kan_aging, skill_development,
+                     archetype, season_phase, team_motivation, postseason_context
+  models/          — model_manager.py (live bridge), transformer_model.py, nexus_model.py,
+                     error_calibration.py, minutes_predictor.py, gpu_utils.py
   pipeline/        — training_pipeline.py, data_pipeline.py, prediction_service.py
-  simulation/      — game_simulator.py (GPU Monte Carlo), season_simulator.py
-  query/           — interactive_cli.py, probability_calculator.py
-  training/        — training orchestration, presets, experiment tracking
-  evaluation/      — model evaluation
-  utils/           — logging, reproducibility, team_mappings
-  lifecycle/       — B-Ianus Bayesian aging model, KAN age model, injury risk computation
+  training/        — pipeline.py (orchestrator, 50KB), catboost_trainer.py, nn_trainer.py,
+                     presets.py, experiment.py, feature_cache.py, nexus_loss.py, training_logger.py
+  simulation/      — game_simulator.py, season_simulator.py, phase_simulator.py,
+                     possession_simulator.py, four_factors_engine.py, game_context_engine.py,
+                     player_correlation_engine.py, archetype.py, role_sampler.py,
+                     input_health.py, report_generator.py, sim_types.py, sim_cache.py, stat_utils.py
+  query/           — interactive_cli.py, probability_calculator.py, distribution_fitter.py,
+                     empirical_covariance.py, prob_formatter.py, projection_loader.py, query_parser.py
+  evaluation/      — backtest_runner.py, weight_store.py, ensemble_optimizer.py,
+                     drift_detector.py, smart_feature_selector.py, shadow_feature_filter.py,
+                     feature_group_ablation.py, metrics.py
+  contracts/       — artifacts.py, features.py, projections.py, schedule.py, errors.py
+  lifecycle/       — aging_model.py (B-Ianus Bayesian), kan_age_model.py (KAN network, CPU-only)
+  utils/           — logging, reproducibility, team_mappings, prediction_utils
 tests/             — mirrors src/ structure; conftest.py injects project root into sys.path
 ```
 
@@ -83,3 +105,7 @@ tests/             — mirrors src/ structure; conftest.py injects project root 
 - **Injury history is incremental**: The `injury_history.csv` file grows over time. First runs will have sparse data — injury risk features will be near-zero for most players until several update cycles accumulate.
 - **KAN model precomputation**: KAN aging factors are pre-computed on CPU and cached to `data/cache/kan_aging_outputs.csv`. If you retrain with `--force`, delete this file to force recomputation. KAN always runs on CPU to avoid GPU contention with CatBoost/Transformer.
 - **B-Ianus aging precomputation**: Aging curves are cached to `data/cache/aging_curves.csv`. Same rule — delete to force recomputation.
+- **Ensemble weights are versioned**: Blend weights live in `models/blend_weights/` as versioned JSON (not hardcoded in source). Use `optimize_weights.py` or the `WeightStore` API — never edit `blend_weights.pkl` directly.
+- **Contracts validation**: Both `train.py` and `simulate_season.py` validate artifact contracts at startup. Run `python check_contracts.py` to debug inter-step contract issues.
+- **Smart feature selection**: `train.py --feature-selection smart --selection-profile {fast,balanced,max_accuracy}` runs shadow filtering + group ablation + permutation importance. Disabled by default (`config/default.yaml` → `feature_selection.enabled: false`).
+- **LightGBM / XGBoost installed but not wired**: Both are in `requirements.txt` but are not part of the active training pipeline. Available for experimentation.

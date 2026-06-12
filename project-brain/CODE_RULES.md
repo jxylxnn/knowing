@@ -98,6 +98,8 @@
 - New simulation components (phase simulation, archetype inference, role sampling) should be independent modules in `src/simulation/` rather than embedded in GameSimulator.
 - **Strict mode**: `GameSimulator(strict_mode=True)` raises `RuntimeError` on degraded optional InputHealth sources. When adding new optional context sources, integrate them into the `input_health` contract and check them in strict mode.
 - **Data quality**: `ReportGenerator.export_player_projections()` must include the `DATA_QUALITY` column. New simulation result metadata that affects projection trustworthiness should be reflected here.
+- **Distribution enrichment**: `ReportGenerator.export_player_projections()` must also include distribution parameter columns (`{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`) for all 6 stats via `_enrich_with_distributions()`. If the schema of these columns changes, update `ProbabilityCalculator.run_copula_simulation()` accordingly.
+- **Residual intervals/confidence**: `ReportGenerator.export_player_projections()` must include `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE` for all six stats. Missing `models/calibration/` artifacts should produce stable `NO_EDGE`/blank interval output, not a simulation failure.
 
 ### Lifecycle & Bio-Mechanical (NEW)
 
@@ -145,17 +147,65 @@
 - `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores. Both must be available for backtesting to work.
 - `EnsembleOptimizer` uses scipy.optimize with 13 parameters. If the parameter space changes, update `_TUNABLE_DIMS` and all code that builds/flattens weight vectors.
 - `WeightStore` is the single source of truth for active ensemble weights. Never bypass it with direct `blend_weights.pkl` writes.
-- Weight versions are numbered and stored under `data/weights/`. The `current.json` pointer indicates the active version.
+- Weight versions are numbered and stored under `models/blend_weights/` (NOT `data/weights/` — earlier brain revisions had the wrong path; corrected 2026-06-04). The `current.json` pointer indicates the active version.
 - `optimize_weights.py` always writes through `WeightStore`. Use `--rollback N` to revert, not manual file edits.
 - `DriftDetector` uses SPC (2σ threshold). The baseline window and detection threshold are configurable through `config/default.yaml` under `self_optimization:`.
 - Keep the blend-weight / Transformer artifact contract enforced at load time. `ModelManager.set_weights()` must validate the new weights before applying them.
+- `backtest_result_to_json_dict()` in `metrics.py` is the stable JSON serializer for `BacktestResult` payloads. Downstream tooling must consume the `{"targets": {...}, "overall": {...}}` schema from `--json-output` rather than scraping terminal output.
+- `ModelManager.load_models()` bootstraps `EnsembleWeights` from `WeightStore` after the legacy blend is loaded. If the store has no `current.json`, the legacy blend stands. The bootstrap is non-fatal.
+
+### Contracts Layer (NEW)
+
+- `src/contracts/` is the seam for inter-step artifact contract validation. Every producer/consumer pair across the pipeline must be expressible in this layer, not scattered as ad hoc `os.path.exists()` checks.
+- `contracts/artifacts.py::ArtifactContract` is the canonical list of required runtime artifacts. The required set is: per-target `*_catboost.cbm` + `*_metadata.joblib` for all 6 stats, plus `feature_schema.pkl`, `feature_cols.pkl`, `blend_weights.pkl`, `model_stack_metadata.pkl`, and (when transformer is required) `attention_transformer.pkl`. If a new mandatory artifact is introduced, add it to `_required_files()` and update the producer/consumer in the same change.
+- `contracts/artifacts.py::validate_runtime_artifacts()` is invoked at the top of both `train.py` and `simulate_season.py`. Do not bypass it with a direct file existence check — fail-loud is the contract.
+- `contracts/projections.py::validate_projection_csv()` is invoked when the query layer loads a `player_projections_*.csv` export. The CSV must include the `DATA_QUALITY` column (DR-025).
+- `contracts/features.py::FeatureSchema` is the single source of truth for training-time and inference-time feature layout. The trainer writes the schema, the loader reads it; do not re-derive column expectations implicitly.
+- `contracts/errors.py` defines the typed exception hierarchy. New contract types should subclass `ContractError` and live here.
+- Standalone entry: `check_contracts.py` (root) — CLI for debugging contract failures in isolation. Exits 0 on success, raises the typed exception on failure.
+- When you add a new mandatory runtime artifact, schema column, or contract type, update `src/contracts/` first, then update the producer and consumer. Never introduce a contract in only one of the three places.
+- **Contract wiring at seams (DR-031, 2026-06-04):** introducing a new contract is not complete until the production call sites are wired:
+  - Scraper read paths must call their frame normalizer on every cache and API path. For the schedule contract, every `ScheduleScraper` method that returns a DataFrame must call `normalize_schedule_frame(...)` (empty frames are skipped).
+  - The simulator must convert raw schedule rows into the contract's typed records before iterating. `SeasonSimulator.simulate_season` calls `schedule_rows_to_games(...)` and reads the typed `home_team`, `away_team`, `game_date`, `game_id` attributes.
+  - The projection loader must call `validate_projection_frame(...)` on read; the report generator must call it on write. Both raise / re-raise the typed `ProjectionSchemaContractError`.
+  - `ModelManager.predict_player_stats` must call `load_expected_feature_cols(models_dir)` and `align_feature_frame(df, expected_cols)` before prediction so reordered or extra-column frames are coerced to the trained layout.
+  - `train.py` must call `validate_runtime_artifacts(ArtifactContract(...))` at the bottom of its training flow as a post-train check.
+  - Failure to update any of these call sites in the same change as a new contract is itself a contract violation.
+- **Strict projection schema (DR-031/DR-032, updated 2026-06-12):** projection CSVs written by `ReportGenerator` and loaded by `ProjectionLoader` must include all 6 stats x 14 columns (`{STAT}`, `{STAT}_P10`, `{STAT}_P50`, `{STAT}_P90`, `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`, `{STAT}_INTERVAL_80_LOW`, `{STAT}_INTERVAL_80_HIGH`, `{STAT}_INTERVAL_90_LOW`, `{STAT}_INTERVAL_90_HIGH`, `{STAT}_CONFIDENCE`, `{STAT}_CONFIDENCE_SCORE`) and a `DATA_QUALITY` column with values in {`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`}. Confidence labels must be one of {`HIGH`, `MEDIUM`, `LOW`, `NO_EDGE`}. `tests/test_query/test_six_stat_contract.py::TestMissingStatColumnsFailsLoudly::test_missing_tov_columns_fails_loudly` and `tests/test_correction/test_calibration.py` guard the load/export path. Do not reintroduce defaults for missing columns — the schema is strict and legacy CSVs must be regenerated.
+
+### Residual Correction And Calibration (NEW)
+
+- Residual correction artifacts live under `models/residual/`; residual interval artifacts live under `models/calibration/`. Keep those directories separate.
+- `calibrate_residual_intervals.py` is the top-level calibration entry point. It must consume `data/evaluation/residual_training.parquet` and write JSON artifacts through `ResidualIntervalCalibrator`, not ad hoc files.
+- Runtime interval loading must remain best-effort. `CalibrationIntervalStore` should disable itself safely when files are missing or malformed; `ModelManager.predict_player_stats(..., include_confidence=True)` should not crash just because calibration has not been run.
+- Prefer corrected residual errors for calibration when available: `CORRECTED_PREDICTION`, then `CORRECTED_ERROR`, then `ERROR`.
+- Confidence labels are coarse trust/risk signals, not probability recommendations. Keep scoring logic in `ConfidenceScorer` so query, simulation, and future reporting do not invent conflicting label rules.
+
+### Smart Per-Target Feature Selection (NEW)
+
+- `SmartFeatureSelector`, `FeatureGroupAblator`, and `ShadowFeatureFilter` live in `src/evaluation/`. They are training-time helpers, not runtime predictors.
+- The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json`. The manifest is the contract between selector, training, and downstream inference. Do not write a parallel manifest format.
+- `TrainingPipeline._feature_cols_for_target(target)` is the single source of truth for "what features does this target see during training". It must fall back to the canonical `self.feature_cols` list when no manifest is loaded, preserving the original contract.
+- `TrainingPreset` may carry `feature_selection` and `feature_selection_profile`. If the YAML config sets `feature_selection.enabled: true` on a preset, the manifest is applied to the pipeline before training.
+- The selector's signal weights (`WEIGHTS` in `smart_feature_selector.py`) are the ticket spec. If you change them, update DR-028 and the docstrings in lockstep.
+- Selector failure (insufficient samples, fitting error, etc.) must be non-fatal. `train.py` and the pipeline fall back to the full feature set with a warning.
+- `FeatureGroupAblator` uses `HistGradientBoostingRegressor` (sklearn) for speed — its scores are an approximation, not the exact CatBoost gain. Do not assume equivalence with the production trainer.
+- `ShadowFeatureFilter` injects `SHADOW_*` columns. Real features must never share these prefixes (they are reserved in `FeatureSelector.EXCLUDE_ALWAYS`).
+- `SelectionManifest.target_specific` controls per-target vs. global feature lists. When `False`, every target uses the same `selected_features_global` list. When `True`, the per-target list in `selected_features_by_target` is used. The pipeline respects this via `_feature_cols_for_target`.
+- `FeatureSelector.select_features_for_target(df, target, allowed_features=None)` is the inference-time hook. When the caller passes an allow-list (e.g. from the manifest), the leakage-safe filter is bypassed but the schema still drops non-numeric / unsafe columns.
+- `model_stack_metadata.pkl` is the audit record for smart selection. When `feature_selection_enabled=True`, the manifest's per-target lists and the active profile are persisted alongside the existing preset / feature-group metadata.
 
 ### Query
 
 - The query layer should consume exported projection artifacts rather than reimplement full model inference.
 - If the exported schema changes, update `src/query/projection_loader.py` and query tests in the same change.
+- `ProbabilityCalculator.run_copula_simulation()` uses archetype-conditioned correlation matrices from `CovarianceCache`. Always provide an archetype label — "GLOBAL" is the universal fallback.
+- Distribution parameters for copula simulation should come from `DistributionFitter.fit_from_quantiles()` (which works with P10/P50/P90 quantile outputs) rather than from ad hoc heuristic calculations.
+- `CovarianceCache` must always have a sensible fallback: identity matrix when no cache exists, archetype-specific matrix when available, GLOBAL matrix as first fallback, identity matrix as last resort.
+- The CRPS function in `metrics.py` (`calculate_empirical_crps`) is a fast O(n log n) Gini approximation. For small-n regimes (< 100 samples) where exact CRPS would differ materially, use the exact formula instead.
+- `optimize_variance.py` is the variance counterpart of `optimize_weights.py`. It tunes volatility (std multipliers) via CRPS rather than mean accuracy via MAE. Both should be run after significant training changes.
 
-## Refactor Rules
+### Refactor Rules
 
 - Avoid cross-cutting rewrites unless the user explicitly asks for architectural change.
 - Before moving or renaming important files, update:

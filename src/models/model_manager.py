@@ -16,6 +16,13 @@ import numpy as np
 import pandas as pd
 
 from src.config.model_config import get_model_config, normalize_model_size
+from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
+from src.contracts.features import align_feature_frame, load_expected_feature_cols
+from src.correction.confidence_scorer import ConfidenceScorer
+from src.correction.correction_applier import CorrectionApplier
+from src.correction.correction_features import CorrectionFeatureBuilder
+from src.correction.interval_store import CalibrationIntervalStore
+from src.correction.residual_model import ResidualCorrectionModel
 from src.evaluation.weight_store import EnsembleWeights, TargetBlend, WeightStore
 from src.models.base import (
     ModelRegistry,
@@ -83,6 +90,12 @@ class ModelManager:
         self.feature_engineer = FeatureEngineer()
         self.feature_selector = FeatureSelector(self.targets)
 
+        self.residual_correction_model: Optional[ResidualCorrectionModel] = None
+        self.correction_applier: Optional[CorrectionApplier] = None
+        self.residual_corrections_enabled: bool = False
+        self.calibration_interval_store: Optional[CalibrationIntervalStore] = None
+        self.confidence_scorer = ConfidenceScorer()
+
         if model_config is not None:
             self.model_config = model_config
             self.hw_info = model_config.get("metadata", {})
@@ -100,37 +113,22 @@ class ModelManager:
             self.hw_info.get("tier", model_size),
         )
 
+    def _blend_requires_transformer(self) -> bool:
+        """Return True when the persisted blend weights expect Transformer output."""
+        weights = self.blend_weights or {}
+        for target_cfg in weights.values():
+            if isinstance(target_cfg, dict) and float(target_cfg.get("transformer", 0.0)) > 0.0:
+                return True
+        return False
+
     def validate_runtime_artifacts(self) -> None:
         """Raise when the on-disk runtime artifact contract is incomplete."""
-        shared_required = [
-            Path(self.models_dir) / "feature_schema.pkl",
-            Path(self.models_dir) / "feature_cols.pkl",
-            Path(self.models_dir) / "blend_weights.pkl",
-            Path(self.models_dir) / "model_stack_metadata.pkl",
-        ]
-        missing: List[str] = [
-            str(path) for path in shared_required if not path.exists()
-        ]
-
-        per_target_missing: Dict[str, List[str]] = {}
-        for target in self.targets:
-            target_missing = CatBoostTrainer.missing_runtime_artifacts(
-                self.models_dir, target
+        validate_runtime_artifacts(
+            ArtifactContract(
+                models_dir=Path(self.models_dir),
+                transformer_required=self._blend_requires_transformer(),
             )
-            if target_missing:
-                per_target_missing[target] = target_missing
-
-        if per_target_missing:
-            missing.extend(
-                f"{target}: {', '.join(paths)}"
-                for target, paths in sorted(per_target_missing.items())
-            )
-
-        if missing:
-            raise FileNotFoundError(
-                "Incomplete runtime model artifact set in "
-                f"{self.models_dir}. Missing: {' | '.join(missing)}"
-            )
+        )
 
     def prepare_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load raw CSVs and build the feature-engineered train/test split."""
@@ -256,6 +254,22 @@ class ModelManager:
 
         self.blend_weights = load_blend_weights_from_disk(self.models_dir)
 
+        # Bootstrap versioned EnsembleWeights from WeightStore (preferred over
+        # legacy blend_weights.pkl).  This ensures predict_player_stats()
+        # follows data-driven weights — not arbitrary defaults.
+        try:
+            store = WeightStore(str(Path(self.models_dir) / "blend_weights"))
+            current = store.load_current()
+            if current is not None:
+                self.use_ensemble_weights(current)
+                logger.info(
+                    "Bootstrapped ensemble weights v%d from WeightStore (score=%s)",
+                    current.version,
+                    current.backtest_score or "N/A",
+                )
+        except Exception as exc:
+            logger.debug("WeightStore bootstrap skipped: %s", exc)
+
         self._validate_blend_contract()
 
         logger.info(
@@ -269,7 +283,51 @@ class ModelManager:
             raise RuntimeError(
                 f"Expected {len(self.targets)} CatBoost targets but loaded {counts['catboost']}"
             )
+
+        self._load_residual_corrections()
+        self._load_interval_calibration()
+
         return counts
+
+    def _load_residual_corrections(self) -> None:
+        """Attempt to load residual correction models.
+
+        This is a best-effort operation — the main prediction pipeline
+        continues to work if residual artifacts are missing or broken.
+        """
+        residual_dir = Path(self.models_dir) / "residual"
+        if not residual_dir.exists():
+            logger.debug("No residual correction directory at %s", residual_dir)
+            return
+
+        try:
+            self.residual_correction_model = ResidualCorrectionModel()
+            self.residual_correction_model.load(str(residual_dir))
+            self.correction_applier = CorrectionApplier(
+                residual_model=self.residual_correction_model,
+                feature_builder=CorrectionFeatureBuilder(),
+            )
+            self.residual_corrections_enabled = True
+            loaded_stats = self.residual_correction_model.loaded_stats
+            logger.info(
+                "Residual corrections enabled for: %s",
+                loaded_stats if loaded_stats else "none",
+            )
+        except Exception as exc:
+            logger.warning("Residual corrections disabled: %s", exc)
+            self.residual_corrections_enabled = False
+
+    def _load_interval_calibration(self) -> None:
+        """Attempt to load residual interval calibration artifacts."""
+        store = CalibrationIntervalStore(str(Path(self.models_dir) / "calibration")).load()
+        if store.enabled:
+            self.calibration_interval_store = store
+            logger.info(
+                "Residual interval calibration enabled for: %s",
+                sorted(store.intervals),
+            )
+        else:
+            self.calibration_interval_store = None
 
     def _validate_blend_contract(self) -> None:
         """Raise when blend weights require a model that is not loaded."""
@@ -371,15 +429,18 @@ class ModelManager:
         if seq_len <= 0 or len(history_df) < seq_len:
             return None
 
+        cat_features = getattr(self, "cat_features", []) or []
+        nn_features = [c for c in self.feature_cols if c not in cat_features]
         selector = getattr(self, "feature_selector", None)
         schema = getattr(self, "feature_schema", None)
         if selector is not None and schema is not None:
             seq_df = selector.transform(
                 history_df, schema, strict=False, fill_value=0.0
             )
+            seq_df = seq_df.reindex(columns=nn_features, fill_value=0)
         else:
             seq_df = (
-                history_df.reindex(columns=self.feature_cols, fill_value=0)
+                history_df.reindex(columns=nn_features, fill_value=0)
                 .apply(pd.to_numeric, errors="coerce")
                 .fillna(0)
             )
@@ -404,8 +465,11 @@ class ModelManager:
         return float(preds[target_idx])
 
     def predict_player_stats(
-        self, player_context_df: pd.DataFrame, history_df: pd.DataFrame = None
-    ) -> Dict[str, float]:
+        self,
+        player_context_df: pd.DataFrame,
+        history_df: pd.DataFrame = None,
+        include_confidence: bool = False,
+    ) -> Dict[str, Any]:
         """Predict a single player's stat line using the active model stack."""
         if player_context_df is None or player_context_df.empty:
             return self._fallback_prediction(pd.DataFrame())
@@ -418,6 +482,9 @@ class ModelManager:
 
         if self.feature_cols is None or not self.feature_cols:
             return self._fallback_prediction(player_context_df)
+
+        expected_cols = load_expected_feature_cols(self.models_dir)
+        player_context_df = align_feature_frame(player_context_df, expected_cols)
 
         selector = getattr(self, "feature_selector", None)
         schema = getattr(self, "feature_schema", None)
@@ -432,7 +499,7 @@ class ModelManager:
                 .fillna(0)
             )
 
-        predictions: Dict[str, float] = {}
+        predictions: Dict[str, Any] = {}
         base_predictions: Dict[str, float] = {}
 
         for target in self.targets:
@@ -477,12 +544,105 @@ class ModelManager:
                 high = float(q_preds["high"][0])
                 predictions[f"{target}_STD"] = max(0.0, (high - low) / 2.56)
 
+        if self.residual_corrections_enabled and self.correction_applier is not None:
+            predictions, correction_meta = self._apply_residual_corrections(
+                predictions, player_context_df
+            )
+        else:
+            correction_meta = {}
+
+        if include_confidence:
+            predictions = self._add_confidence_intervals(
+                predictions,
+                context_row=player_context_df,
+                correction_meta=correction_meta,
+            )
+
         return predictions
+
+    def _apply_residual_corrections(
+        self,
+        base_predictions: Dict[str, Any],
+        context_row: pd.DataFrame,
+    ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        """Apply residual corrections to base predictions.
+
+        Non-target keys (e.g. ``PTS_STD``) are passed through unchanged.
+        """
+        stat_keys = {t for t in self.targets if t in base_predictions}
+        stat_preds = {t: base_predictions[t] for t in stat_keys}
+
+        try:
+            corrected, _meta = self.correction_applier.apply(
+                base_predictions=stat_preds,
+                context_row=context_row,
+            )
+        except Exception as exc:
+            logger.warning("Residual correction failed, returning base predictions: %s", exc)
+            return base_predictions, {}
+
+        result = dict(base_predictions)
+        for stat, value in corrected.items():
+            result[stat] = value
+        return result, _meta
+
+    def _add_confidence_intervals(
+        self,
+        predictions: Dict[str, Any],
+        context_row: pd.DataFrame,
+        correction_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Append calibrated intervals and confidence labels when available."""
+        result = dict(predictions)
+        store = self.calibration_interval_store
+        if store is None or not store.enabled:
+            return result
+
+        bucket = self.confidence_scorer.bucket_from_context(context_row)
+        data_quality = self.confidence_scorer.data_quality_from_context(context_row)
+        minutes_confidence = self.confidence_scorer.minutes_confidence_from_context(context_row)
+        correction_meta = correction_meta or {}
+
+        for stat in self.targets:
+            if stat not in result or not store.has_stat(stat):
+                continue
+
+            prediction = float(result[stat])
+            interval_80 = store.make_interval(
+                stat, prediction, confidence=0.8, bucket=bucket
+            )
+            interval_90 = store.make_interval(
+                stat, prediction, confidence=0.9, bucket=bucket
+            )
+            if interval_80 is not None:
+                result[f"{stat}_INTERVAL_80_LOW"] = interval_80.low
+                result[f"{stat}_INTERVAL_80_HIGH"] = interval_80.high
+            if interval_90 is not None:
+                result[f"{stat}_INTERVAL_90_LOW"] = interval_90.low
+                result[f"{stat}_INTERVAL_90_HIGH"] = interval_90.high
+
+            width = store.get_interval_width(stat, confidence=0.9, bucket=bucket)
+            meta = correction_meta.get(stat, {})
+            confidence = self.confidence_scorer.score(
+                stat=stat,
+                interval_width=width,
+                data_quality=data_quality,
+                minutes_confidence=minutes_confidence,
+                residual_applied=bool(meta.get("residual_applied", False)),
+                residual_model_enabled=self.residual_corrections_enabled
+                and self.residual_correction_model is not None
+                and self.residual_correction_model.is_enabled(stat),
+            )
+            result[f"{stat}_CONFIDENCE"] = confidence.label
+            result[f"{stat}_CONFIDENCE_SCORE"] = confidence.score
+
+        return result
 
     def predict_player_stats_batch(
         self,
         context_df: pd.DataFrame,
         histories_map: Optional[Dict[int, pd.DataFrame]] = None,
+        include_confidence: bool = False,
     ) -> pd.DataFrame:
         """Predict stats for multiple players and return a DataFrame."""
         if context_df is None or context_df.empty:
@@ -496,7 +656,13 @@ class ModelManager:
             )
             history_df = histories_map.get(player_id) if histories_map else None
             try:
-                rows.append(self.predict_player_stats(row, history_df))
+                rows.append(
+                    self.predict_player_stats(
+                        row,
+                        history_df,
+                        include_confidence=include_confidence,
+                    )
+                )
             except Exception as exc:
                 logger.warning("Prediction failed for player %s: %s", player_id, exc)
                 rows.append(self._fallback_prediction(row))

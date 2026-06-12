@@ -4,11 +4,14 @@
 
 - Architecture style: local batch/CLI pipeline with file-based persistence.
 - No server process, no request router, no auth layer, no database.
-- The repo is organized around four operational phases:
+- The repo is organized around six operational phases:
   1. data ingestion
-  2. feature engineering and training
+  2. feature engineering, smart feature selection, and training
   3. simulation and projection export
   4. query-time probability lookup
+  5. backtesting and ensemble weight optimization
+  6. variance optimization and copula simulation
+  7. residual correction and residual interval calibration
 
 ## Top-Level Execution Flow
 
@@ -35,15 +38,16 @@ Important named functions in `update_data.py`:
 2. `src/preprocessing/data_loader.py` reads the raw CSVs and joins player/team context.
 3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming.
    - When `--feature-ablation` is enabled, the Step 2 benchmark probe also goes through `build_feature_engineer(...)` so the ablation search stays compatible with older constructors that may reject `disable_groups`.
-4. `src/training/pipeline.py` creates chronological train/validation/test splits.
+4. **Smart feature selection (optional, Step 2.5)** — when `--feature-selection smart` (or `feature_selection.enabled: true` in YAML) is set, `train.py` runs `SmartFeatureSelector` after the full feature set is built and before `TrainingPipeline` starts. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` containing per-target feature lists. The manifest is then loaded by `TrainingPipeline.apply_feature_selection_manifest()` and consumed by `_feature_cols_for_target()` so each per-target CatBoost model trains on its own subset. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list.
+5. `src/training/pipeline.py` creates chronological train/validation/test splits.
 5. The training pipeline fits:
-    - CatBoost regressors per target
-    - a Transformer sequence model
-    - quantile models
-    - blend weights
-    - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
-    - deterministic player archetype similarity features, computed from past-only rolling/context signals rather than from a separate learned clustering artifact
-    - both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) now use zero-padding for players with fewer than `seq_len` context games instead of skipping them entirely; players with at least 1 game always produce training samples
+   - CatBoost regressors per target — each target's training frame is sliced to its per-target feature list when smart selection is active
+   - a Transformer sequence model
+   - quantile models
+   - blend weights
+   - the Transformer path now keeps an eager inference copy for validation/runtime use and treats `torch.compile` as opt-in only
+   - deterministic player archetype similarity features, computed from past-only rolling/context signals rather than from a separate learned clustering artifact
+   - both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) now use zero-padding for players with fewer than `seq_len` context games instead of skipping them entirely; players with at least 1 game always produce training samples
 6. Training writes the runtime artifact set to `models/`:
     - per-target CatBoost model files
     - per-target CatBoost metadata files
@@ -51,7 +55,8 @@ Important named functions in `update_data.py`:
     - `feature_schema.pkl`
     - `feature_cols.pkl`
     - `blend_weights.pkl`
-    - `model_stack_metadata.pkl` recording whether the Transformer was active, the expected model count, and optionally the selected preset / feature groups
+    - `model_stack_metadata.pkl` recording whether the Transformer was active, the expected model count, and optionally the selected preset / feature groups. When smart selection ran, also records `feature_selection_enabled=True`, `feature_selection_target_specific`, `feature_selection_profile`, and `selected_features_by_target` for runtime auditability.
+   - `feature_selection_manifest.json` (NEW, when smart selection ran) — per-target feature lists consumed by `TrainingPipeline.apply_feature_selection_manifest()` on subsequent training runs and by `FeatureSelector.select_features_for_target()` for downstream inference
 7. Before `TrainingPipeline.train()` returns, it validates that the required runtime files exist and raises instead of reporting a false-success training run.
 8. The Colab notebook wrapper `train_colab.ipynb` resolves the repo checkout separately from Drive-backed storage, launches `train.py` as a subprocess, captures stdout/stderr, and stops immediately on nonzero exit so the operator sees the real failure stage instead of only a wrapper exception.
 
@@ -73,9 +78,47 @@ Important current contract:
 - `ModelManager._validate_blend_contract()` raises when blend weights expect a Transformer model that is missing or failed to load, preventing silently uncalibrated partial-blend predictions.
 - `TrainingPipeline._validate_blend_contract()` enforces the same contract on the pipeline's `load_models()` path.
 - `TrainingPipeline._predict_transformer_batch()` delegates validation inference through `TransformerWrapper.predict_batch()`, which defaults to the eager model path and safe SDPA backend controls on CUDA.
+- `ModelManager.load_models()` now bootstraps `EnsembleWeights` from `WeightStore` after the legacy `blend_weights.pkl` is loaded. If a versioned weight entry exists, it overrides the legacy blend via `use_ensemble_weights()`. The bootstrap is non-fatal — if no `WeightStore` exists, the legacy blend is used. This ensures runtime uses data-driven weights even before `optimize_weights.py` is invoked. (DR-030, 2026-06-04: `TrainingPipeline._save_blend_weights()` writes the training-time blend to the versioned store so the bootstrap path is self-sufficient.)
+- **Load-time feature alignment (2026-06-04):** `ModelManager.predict_player_stats` re-aligns the inference frame against `feature_cols.pkl` before the leakage-safe selector runs. `load_expected_feature_cols(models_dir)` reads the saved list and `align_feature_frame(df, expected_cols)` reorders / drops extra columns. An inference frame with missing or non-numeric features raises `FeatureSchemaContractError`.
+- `TrainingPipeline._save_blend_weights()` writes the training-time blend both to the legacy `blend_weights.pkl` (for `validate_runtime_artifacts`) and to `WeightStore` (so the bootstrap path can pick it up).
 - `train.py` now performs explicit preflight checks for writable model/cache directories and required raw CSV inputs before expensive work begins, which makes notebook and CLI failures easier to diagnose.
 - `train.py` now also resolves training presets, passes the preset feature-group selection through `build_feature_engineer(...)`, and records the selected preset in `model_stack_metadata.pkl`.
+- `train.py` runs optional smart feature selection between Step 2 (feature engineering) and Step 3 (training) — see Flow 2.5 below.
+- `train.py` exposes `--feature-selection {off,smart}` and `--selection-profile {fast,balanced,max_accuracy}` CLI flags.
 - `train_colab.ipynb` should not infer `train.py` from the Drive models directory; it now searches the actual repo checkout first and keeps Drive-backed `data/` and `models/` separate from code location.
+
+### Flow 2.5: Smart Per-Target Feature Selection (NEW — 2026-06-04)
+
+1. `train.py` runs `SmartFeatureSelector` between Step 2 (feature engineering) and Step 3 (training) when `--feature-selection smart` (or `feature_selection.enabled: true`) is active.
+2. The selector consumes the full feature frame plus the `group_columns` map produced by `FeatureEngineer`, then runs the stages gated by `ProfileConfig`:
+   - **Group ablation** (`FeatureGroupAblator`): trains a baseline `HistGradientBoostingRegressor` plus a leave-one-out model per feature group. Records per-target `GroupScore` (MAE delta when the group is removed). Positive scores mean the group helps; negative scores mean it adds noise.
+   - **Per-target pruning** (`SmartFeatureSelector._per_target_signals`): for each target, fits a fast `HistGradientBoostingRegressor` on an 80/20 temporal split, then computes:
+     - `catboost_importance` (gain-based, 20% weight)
+     - `permutation_importance` (column-shuffle score, 10% weight)
+     - `backtest_gain` (broadcast from ablation group scores, 40% weight)
+     - `stability` (correlation between gain importances on the first vs second half of training data, 25% weight)
+     - `missingness_penalty` (share of NaN/zero rows in training frame, 5% weight, subtracted)
+   - **Shadow filtering** (`ShadowFeatureFilter`): injects `SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET` control columns and uses their median importance as a noise floor. Features scoring below the floor are dropped.
+   - **Time-stability check** (only in `max_accuracy` profile): re-runs the per-target score on a second temporal sub-split and drops features whose score collapses.
+3. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` with per-target feature lists, dropped features, shadow-dropped features, and signal scores. The manifest is also persisted in `TrainingPipeline.feature_selection_manifest` for the current run.
+4. `TrainingPipeline.apply_feature_selection_manifest()` parses the manifest and populates `self.target_feature_cols` (per-target feature lists) and `self.feature_selection_manifest` / `self.feature_selection_profile` (audit fields).
+5. `TrainingPipeline._feature_cols_for_target(target)` returns the per-target subset when smart selection is active, or falls back to the canonical `self.feature_cols` list — preserving the original contract when no manifest is loaded.
+6. Per-target CatBoost trainers in `_train_catboost_parallel` and the empty-data fallback path use `_feature_cols_for_target(target)` instead of `self.feature_cols`, so each model only sees its selected subset.
+7. `_save_model_stack_metadata()` records `feature_selection_enabled`, `feature_selection_target_specific`, `feature_selection_profile`, and the per-target feature lists for runtime auditability.
+8. Failure mode: if any stage throws (e.g., too few samples for stable fitting), the selector logs a warning and returns an empty manifest. The pipeline silently continues with the full feature set.
+
+Important named classes/methods for this flow:
+
+- `FeatureGroupAblator.run` — train baseline + LOO models, return `AblationReport`
+- `ShadowFeatureFilter.run` — inject shadows, return `ShadowFilterResult`
+- `SmartFeatureSelector.run` — orchestrate all stages, return `SelectionManifest`
+- `ProfileConfig.resolve` — resolve named profile against YAML
+- `SelectorConfig.from_config` — parse YAML `feature_selection` block
+- `SelectionManifest.to_dict` / `load` — manifest serialization
+- `SelectionManifest.save` — atomic JSON write to `models/feature_selection_manifest.json`
+- `TrainingPipeline.apply_feature_selection_manifest` — load manifest into pipeline state
+- `TrainingPipeline._feature_cols_for_target` — per-target feature list lookup with fallback
+- `FeatureSelector.select_features_for_target` — build target-specific `FeatureSchema` from an allow-list
 
 ### Flow 3: Simulation
 
@@ -100,6 +143,13 @@ Important current contract:
 - `src/simulation/sim_cache.py` — JSON disk-cache mixin for simulator caching
 - `src/simulation/stat_utils.py` — Shared statistical helpers (compute_mode, summary stats)
 
+**Distribution enrichment (NEW — 2026-05-21):** `ReportGenerator.export_player_projections()` now enriches the exported CSV with distribution parameters via `_enrich_with_distributions()`:
+- Uses `DistributionFitter` to derive Std, Skew, Zero-Prob, and Lambda from P10/P50/P90 quantile columns
+- Falls back to mean-based defaults when quantile columns are not present
+- Appends `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` columns for all 6 stats
+
+**Residual interval/confidence export (NEW — 2026-06-12):** `GameSimulator` requests `ModelManager.predict_player_stats_batch(..., include_confidence=True)`. When `models/calibration/` artifacts are loaded, the returned rows include `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE`. `GameSimulator._build_player_projection(...)` carries those fields through roster projection objects, `_run_simulation(...)` copies them into `player_averages`, and `ReportGenerator.export_player_projections()` writes the columns for every stat. If calibration artifacts are absent, the export still includes the columns with blank numeric bounds and `NO_EDGE` labels so the strict projection schema stays stable.
+
 Important named methods in this path:
 
 - `ModelManager.load_models`
@@ -122,6 +172,9 @@ Important named methods in this path:
 2. `src/query/projection_loader.py` merges projection rows with player metadata and optional defense context.
 3. `src/query/query_parser.py` interprets user input.
 4. `src/query/probability_calculator.py` calculates over/under probability, projection summaries, or Monte Carlo output.
+   - **Copula simulation** (`run_copula_simulation()`): generates correlated multi-stat draws using archetype-conditioned empirical correlation matrices from `CovarianceCache` + Gaussian copula
+   - Accepts optional `CovarianceCache` for archetype-specific 6x6 correlation matrices
+   - Distribution parameters come from `DistributionFitter` (PDF from P10/P50/P90 quantiles) or the `_enrich_with_distributions` columns in the export CSV
 
 Important named methods in this path:
 
@@ -131,6 +184,7 @@ Important named methods in this path:
 - `ProjectionLoader.get_opponent_defense_profile`
 - `ProbabilityCalculator.calculate_from_projection`
 - `ProbabilityCalculator.run_monte_carlo_simulation`
+- `ProbabilityCalculator.run_copula_simulation` — correlated multi-stat draws via archetype copula
 - `ProbabilityCalculator.evaluate_calibration`
 - `QueryParser.parse_query`
 
@@ -167,6 +221,60 @@ Important named classes/methods in the evaluation subsystem:
 - `WeightStore.load_current` — load active weights
 - `DriftDetector.check` — evaluate if performance has drifted
 - `DriftDetector.record_result` — append a backtest result to the rolling window
+
+### Flow 6: Variance Optimization and Copula Simulation (NEW — 2026-05-21)
+
+1. `optimize_variance.py` tunes context-specific volatility multipliers via CRPS:
+   - Loads historical player-game data from `data/nba_players.csv`
+   - Tunes 7 multipliers (B2B, Rookie, Blowout, Home, Away, Playoff, RestAdvantage) via scipy Nelder-Mead
+   - Uses `calculate_empirical_crps()` as the objective function (lower CRPS = sharper + better-calibrated)
+   - Returns optimal multipliers that adjust per-context std deviation
+
+2. Distribution enrichment (`_enrich_with_distributions` on `ReportGenerator`):
+   - Derives Std, Skew, Zero-Prob, Lambda for each stat from P10/P50/P90 quantile columns
+   - Falls back to mean × 0.7/1.3 heuristic when quantile columns absent
+   - Written into the exported `player_projections_*.csv` as `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`
+
+3. Correlated copula simulation (`ProbabilityCalculator.run_copula_simulation()`):
+   - Uses `CovarianceCache` (archetype-conditioned 6x6 correlation matrices from residual analysis)
+   - Gaussian copula via Cholesky decomposition + standard normal CDF → uniform marginals
+   - Per-stat inverse CDF (skew-normal for continuous stats, ZIP for count stats, normal fallback)
+   - Returns a DataFrame with all 6 stat columns and `num_sims` rows of correlated draws
+
+Important named classes/methods for this flow:
+
+- `DistributionFitter.fit_from_quantiles` — extracts distribution params from P10/P50/P90
+- `StatDistribution` — dataclass: mean, std, skew, zero_prob, lambda_param
+- `CovarianceCache.build_and_save` — computes + caches archetype correlation matrices
+- `CovarianceCache.get_correlation` — returns 6x6 matrix for an archetype
+- `calculate_empirical_crps` — O(n log n) CRPS via Gini mean difference
+- `ReportGenerator._enrich_with_distributions` — appends distribution columns to export CSV
+- `ProbabilityCalculator.run_copula_simulation` — correlated multi-stat Monte Carlo
+
+### Flow 7: Residual Correction and Residual Interval Calibration (NEW — 2026-06-12)
+
+1. `build_residual_dataset.py` creates `data/evaluation/residual_training.parquet` from walk-forward historical predictions.
+2. `train_residual_models.py` trains per-target residual correction models under `models/residual/`.
+3. `ModelManager.load_models()` loads residual correction models best-effort through `ResidualCorrectionModel` + `CorrectionApplier`; point predictions are corrected after base CatBoost/Transformer blending.
+4. `calibrate_residual_intervals.py` reads the same residual dataset and writes per-stat conformal interval artifacts under `models/calibration/`.
+5. `src/correction/calibration.py::ResidualIntervalCalibrator` computes absolute calibration error using this precedence:
+   - `abs(ACTUAL - CORRECTED_PREDICTION)` when `CORRECTED_PREDICTION` exists
+   - `abs(CORRECTED_ERROR)` when `CORRECTED_ERROR` exists
+   - `abs(ERROR)` as the fallback
+6. The calibrator writes global and context-aware buckets:
+   - `GLOBAL`
+   - `DATA_QUALITY_FULL`
+   - `DATA_QUALITY_DEGRADED`
+   - `HIGH_MINUTES_CONFIDENCE` / `LOW_MINUTES_CONFIDENCE` when a minutes-confidence column exists
+   - `PLAYER_HIGH_VOLATILITY` / `PLAYER_LOW_VOLATILITY` from player-level mean absolute calibration error
+7. `src/correction/interval_store.py::CalibrationIntervalStore` loads those JSON artifacts non-fatally; missing stat or bucket falls back to no interval / `GLOBAL` respectively.
+8. `src/correction/confidence_scorer.py::ConfidenceScorer` turns interval width, `DATA_QUALITY`, minutes confidence, and residual-model status into `HIGH`, `MEDIUM`, `LOW`, or `NO_EDGE`.
+9. `ModelManager.predict_player_stats(..., include_confidence=True)` appends interval/confidence keys after residual correction. Default callers get the legacy point-prediction shape.
+
+Important artifact paths:
+
+- `models/calibration/{stat}_intervals.json` — per-stat bucketed width/coverage artifact.
+- `models/calibration/calibration_metadata.json` — run metadata, row counts, configured confidence levels, bucket coverage summaries.
 
 ## Major Subsystems And Ownership
 
@@ -283,17 +391,39 @@ Fragility notes:
 
 - Owns backtesting, ensemble weight optimization, drift detection, and weight versioning.
 - Important modules:
-  - `metrics.py` — `BacktestResult`, `TargetMetrics`, `compute_target_metrics` dataclasses (MAE, RMSE, R², MAPE, calibration, interval coverage)
+  - `metrics.py` — `BacktestResult`, `TargetMetrics`, `compute_target_metrics` dataclasses (MAE, RMSE, R², MAPE, calibration, interval coverage), plus `calculate_empirical_crps()` for probabilistic forecast evaluation (O(n log n) Gini mean difference approximation) and `backtest_result_to_json_dict()` for machine-readable JSON serialization (used by `backtest.py --json-output`)
   - `backtest_runner.py` — `BacktestRunner`: runs model predictions against historical completed games, compares against actual box scores
   - `ensemble_optimizer.py` — `EnsembleOptimizer`: 13-parameter scipy.optimize-based weight tuner with accept/verify gates
   - `weight_store.py` — `WeightStore` + `EnsembleWeights` + `TargetBlend`: versioned JSON storage replacing opaque binary `blend_weights.pkl`, atomic writes, rollback
   - `drift_detector.py` — `DriftDetector`: statistical process control tracking per-stat accuracy over rolling windows; flags when rolling MAE exceeds 2σ above baseline
+  - **`feature_group_ablation.py` (NEW — 2026-06-04)** — `FeatureGroupAblator`: trains baseline + leave-one-out `HistGradientBoostingRegressor` per feature group, computes per-target MAE deltas. Backbone of the `backtest_gain` signal in smart feature selection.
+  - **`shadow_feature_filter.py` (NEW — 2026-06-04)** — `ShadowFeatureFilter`: injects random control columns (`SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET`) and uses their median importance as a noise floor for pruning real features.
+  - **`smart_feature_selector.py` (NEW — 2026-06-04)** — `SmartFeatureSelector` + `ProfileConfig` + `SelectorConfig` + `SelectionManifest` + `TargetSelection`: combines 5 signals (backtest_gain, stability, catboost_importance, permutation_importance, missingness_penalty) into a per-target final score and writes a manifest to `models/feature_selection_manifest.json`. Profiles (`fast` / `balanced` / `max_accuracy`) gate which stages run.
 - Key contracts:
   - `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores
   - `EnsembleOptimizer` owns a `BacktestRunner` internally and creates/validates candidate weight configs
-  - `WeightStore` writes to a versioned directory (default: `data/weights/`) with a `current.json` pointer
+  - `WeightStore` writes to a versioned directory (default: `models/blend_weights/`) with a `current.json` pointer. `ModelManager` resolves the same path under `<models_dir>/blend_weights` at load time
   - `ModelManager` now accepts hot-reloadable `EnsembleWeights` objects via `set_weights()`
   - The weight store format is human-readable JSON, not opaque binary pickle
+
+### `src/contracts/` (NEW — 2026-06-04)
+
+- Owns inter-step artifact contract validation. Validates that artifacts produced by one pipeline step satisfy the schema expectations of the next.
+- Important modules:
+  - `artifacts.py` — `ArtifactContract` + `validate_runtime_artifacts()`: checks that the `models/` directory contains the required CatBoost backbones, per-target metadata, `feature_schema.pkl`, `feature_cols.pkl`, `blend_weights.pkl`, `model_stack_metadata.pkl`, and (when `transformer_required=True`) `attention_transformer.pkl`. Also validates `model_stack_metadata.pkl`'s `targets` field matches the canonical 6-stat set. Optional `max_age_hours` enforces staleness.
+  - `features.py` — `FeatureSchema` contract used by `FeatureSelector` and the trainer to align training-time and inference-time feature layouts.
+  - `projections.py` — `validate_projection_csv()` checks the `player_projections_*.csv` schema, including the `DATA_QUALITY` column added by DR-025.
+  - `schedule.py` — schedule input contract for the simulator.
+  - `errors.py` — `ContractError` base + `ArtifactContractError`, `FeatureSchemaContractError`, `ProjectionSchemaContractError`, `ScheduleContractError` typed exceptions.
+- Standalone entry: `check_contracts.py` (root) — CLI for validating the artifact contract and projection CSV between pipeline steps. Accepts `--models-dir <path>`, `--projection-csv <path>`, `--transformer-required`.
+- Both `train.py` and `simulate_season.py` invoke contract validation at startup; the optimizer/selector/sim stack is swappable behind this seam.
+- **Wired-in production call sites (DR-031, 2026-06-04):** the contracts layer is no longer just the seam — it is invoked at every inter-step boundary:
+  - `src/data/schedule_scraper.py::ScheduleScraper` calls `normalize_schedule_frame(...)` on every read path (cached schedule hit, fresh API, cache fallback, season cache). Empty frames are skipped.
+  - `src/simulation/season_simulator.py::SeasonSimulator.simulate_season` converts the schedule frame to `ScheduleGame` records via `schedule_rows_to_games(...)` before iterating matchups (both ThreadPoolExecutor and sequential paths).
+  - `src/query/projection_loader.py::ProjectionLoader.load_projections` calls `validate_projection_frame(...)` on every load and re-raises the typed `ProjectionSchemaContractError`.
+  - `src/simulation/report_generator.py::ReportGenerator.export_player_projections` calls `validate_projection_frame(...)` on the assembled DataFrame before writing the CSV. The CSV schema is strict: 6 stats x 8 columns (`{STAT}`, `{STAT}_P10`, `{STAT}_P50`, `{STAT}_P90`, `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`) plus `DATA_QUALITY`.
+  - `src/models/model_manager.py::ModelManager.predict_player_stats` calls `load_expected_feature_cols(models_dir)` and `align_feature_frame(df, expected_cols)` before the leakage-safe selector runs, so reordered or extra-column inference frames are coerced to the trained layout before any prediction is computed.
+  - `train.py` calls `validate_runtime_artifacts(ArtifactContract(...))` at the bottom of the training flow so a contract violation that materializes during training is caught before the next downstream step begins.
 
 ### `src/lifecycle/` (NEW — 2026-05-22)
 
@@ -389,8 +519,10 @@ Total feature groups: 26 (19 original + 4 lifecycle + 3 season context).
 - Important modules:
   - `interactive_cli.py`
   - `projection_loader.py`
-  - `probability_calculator.py`
+  - `probability_calculator.py` — also accepts optional `CovarianceCache` for copula simulation
   - `query_parser.py`
+  - **`distribution_fitter.py` (NEW)** — `DistributionFitter`: derives Mean/Std/Skew/Zero-Prob/Lambda from P10/P50/P90 quantile outputs. Used by `ReportGenerator._enrich_with_distributions()` and `ProbabilityCalculator.run_copula_simulation()`.
+  - **`empirical_covariance.py` (NEW)** — `CovarianceCache`: computes, caches, and retrieves archetype-conditioned 6x6 empirical correlation matrices from residual analysis. Persisted to `data/cache/archetype_covariances.npz`.
 
 Important boundary:
 
@@ -440,17 +572,19 @@ Important boundary:
 - `models/feature_cols.pkl`
 - `models/blend_weights.pkl`
 - `models/model_stack_metadata.pkl`
-- `data/weights/` — versioned JSON weight store (replaces opaque binary `blend_weights.pkl`). Contains version-numbered weight files + `current.json` pointer. Managed by `WeightStore`.
+- `models/blend_weights/` — versioned JSON weight store (replaces opaque binary `blend_weights.pkl`). Contains version-numbered weight files (`v0001.json`, `v0002.json`, …) + `current.json` pointer. Managed by `WeightStore`. `ModelManager` now bootstraps from this store at load time when a `current.json` exists, so the runtime picks up data-driven weights even before `optimize_weights.py` is run. (Earlier brain revisions referred to this as `data/weights/` — the actual default is `models/blend_weights/`, per `WeightStore.__init__(store_dir="models/blend_weights")` and `ModelManager._load_models`.)
+- `models/feature_selection_manifest.json` (NEW — 2026-06-04) — per-target feature lists produced by `SmartFeatureSelector`. Consumed by `TrainingPipeline.apply_feature_selection_manifest()` on subsequent training runs and by `FeatureSelector.select_features_for_target()` for downstream inference.
 
 ### Generated Outputs
 
 - `data/sim_results/sim_results_<timestamp>.csv`
-- `data/sim_results/player_projections_<timestamp>.csv`
+- `data/sim_results/player_projections_<timestamp>.csv` — now includes `DATA_QUALITY` and distribution enrichment columns (`{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` for all 6 stats)
 - Experiment JSON files under `experiments/<experiment_name>/`
 
 ### Cache Layers
 
 - `data/cache/` for scraped or derived data.
+- `data/cache/archetype_covariances.npz` — archetype-conditioned 6x6 correlation matrices computed by `CovarianceCache` from residual analysis.
 - `data/sim_cache/` for simulation-time cache data.
 - `cache/` and `cache/training/` for more general caching.
 

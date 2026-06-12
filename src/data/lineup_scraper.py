@@ -620,6 +620,11 @@ class LineupScraper:
             injuries_df = scraper.fetch_injuries()
             if injuries_df.empty:
                 return []
+            if 'TEAM_ABBR' not in injuries_df.columns:
+                if 'TEAM' in injuries_df.columns:
+                    injuries_df['TEAM_ABBR'] = injuries_df['TEAM'].apply(normalize_team)
+                else:
+                    return []
             injuries_df = injuries_df[injuries_df['TEAM_ABBR'] == normalize_team(team_abbr)]
             
             inactive = []

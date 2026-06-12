@@ -215,7 +215,13 @@ class FallbackPredictor:
 
 
 class FeatureSelector:
-    """Master selector shared by training and inference."""
+    """Master selector shared by training and inference.
+
+    When the smart feature selector writes a manifest, the pipeline can
+    pass a :class:`FeatureSchema` that was built from
+    ``manifest.selected_features_by_target[target]`` so each per-target
+    CatBoost model only sees the columns the selector kept for that stat.
+    """
 
     SAFE_PREFIXES = (
         'ROLL_',
@@ -315,6 +321,58 @@ class FeatureSelector:
     def select_features(self, df: pd.DataFrame) -> List[str]:
         schema = self.fit(df)
         return schema.feature_cols
+
+    def select_features_for_target(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        allowed_features: Optional[Sequence[str]] = None,
+    ) -> List[str]:
+        """Build a :class:`FeatureSchema` for a single target.
+
+        Args:
+            df: Pre-engineered training DataFrame.
+            target: Target stat (e.g., ``"PTS"``).
+            allowed_features: Optional whitelist (e.g., the
+                ``selected_features_by_target[target]`` list from a
+                feature selection manifest). When provided, the schema
+                is restricted to that whitelist and the leakage-safe
+                filter is skipped.
+
+        Returns:
+            The list of feature columns that should be used to train the
+            per-target model.  The schema is cached on the selector for
+            later :meth:`align_frame` calls.
+        """
+        if allowed_features is not None:
+            # When a target-specific allow-list is supplied, trust it
+            # but still drop anything not numeric / leakage-safe.
+            safe_features = [
+                c for c in allowed_features
+                if c in df.columns
+                and c not in self.EXCLUDE_ALWAYS
+                and c != target
+                and c not in self.targets
+                and self._is_numeric(df[c])
+            ]
+            cat_cols = [
+                c for c in ["PLAYER_ID", "TEAM_ID", "OPPONENT_ID"]
+                if c in df.columns
+            ]
+            dtype_map = {col: str(df[col].dtype) for col in safe_features}
+            self.feature_schema = FeatureSchema(
+                feature_cols=safe_features,
+                categorical_cols=cat_cols,
+                dtype_map=dtype_map,
+            )
+            logger.info(
+                "Selected %s target-specific features for %s",
+                len(safe_features),
+                target,
+            )
+            return safe_features
+
+        return self.select_features(df)
 
     def fit(
         self,

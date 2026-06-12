@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
@@ -26,6 +27,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import load_config
+from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
 from src.training.pipeline import TrainingPipeline, create_pipeline
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
@@ -38,6 +40,7 @@ from src.models.gpu_utils import (
     print_gpu_summary,
 )
 from src.utils.logging_config import setup_logging
+from src.utils.prediction_utils import FeatureSelector
 
 setup_logging()
 
@@ -217,6 +220,20 @@ Examples:
     parser.add_argument(
         '--feature-ablation', action='store_true',
         help='Benchmark and prune weak feature groups/formulas before training'
+    )
+    parser.add_argument(
+        '--feature-selection', type=str, default=None,
+        choices=[None, 'off', 'smart'],
+        help='Enable smart per-target feature selection. "smart" runs group '
+             'ablation, per-target pruning, and shadow filtering to build '
+             'a per-stat feature list (requires --feature-selection-profile).'
+    )
+    parser.add_argument(
+        '--selection-profile', type=str, default='balanced',
+        choices=['fast', 'balanced', 'max_accuracy'],
+        help='Smart feature selection profile — controls which selection '
+             'stages run (default: balanced). Has no effect when '
+             '--feature-selection is not "smart".'
     )
     parser.add_argument(
         '--no-gpu', action='store_true',
@@ -416,11 +433,110 @@ Examples:
             cache_dir=cache_dir,
         )
         full_df = feature_engineer.create_features(merged_df)
-        
+
         if console and RICH_AVAILABLE:
             console.print(f"  [green]✓[/green] Created {len(full_df.columns):,} features")
         else:
             print(f"  Created {len(full_df.columns)} features")
+
+        # ---- Smart feature selection (per-target) ----
+        # When --feature-selection smart is passed, build all features
+        # first, then run group ablation, per-target pruning, and shadow
+        # filtering. The resulting manifest is fed to the pipeline as
+        # per-target feature lists before training starts.
+        feature_selection_manifest_payload: Optional[dict] = None
+        cli_selection = (args.feature_selection or "").strip().lower() or None
+        config_selection_cfg = (
+            getattr(runtime_config, 'feature_selection', {}) or {}
+        )
+        config_profile = (
+            getattr(runtime_config, 'feature_selection_profiles', {}) or {}
+        )
+        fs_enabled = (
+            cli_selection == 'smart'
+            or (cli_selection is None and bool(config_selection_cfg.get('enabled', False)))
+        )
+        if fs_enabled:
+            current_stage = "smart feature selection"
+            logger.info("Step 2.5/5: %s", current_stage.title())
+            if console and RICH_AVAILABLE:
+                console.print(
+                    "\n[bold cyan]Step 2.5: Smart per-target feature selection...[/bold cyan]"
+                )
+            else:
+                print("\nStep 2.5: Smart per-target feature selection...")
+
+            try:
+                from src.evaluation import (
+                    ProfileConfig,
+                    SelectorConfig,
+                    SmartFeatureSelector,
+                )
+
+                # CLI overrides YAML config when explicitly set.
+                fs_cfg = dict(config_selection_cfg or {})
+                if cli_selection == 'smart':
+                    fs_cfg['enabled'] = True
+                    fs_cfg['mode'] = 'smart'
+                else:
+                    fs_cfg.setdefault('enabled', True)
+                if args.selection_profile and args.selection_profile != 'balanced':
+                    fs_cfg['profile'] = args.selection_profile
+                fs_cfg.setdefault(
+                    'output_path', 'models/feature_selection_manifest.json'
+                )
+                fs_cfg.setdefault('random_state', 42)
+
+                selector_config = SelectorConfig.from_config(fs_cfg)
+                profile_config = ProfileConfig.resolve(
+                    selector_config.profile, config_profile
+                )
+
+                selector = SmartFeatureSelector(
+                    config=selector_config, profile=profile_config
+                )
+                master_feature_cols = [
+                    c for c in full_df.columns
+                    if c not in selector.targets
+                    and c not in FeatureSelector.EXCLUDE_ALWAYS
+                    and c
+                ]
+                # Use the engineer's group_columns mapping (set on
+                # last_result.group_columns) so the ablator knows which
+                # columns belong to which group.
+                group_columns = feature_engineer.get_group_columns()
+                if not group_columns:
+                    logger.warning(
+                        "Smart feature selection: no group_columns recorded; "
+                        "falling back to a single all-features group"
+                    )
+                    group_columns = {"all": list(master_feature_cols)}
+
+                manifest = selector.run(
+                    full_df=full_df,
+                    feature_cols=master_feature_cols,
+                    group_columns=group_columns,
+                    targets=preset.targets,
+                )
+                feature_selection_manifest_payload = manifest.to_dict()
+                logger.info(
+                    "Smart feature selection complete: profile=%s targets=%d global=%d",
+                    manifest.profile,
+                    len(manifest.targets),
+                    len(manifest.selected_features_global),
+                )
+                if console and RICH_AVAILABLE:
+                    console.print(
+                        f"  [green]✓[/green] Selected "
+                        f"{len(manifest.selected_features_global)} global features, "
+                        f"{len(manifest.selected_features_by_target)} per-target lists"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Smart feature selection failed (%s); continuing with the "
+                    "full feature set", exc,
+                )
+                feature_selection_manifest_payload = None
         
         # Create and run pipeline
         current_stage = "pipeline initialization"
@@ -449,6 +565,21 @@ Examples:
         pipeline.model_config.setdefault("metadata", {})
         pipeline.model_config["metadata"]["training_preset"] = preset.name
         pipeline.model_config["metadata"]["recent_seasons"] = preset.recent_seasons
+
+        # Apply the smart feature selection manifest (if any) so the
+        # per-target CatBoost models use the selected feature subsets.
+        if feature_selection_manifest_payload:
+            pipeline.feature_selection_config = feature_selection_manifest_payload
+            pipeline.feature_selection_profile = (
+                feature_selection_manifest_payload.get("profile")
+            )
+            pipeline.apply_feature_selection_manifest(
+                feature_selection_manifest_payload
+            )
+            pipeline.model_config["metadata"]["feature_selection_enabled"] = True
+            pipeline.model_config["metadata"]["feature_selection_profile"] = (
+                feature_selection_manifest_payload.get("profile")
+            )
         
         # Print hardware info
         print_hardware_info(pipeline.hw_info, console)
@@ -475,7 +606,13 @@ Examples:
             print(f"\nStep 5: Training models (this may take a while)...")
         
         results = pipeline.train(fit_df, val_df)
-        
+        validate_runtime_artifacts(
+            ArtifactContract(
+                models_dir=Path(models_dir),
+                transformer_required=bool(pipeline.model_config.get("transformer", {}).get("enabled", False)),
+            )
+        )
+
         # Print summary
         if console and RICH_AVAILABLE:
             console.print()

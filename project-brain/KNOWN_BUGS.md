@@ -1038,3 +1038,352 @@ This file tracks confirmed or strongly suspected defects and weak points visible
 - `src/training/trainer.py`
 - `tests/test_training/test_nn_trainer.py`
 - `tests/test_models/test_transformer_model.py`
+
+
+---
+
+## KB-021: Projection CSV Schema Is Now Strict — Legacy CSVs No Longer Load With Defaults
+
+- Status: intentional behavior change (resolved) in 2026-06-04; not a defect
+- Severity: low (affects upgrade path, not runtime)
+- Confidence: high
+
+### Symptom
+
+- After upgrading to the 2026-06-04 contracts layer, an operator with pre-2026-06-04 `player_projections_*.csv` files in `data/sim_results/` will see `ProjectionLoader.load_projections(...)` raise `ProjectionSchemaContractError` instead of loading with default zero values.
+- After the Ticket 4 residual interval change on 2026-06-12, projection CSVs generated between 2026-06-04 and 2026-06-12 can also fail the validator because they have distribution columns and `DATA_QUALITY` but lack `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE`.
+- `test_missing_tov_columns_loads_with_defaults` was renamed to `test_missing_tov_columns_fails_loudly` in the same change; the assertion is now that the typed exception is raised.
+
+### Expected Behavior
+
+- The projection CSV schema is strict: 6 stats x 14 columns (`{STAT}`, `{STAT}_P10`, `{STAT}_P50`, `{STAT}_P90`, `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`, `{STAT}_INTERVAL_80_LOW`, `{STAT}_INTERVAL_80_HIGH`, `{STAT}_INTERVAL_90_LOW`, `{STAT}_INTERVAL_90_HIGH`, `{STAT}_CONFIDENCE`, `{STAT}_CONFIDENCE_SCORE`) plus `DATA_QUALITY`. `validate_projection_frame(...)` enforces this on every load and on every write.
+- Operators who upgrade must regenerate projection CSVs from the current `simulate_season.py`. There is no backwards-compatibility fallback for missing columns.
+
+### Evidence
+
+- `src/contracts/projections.py::validate_projection_frame` defines the strict required set.
+- `src/query/projection_loader.py::ProjectionLoader.load_projections` calls `validate_projection_frame(...)` and re-raises the typed `ProjectionSchemaContractError`.
+- `src/simulation/report_generator.py::ReportGenerator.export_player_projections` writes the strict schema and validates before saving. When `models/calibration/` is absent, interval bounds are blank and confidence labels are `NO_EDGE`; the columns still exist.
+- `tests/test_query/test_six_stat_contract.py::TestMissingStatColumnsFailsLoudly::test_missing_tov_columns_fails_loudly` guards the load path.
+
+### Suspected Cause
+
+- The change is intentional (DR-031, 2026-06-04). The contracts layer is the seam; `ProjectionLoader` previously fell back to zero defaults for missing columns, which silently produced 0.0 over/under probabilities for STL/BLK/TOV. The strict schema is the corrected behavior.
+
+### Workaround
+
+- Re-run `python simulate_season.py --today` (or `--date YYYY-MM-DD`) after upgrading to regenerate projection CSVs in the strict schema. The new CSVs are loadable by the query layer and the new validator.
+- To populate meaningful interval bounds instead of `NO_EDGE`/blank values, first run `python calibrate_residual_intervals.py --input data/evaluation/residual_training.parquet --output-dir models/calibration`.
+- For bulk regeneration, run `python simulate_season.py --week` or `--season`.
+
+### Fix Ideas
+
+- No code fix needed — this is the intended new behavior. The fix is operator workflow: regenerate the CSVs.
+
+### Risks
+
+- Operators who depend on the old default-fallback behavior will see a hard failure on first load after upgrading. The fix is documented in `PROJECT_CONTEXT.md` (Journey 4) and surfaced in the `CURRENT_STATE.md` (Known Workarounds) section.
+
+### Related Files
+
+- `src/contracts/projections.py`
+- `src/contracts/errors.py`
+- `src/query/projection_loader.py`
+- `src/simulation/report_generator.py`
+- `src/correction/calibration.py`
+- `src/correction/interval_store.py`
+- `src/correction/confidence_scorer.py`
+- `calibrate_residual_intervals.py`
+- `tests/test_query/test_six_stat_contract.py`
+- `tests/test_correction/test_calibration.py`
+- `project-brain/PROJECT_CONTEXT.md` (Journey 4)
+- `project-brain/CODE_RULES.md` (Strict projection schema)
+- `project-brain/DECISIONS.md` (DR-031)
+
+---
+
+## KB-022: Training Pipeline Crashes When Saving Blend Weights
+
+- Status: fixed in code on 2026-06-12
+- Severity: critical
+- Confidence: high
+
+### Symptom
+
+- Training appears to complete, but `_save_blend_weights()` raises `AttributeError: 'TrainingPipeline' object has no attribute 'targets'` and the legacy `blend_weights.pkl` is never written. `ModelManager` then fails the runtime artifact contract because blend weights are required.
+
+### Expected Behavior
+
+- Blend weights should be persisted to both the legacy `blend_weights.pkl` and the versioned `WeightStore` after training.
+
+### Evidence
+
+- `src/training/pipeline.py:998` iterated `for target in self.targets:` but the class only defines `self.TARGETS`.
+- Fixed by changing the reference to `self.TARGETS`.
+- Regression test `tests/test_training/test_runtime_artifact_contract.py::test_model_manager_rejects_missing_transformer_when_blend_weights_expect_it` now passes after also clearing the versioned WeightStore in the test fixture so the legacy edit is honored.
+
+### Related Files
+
+- `src/training/pipeline.py`
+- `src/evaluation/weight_store.py`
+- `tests/test_training/test_runtime_artifact_contract.py`
+
+---
+
+## KB-023: Transformer Runtime Inference Uses Categorical ID Columns
+
+- Status: fixed in code on 2026-06-12
+- Severity: critical
+- Confidence: high
+
+### Symptom
+
+- `ModelManager._predict_transformer_target()` builds a feature sequence from `self.feature_cols`, which includes categorical ID columns (`PLAYER_ID`, `TEAM_ID`, `OPPONENT_ID`). The Transformer was trained only on numeric `nn_features = feature_cols - cat_features`, so inference raises a shape mismatch or produces garbage predictions.
+
+### Expected Behavior
+
+- Transformer inference should use the same numeric feature columns that were used during training.
+
+### Evidence
+
+- `src/models/model_manager.py:432-444` reindexed the history frame to `self.feature_cols`.
+- Fixed by computing `nn_features = [c for c in self.feature_cols if c not in cat_features]` and aligning to that set. Defensive `getattr(self, "cat_features", [])` handles test doubles that do not set the attribute.
+- `tests/test_models/test_model_manager.py::TestFallbackPredictor::test_transformer_prediction_uses_all_targets` covers the path.
+
+### Related Files
+
+- `src/models/model_manager.py`
+- `src/training/pipeline.py`
+- `src/models/transformer_model.py`
+- `tests/test_models/test_model_manager.py`
+
+---
+
+## KB-024: Test Torch Shim Fails To Import On PyTorch-Less Machines
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- On machines without PyTorch, `src/__init__.py:_install_test_torch_shim()` crashes with `AttributeError: module 'importlib' has no attribute 'util'`, breaking any test that imports `torch`.
+
+### Expected Behavior
+
+- The shim should install cleanly when real PyTorch is unavailable.
+
+### Evidence
+
+- The function imported `importlib` but referenced `importlib.util.find_spec("torch")`.
+- Fixed by importing `importlib.util` directly.
+
+### Related Files
+
+- `src/__init__.py`
+- `tests/test_models/test_transformer_model.py`
+
+---
+
+## KB-025: Minutes Predictor Fatigue Feature Misaligned And Mostly NaN
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `MinutesPredictor._engineer_features()` computes `MINS_LAST_3` with a `groupby(...).rolling(...).sum()` that returns a Series with a MultiIndex. Assigning it directly to a DataFrame column produces misaligned/NaN values, so `FATIGUE_SCORE` is effectively zero for all rows.
+
+### Expected Behavior
+
+- `MINS_LAST_3` should reflect the rolling sum of the previous three games' minutes, aligned to each row.
+
+### Evidence
+
+- `src/models/minutes_predictor.py:172` assigned the MultiIndex result without resetting the group level.
+- Fixed with `reset_index(level=0, drop=True)`.
+
+### Related Files
+
+- `src/models/minutes_predictor.py`
+
+---
+
+## KB-026: Defense Scraper Stores `pts_allowed_per_100` But Consumers Read `opp_pts_per_100`
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `NBADefenseScraper.get_team_defense_allowed()` returns a dict keyed by `pts_allowed_per_100` from the all-team fetch path, but `get_position_defense()` looks for `opp_pts_per_100`. The all-team path therefore always falls back to the league-average default of 114.0, neutralizing real defensive rating data.
+
+### Expected Behavior
+
+- Both keys should be available so downstream consumers can use whichever they expect.
+
+### Evidence
+
+- `src/data/nba_defense_scraper.py:172` stored `pts_allowed_per_100`; `src/data/nba_defense_scraper.py:687` read `opp_pts_per_100`.
+- Fixed by normalizing the returned dict in `get_team_defense_allowed()`: if `pts_allowed_per_100` exists and `opp_pts_per_100` does not, the latter is added.
+
+### Related Files
+
+- `src/data/nba_defense_scraper.py`
+
+---
+
+## KB-027: Injury Scraper Does Not Add `TEAM_ABBR` To Disk-Cached Data
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `InjuryScraper.fetch_injuries()` adds `TEAM_ABBR` only on the live-fetch branch. When the disk cache is loaded, `TEAM_ABBR` is missing and downstream consumers such as `LineupScraper._get_inactive_players()` raise `KeyError`.
+
+### Expected Behavior
+
+- Cached injury data should have the same schema as live-fetched data.
+
+### Evidence
+
+- `src/data/injury_scraper.py:179` added `TEAM_ABBR` only in the live branch; `_load_from_cache()` did not.
+- Fixed by deriving `TEAM_ABBR` from `TEAM` in `_load_from_cache()` and also setting `_cache_timestamp` so the in-memory cache is considered valid.
+
+### Related Files
+
+- `src/data/injury_scraper.py`
+- `src/data/lineup_scraper.py`
+
+---
+
+## KB-028: Lineup Scraper Crashes When Injury Data Lacks `TEAM_ABBR`
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `LineupScraper._get_inactive_players()` filters injuries with `injuries_df['TEAM_ABBR'] == normalize_team(team_abbr)`. If the column is missing, it raises `KeyError`.
+
+### Expected Behavior
+
+- The method should gracefully derive `TEAM_ABBR` from `TEAM` if needed or return an empty list when neither column exists.
+
+### Evidence
+
+- `src/data/lineup_scraper.py:623` assumed `TEAM_ABBR` always exists.
+- Fixed by adding a guard that creates `TEAM_ABBR` from `TEAM` when absent.
+
+### Related Files
+
+- `src/data/lineup_scraper.py`
+- `src/data/injury_scraper.py`
+
+---
+
+## KB-029: Player Bio Enrichment Leaks Current Age Into Historical Rows
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `PlayerBioScraper._normalize_bio()` computes `AGE` from `pd.Timestamp.now()`. When `update_data.py` enriches historical game logs, every row receives the player's current age, leaking future information into training data.
+
+### Expected Behavior
+
+- Each historical game row should use the player's age on that game's date.
+
+### Evidence
+
+- `src/data/player_bio_scraper.py:115-117` used `pd.Timestamp.now()`.
+- Fixed in `update_data.py::enrich_with_player_bios()` by excluding the cached `AGE` from the merge and recomputing it from `BIRTHDATE` and `GAME_DATE`.
+
+### Related Files
+
+- `src/data/player_bio_scraper.py`
+- `update_data.py`
+
+---
+
+## KB-030: Basketball Reference Scraper Builds Wrong Season URLs
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `BasketballRefScraper` used `season.replace('-', '')` for URLs, producing strings like `202425` instead of the ending year `2025`. This causes 404s on both team pages and league ratings pages.
+
+### Expected Behavior
+
+- URLs should use the full ending year of the season.
+
+### Evidence
+
+- `src/data/basketball_ref_scraper.py:129` and `:356` used `season.replace('-', '')`.
+- Fixed by adding `_season_end_year()` helper that returns the ending year (e.g. `2025` for `2024-25`).
+
+### Related Files
+
+- `src/data/basketball_ref_scraper.py`
+
+---
+
+## KB-031: Injury Risk Career Count Includes Future Injuries
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `InjuryRiskFeatureGroup` computes `INJURY_RISK_CAREER_COUNT` as the total injury count per player from `injury_history.csv`, shifted by one row. Because the count is not filtered by `DATE < GAME_DATE`, past games see injuries that occurred in the future.
+
+### Expected Behavior
+
+- The career count for each game should include only injuries that occurred before that game.
+
+### Evidence
+
+- `src/preprocessing/features/injury_risk.py:101-118` aggregated all injuries per player.
+- Fixed by merging history dates with game dates and counting only `DATE < GAME_DATE`.
+
+### Related Files
+
+- `src/preprocessing/features/injury_risk.py`
+- `tests/test_preprocessing/test_injury_risk_features.py`
+
+---
+
+## KB-032: Skill Development Features Leak Future In-Season Games
+
+- Status: fixed in code on 2026-06-12
+- Severity: high
+- Confidence: high
+
+### Symptom
+
+- `SkillDevelopmentFeatureGroup` computes per-player per-season averages over the entire season, merges them back onto every row, then shifts by one. For a game in the middle of the season, the "current season average" includes games that occur after that row, leaking future information.
+
+### Expected Behavior
+
+- The current-season component of YoY velocity should use only games that occurred before the current row.
+
+### Evidence
+
+- `src/preprocessing/features/skill_development.py:107-126` used full-season aggregates.
+- Fixed by replacing full-season current-season averages with expanding season-to-date averages shifted by 1, while still using the full prior season as the reference.
+
+### Related Files
+
+- `src/preprocessing/features/skill_development.py`
+- `tests/test_preprocessing/test_skill_development_features.py`

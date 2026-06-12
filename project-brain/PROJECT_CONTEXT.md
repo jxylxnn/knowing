@@ -13,7 +13,11 @@
   - `query_prob.py`
   - `backtest.py` (NEW)
   - `optimize_weights.py` (NEW)
+  - `optimize_variance.py` (NEW — tune context-specific volatility multipliers via CRPS)
+  - `calibrate_residual_intervals.py` (NEW — build conformal interval artifacts from residual errors)
   - `clear_cache.py`
+  - `check_contracts.py` (NEW — 2026-06-04) — standalone artifact-contract validator; also wired into `train.py` and `simulate_season.py` startup
+  - `train.py --feature-selection smart --selection-profile {fast,balanced,max_accuracy}` (NEW — per-target feature selection)
 
 ## What The Project Is
 
@@ -102,8 +106,21 @@ Not supported by repo evidence:
   - `src/simulation/report_generator.py`
 - Outputs:
   - `data/sim_results/sim_results_<timestamp>.csv`
-  - `data/sim_results/player_projections_<timestamp>.csv` — now includes `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`)
+  - `data/sim_results/player_projections_<timestamp>.csv` — includes `DATA_QUALITY` column (`FULL`, `DEGRADED_FALLBACK`, `DEGRADED_MISSING`), distribution enrichment columns (`{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA` for all 6 stats), and residual-calibrated interval/confidence columns (`{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, `{STAT}_CONFIDENCE_SCORE`).
 - This is the bridge between trained models and query-time projection usage.
+
+### 3.5. Calibrate Residual Prediction Intervals
+
+- Run `python calibrate_residual_intervals.py --input data/evaluation/residual_training.parquet --output-dir models/calibration`.
+- The CLI consumes the residual dataset produced by the walk-forward residual builder and writes:
+  - `models/calibration/pts_intervals.json`
+  - `models/calibration/reb_intervals.json`
+  - `models/calibration/ast_intervals.json`
+  - `models/calibration/stl_intervals.json`
+  - `models/calibration/blk_intervals.json`
+  - `models/calibration/tov_intervals.json`
+  - `models/calibration/calibration_metadata.json`
+- Runtime loading is best-effort. If `models/calibration/` is missing or malformed, `ModelManager.predict_player_stats(..., include_confidence=True)` simply omits interval keys and the simulator/export path fills projection columns with `NO_EDGE` / blank numeric bounds.
 
 ### 4. Query Projection Probabilities
 
@@ -120,7 +137,7 @@ Not supported by repo evidence:
   - `stl`
   - `blk`
   - `tov`
-- Important caveat: the exported projection CSV currently includes only points, rebounds, and assists. The query layer handles steals, blocks, and turnovers only partially through defaults/fallbacks. See `KNOWN_BUGS.md`.
+- All six stats (PTS, REB, AST, STL, BLK, TOV) are first-class in the projection CSV schema. Each stat row carries the mean plus distribution columns `{STAT}_P10`, `{STAT}_P50`, `{STAT}_P90`, `{STAT}_STD`, `{STAT}_SKEW`, `{STAT}_ZERO_PROB`, `{STAT}_LAMBDA`, and residual interval/confidence columns `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, `{STAT}_CONFIDENCE_SCORE`. `ProjectionLoader.load_projections` enforces the schema via `validate_projection_frame(...)` and raises the typed `ProjectionSchemaContractError` when required columns are missing. Legacy CSVs (pre-2026-06-12) must be regenerated from the current `simulate_season.py` before the query layer can load them. See `KNOWN_BUGS.md` (KB-021).
 
 ### 5. Clear Generated State
 
@@ -139,8 +156,29 @@ Not supported by repo evidence:
 - Run `python optimize_weights.py --recent 14` (or `--from`/`--to`).
 - Runs backtesting to establish baseline, then uses scipy.optimize to find better blend coefficients.
 - 13 tunable parameters: 6 per-target CatBoost/Transformer ratios + 6 per-target intercepts + 1 CatBoost-MAE blend.
-- Accept/verify gates prevent regression. Output: versioned JSON weights in `data/weights/`.
+- Accept/verify gates prevent regression. Output: versioned JSON weights in `models/blend_weights/` (not `data/weights/` — earlier docs had the wrong path).
 - Supports `--dry-run`, `--rollback N`, and `--list` modes.
+
+### 8. Optimize Variance Multipliers (NEW)
+
+- Run `python optimize_variance.py --recent 30` (or `--from`/`--to`, `--target <STAT>`).
+- Tunes 7 context-specific volatility multipliers (B2B, Rookie, Blowout, Home, Away, Playoff, RestAdvantage) via scipy Nelder-Mead.
+- Uses CRPS (Continuous Ranked Probability Score) as the objective — lower CRPS = sharper + better-calibrated forecasts.
+- Loads historical data from `data/nba_players.csv` — does not require trained model artifacts.
+- Supports `--dry-run` to preview current multipliers without optimizing.
+- Risk level: low. Independent of training artifacts, operates on raw CSVs.
+
+### 9. Run Smart Per-Target Feature Selection (NEW)
+
+- Run `python train.py --feature-selection smart --selection-profile balanced` (or `fast` / `max_accuracy`).
+- Runs `SmartFeatureSelector` between Step 2 (feature engineering) and Step 3 (training).
+- Combines 5 signals (group ablation, per-target pruning, shadow filter, stability, missingness) into a per-target feature score.
+- Writes a `SelectionManifest` to `models/feature_selection_manifest.json` with per-target feature lists, dropped features, shadow-dropped features, and per-signal scores.
+- `TrainingPipeline` consumes the manifest and trains each per-target CatBoost model on its own subset of features.
+- `model_stack_metadata.pkl` records the active profile and per-target feature lists for runtime auditability.
+- Failure is non-fatal — `train.py` logs a warning and falls back to the full feature set.
+- Same data requirements as a normal `train.py` run — operates on `data/nba_players.csv` after feature engineering.
+- Use `--json-output` on `backtest.py` to feed downstream metrics into the same tooling that consumes the selector's outputs.
 
 ## Core Features That Actually Exist
 
@@ -171,6 +209,9 @@ Not supported by repo evidence:
   - betting lines
   - matchup and pace context
 - Interactive probability querying and Monte Carlo probability estimation in `src/query/`.
+- **Distribution-aware over/under querying (DR-027, 2026-05-21):** `DistributionFitter` derives Mean/Std/Skew/Zero-Prob/Lambda from P10/P50/P90 quantile outputs; `CovarianceCache` stores archetype-conditioned 6x6 empirical correlation matrices from residual analysis; `ProbabilityCalculator.run_copula_simulation()` produces correlated multi-stat Monte Carlo draws via Gaussian copula; `calculate_empirical_crps()` in `src/evaluation/metrics.py` is the probabilistic forecast objective used by `optimize_variance.py`. Copula simulation is the active path for over/under probability when correlation is requested; independent Monte Carlo is still supported for legacy callers.
+- **Inter-step artifact contracts (DR-029, 2026-06-04):** `src/contracts/` is the canonical seam between training, simulation, optimizer, and query layers. `ArtifactContract`, `FeatureSchema`, the projection-CSV validator, and the schedule validator are invoked at every producer/consumer boundary (see `project-brain/ARCHITECTURE.md` for the call-site list). `check_contracts.py` is the standalone CLI for debugging contract failures in isolation.
+- **Residual-calibrated confidence intervals (DR-032, 2026-06-12):** `ResidualIntervalCalibrator` turns walk-forward residual errors into per-stat conformal half-widths under `models/calibration/`; `CalibrationIntervalStore` loads them non-fatally; `ConfidenceScorer` converts width/data-quality/minutes/residual signals into user-facing confidence labels. This complements residual correction: the residual model adjusts the point estimate, while calibration describes uncertainty around the corrected prediction.
 
 ## Features That Appear Intended But Are Not Reliably Delivered
 

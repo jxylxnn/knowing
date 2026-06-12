@@ -1,6 +1,16 @@
 """Test models module."""
 
+import pickle
+import numpy as np
+import pandas as pd
 import pytest
+
+
+def _create_feature_schema(models_dir, feature_cols):
+    """Create a minimal feature_cols.pkl for tests."""
+    path = models_dir / "feature_cols.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(feature_cols, f)
 
 
 class TestModelManager:
@@ -47,6 +57,36 @@ class TestModelManager:
         with pytest.raises(ValueError, match="Players file not found"):
             manager.prepare_data()
 
+    def test_residual_correction_attributes_initialized(self, temp_data_dir):
+        """ModelManager should initialize residual correction attributes."""
+        from src.models.model_manager import ModelManager
+
+        manager = ModelManager(
+            data_dir=str(temp_data_dir["data_dir"]),
+            models_dir=str(temp_data_dir["models_dir"]),
+        )
+
+        assert manager.residual_correction_model is None
+        assert manager.correction_applier is None
+        assert manager.residual_corrections_enabled is False
+
+    def test_residual_corrections_not_loaded_when_dir_missing(self, tmp_path):
+        """_load_residual_corrections should be a no-op when residual dir absent."""
+        from src.models.model_manager import ModelManager
+
+        manager = ModelManager.__new__(ModelManager)
+        manager.models_dir = str(tmp_path)
+        manager.residual_correction_model = None
+        manager.correction_applier = None
+        manager.residual_corrections_enabled = False
+        manager.targets = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+
+        manager._load_residual_corrections()
+
+        assert manager.residual_corrections_enabled is False
+        assert manager.correction_applier is None
+        assert manager.residual_correction_model is None
+
 
 class TestModelRegistry:
     """Tests for ModelRegistry class."""
@@ -81,8 +121,6 @@ class TestFallbackPredictor:
         manager = ModelManager.__new__(ModelManager)
         manager.targets = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
 
-        import pandas as pd
-
         df = pd.DataFrame({"PTS": [10], "ROLL_PTS_AVG_10": [12]})
 
         result = manager._get_fallback_value(df, "PTS")
@@ -95,8 +133,6 @@ class TestFallbackPredictor:
         manager = ModelManager.__new__(ModelManager)
         manager.targets = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
 
-        import pandas as pd
-
         df = pd.DataFrame()
 
         result = manager._get_fallback_value(df, "PTS")
@@ -108,9 +144,6 @@ class TestFallbackPredictor:
     def test_transformer_prediction_uses_all_targets(self):
         """Test transformer predictions map to all six output targets."""
         from src.models.model_manager import ModelManager
-
-        import numpy as np
-        import pandas as pd
 
         class DummyTransformer:
             seq_len = 2
@@ -202,11 +235,12 @@ class TestBlendContractEnforcement:
 
         manager._validate_blend_contract()
 
-    def test_predict_player_stats_does_not_apply_partial_blend(self):
+    def test_predict_player_stats_does_not_apply_partial_blend(self, tmp_path):
         from src.models.model_manager import ModelManager
 
-        import numpy as np
-        import pandas as pd
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        _create_feature_schema(models_dir, ["f1", "f2"])
 
         class FakeCatBoost:
             def __init__(self, value):
@@ -217,6 +251,7 @@ class TestBlendContractEnforcement:
                 return np.array([self.value], dtype=np.float32)
 
         manager = ModelManager.__new__(ModelManager)
+        manager.models_dir = str(models_dir)
         manager.targets = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
         manager.models = {
             t: FakeCatBoost(10.0 + i) for i, t in enumerate(manager.targets)
@@ -228,6 +263,8 @@ class TestBlendContractEnforcement:
         manager.feature_cols = ["f1", "f2"]
         manager.feature_schema = None
         manager.feature_selector = None
+        manager.residual_corrections_enabled = False
+        manager.correction_applier = None
         manager._FALLBACK_VALUES = ModelManager._FALLBACK_VALUES
 
         df = pd.DataFrame({"f1": [1.0], "f2": [2.0]})
@@ -236,3 +273,83 @@ class TestBlendContractEnforcement:
 
         assert result["PTS"] == 10.0
         assert result["REB"] == 11.0
+
+
+class TestResidualCorrectionIntegration:
+    """Tests for residual correction integration in ModelManager."""
+
+    def _make_manager(self, tmp_path, residual_enabled=False, correction_applier=None):
+        from src.models.model_manager import ModelManager
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir(exist_ok=True)
+        _create_feature_schema(models_dir, ["f1"])
+
+        class FakeModel:
+            feature_names_ = ["f1"]
+            def predict(self, X):
+                return np.array([20.0])
+
+        manager = ModelManager.__new__(ModelManager)
+        manager.models_dir = str(models_dir)
+        manager.targets = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+        manager.models = {t: FakeModel() for t in manager.targets}
+        manager.catboost_mae_models = {}
+        manager.catboost_quantile_models = {}
+        manager.transformer_model = None
+        manager.blend_weights = {}
+        manager.ensemble_weights = None
+        manager.feature_cols = ["f1"]
+        manager.feature_schema = None
+        manager.feature_selector = None
+        manager.residual_corrections_enabled = residual_enabled
+        manager.correction_applier = correction_applier
+        manager._FALLBACK_VALUES = ModelManager._FALLBACK_VALUES
+        return manager
+
+    def test_predict_without_residual_returns_base(self, tmp_path):
+        """When corrections disabled, predictions equal base values."""
+        manager = self._make_manager(tmp_path, residual_enabled=False)
+        df = pd.DataFrame({"f1": [1.0]})
+        result = manager.predict_player_stats(df)
+
+        for stat in ["PTS", "REB", "AST", "STL", "BLK", "TOV"]:
+            assert result[stat] == 20.0
+
+    def test_predict_with_residual_applies_correction(self, tmp_path):
+        """When corrections enabled, predictions should be adjusted."""
+        from src.correction.correction_applier import CorrectionApplier
+        from src.correction.correction_features import CorrectionFeatureBuilder
+
+        class FakeResidualModel:
+            _feature_cols = [
+                "BASE_PREDICTION", "DATA_QUALITY_SCORE",
+                "RECENT_PLAYER_ERROR_MEAN", "RECENT_PLAYER_ERROR_ABS_MEAN",
+                "RECENT_STAT_ERROR_MEAN", "RECENT_STAT_ERROR_ABS_MEAN",
+            ]
+            def is_enabled(self, stat):
+                return stat == "PTS"
+            def predict_correction(self, stat, feature_row):
+                return 3.0 if stat == "PTS" else 0.0
+            @property
+            def feature_cols(self):
+                return list(self._feature_cols)
+
+        applier = CorrectionApplier(
+            residual_model=FakeResidualModel(),
+            feature_builder=CorrectionFeatureBuilder(),
+        )
+        manager = self._make_manager(tmp_path, residual_enabled=True, correction_applier=applier)
+
+        df = pd.DataFrame({"f1": [1.0]})
+        result = manager.predict_player_stats(df)
+
+        assert result["PTS"] == pytest.approx(23.0, abs=0.01)
+        assert result["REB"] == 20.0
+
+    def test_batch_prediction_preserves_row_count(self, tmp_path):
+        """Batch prediction should return one row per input."""
+        manager = self._make_manager(tmp_path, residual_enabled=False)
+        context_df = pd.DataFrame({"f1": [1.0, 2.0, 3.0], "PLAYER_ID": [101, 102, 103]})
+        result = manager.predict_player_stats_batch(context_df)
+        assert len(result) == 3

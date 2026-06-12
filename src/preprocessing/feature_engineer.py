@@ -55,6 +55,8 @@ class FeatureEngineeringResult:
 
     group_columns: Dict[str, List[str]] = field(default_factory=dict)
     diagnostics: FeatureDiagnostics = field(default_factory=FeatureDiagnostics)
+    n_rows: int = 0
+    n_features: int = 0
 
 
 class FeatureEngineer:
@@ -304,7 +306,12 @@ class FeatureEngineer:
             if pd.api.types.is_numeric_dtype(result[col]):
                 result[col] = pd.to_numeric(result[col], errors='coerce')
 
-        self.last_result = FeatureEngineeringResult(group_columns=group_columns, diagnostics=diagnostics)
+        self.last_result = FeatureEngineeringResult(
+            group_columns=group_columns,
+            diagnostics=diagnostics,
+            n_rows=len(result),
+            n_features=len(feature_cols),
+        )
         logger.info(
             "Feature engineering complete. rows=%s new_features=%s missing_summary=%s",
             len(result),

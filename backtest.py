@@ -78,6 +78,10 @@ Examples:
         help="Write JSON results to this file path.",
     )
     parser.add_argument(
+        "--json-output", type=str, default=None,
+        help="Optional path to write machine-readable backtest metrics as JSON.",
+    )
+    parser.add_argument(
         "--no-progress", action="store_true",
         help="Suppress per-row progress logging.",
     )
@@ -153,6 +157,26 @@ def main() -> None:
         with open(output_path, "w") as f:
             json.dump(result.to_dict(), f, indent=2)
         logger.info("Results written to %s", output_path)
+
+    if args.json_output:
+        from src.evaluation.metrics import backtest_result_to_json_dict
+
+        output_path = Path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = backtest_result_to_json_dict(result)
+
+        payload["window"] = {
+            "mode": "recent" if getattr(args, "recent", None) else "custom",
+            "value": getattr(args, "recent", None),
+        }
+
+        output_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        print(f"Wrote JSON backtest results to {output_path}")
 
 
 if __name__ == "__main__":

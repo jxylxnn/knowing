@@ -169,7 +169,12 @@ class MinutesPredictor:
         
         if 'FATIGUE_SCORE' not in df.columns:
             mins_lag = df.groupby('PLAYER_ID')['MIN'].shift(1).fillna(0)
-            df['MINS_LAST_3'] = mins_lag.groupby(df['PLAYER_ID']).rolling(3, min_periods=1).sum()
+            df['MINS_LAST_3'] = (
+                mins_lag.groupby(df['PLAYER_ID'])
+                .rolling(3, min_periods=1)
+                .sum()
+                .reset_index(level=0, drop=True)
+            )
             df['FATIGUE_SCORE'] = (df['MINS_LAST_3'] / 100).clip(0, 1)
         
         df['OPP_PACE'] = 100.0

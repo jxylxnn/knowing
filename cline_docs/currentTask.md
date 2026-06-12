@@ -1,91 +1,63 @@
 # Current Task
 
-## New Training Pipeline Implementation - COMPLETED
+## System Status: Feature-Complete Core
 
-The new training pipeline has been successfully implemented with the following features:
-
-### Implementation Summary
-
-#### New Architecture (src/training/)
-
-1. **trainer.py** - Base trainer class with unified interface
-   - Abstract `BaseTrainer` class for all model types
-   - `TrainResult` dataclass for standardized results
-   - Common functionality: data validation, metric computation
-
-2. **catboost_trainer.py** - Optimized CatBoost training
-   - Per-target hyperparameter profiles
-   - Multi-loss training (RMSE + MAE)
-   - Quantile regression for uncertainty
-   - Parallel training support via `train_catboost_target()`
-
-3. **nn_trainer.py** - Unified neural network trainer
-   - Supports all PyTorch models (LSTM, Transformer, GNN, Joint NN)
-   - Automatic mixed precision (AMP)
-   - Gradient checkpointing
-   - Early stopping with patience
-
-4. **feature_cache.py** - Smart caching system
-   - Automatic cache invalidation based on data hashes
-   - Persistent storage for processed features
-   - Data split caching
-
-5. **experiment.py** - Experiment tracking
-   - Run tracking with metrics and artifacts
-   - Model comparison across runs
-   - JSON-based storage
-
-6. **pipeline.py** - Main orchestrator
-   - Three training modes: quick, standard, full
-   - Parallel training across targets
-   - Automatic hardware detection and configuration
-
-### Key Improvements
-
-| Feature | Old Pipeline | New Pipeline |
-|---------|-------------|--------------|
-| Architecture | 1800-line god class | Modular components |
-| Parallel Training | None | joblib-based parallel targets |
-| Caching | Manual | Automatic feature/split caching |
-| Experiment Tracking | None | Built-in tracking |
-| Training Modes | Fixed | quick/standard/full |
-| Code Organization | Mixed concerns | Clear separation |
-
-### Usage
-
-```bash
-# Quick mode for testing (fastest)
-python train.py --mode quick --parallel
-
-# Standard mode for production
-python train.py --mode standard --parallel
-
-# Full mode for maximum accuracy
-python train.py --mode full --model-size large
-```
-
-### Training Modes
-
-| Mode | CatBoost Iters | NN Epochs | Features |
-|------|---------------|-----------|----------|
-| quick | 500 | 20 | CatBoost only |
-| standard | 3000 | 100 | All models |
-| full | 5000 | 200 | All models |
+The system is in a mature, feature-complete state. All core pipeline components are implemented and tested.
 
 ---
 
-## Next Steps
+## Recently Completed (2026)
 
-1. **Testing** - Validate new pipeline with real data
-2. **Performance Benchmarking** - Compare training times vs old pipeline
-3. **Documentation** - Update README with new usage examples
-4. **Integration** - Ensure compatibility with existing prediction scripts
+### Self-Optimizing Ensemble Weight System
+- `backtest.py` + `optimize_weights.py` + `optimize_variance.py` — all implemented
+- Versioned weight store at `models/blend_weights/` with atomic writes and rollback
+- Drift detection via statistical process control (2σ above baseline)
+- EnsembleOptimizer uses scipy.optimize over 13-dim weight space with accept/verify gates
+
+### Smart Feature Selection
+- `train.py --feature-selection smart --selection-profile {fast,balanced,max_accuracy}`
+- Shadow filter + group ablation + permutation importance + stability scoring
+- Disabled by default (`config/default.yaml` → `feature_selection.enabled: false`)
+
+### Inter-Step Artifact Contracts
+- `src/contracts/` — validates model files, feature schema, projection CSV schema, schedule schema
+- `check_contracts.py` — standalone validator
+- Both `train.py` and `simulate_season.py` validate at startup
+
+### Lifecycle ML Integration
+- B-Ianus Bayesian aging curves (`src/lifecycle/aging_model.py`)
+- KAN aging factors (`src/lifecycle/kan_age_model.py`, CPU-only)
+- Cached to `data/cache/aging_curves.csv` and `data/cache/kan_aging_outputs.csv`
+
+### Season Context Features
+- Season phase (early/mid/late/playoff)
+- Team motivation (tank/playoff/injury-prior)
+- Postseason context
+
+### Calibration & Probability Upgrade
+- Distribution zoo: empirical bootstrap, gamma, Poisson, NB, ZIP, Normal
+- DistributionFitter derives (mean, std, skew, zero_prob, λ) from P10/P50/P90 quantiles
+- Archetype-conditioned empirical copula for correlated multi-stat draws
+
+---
+
+## Potential Next Steps
+
+1. **Wire LightGBM/XGBoost** — both are installed in requirements.txt but not part of the active training pipeline
+2. **Cross-position models** — guard/forward/center specific model variants
+3. **Player tracking data** — shot distance, speed, distance to basket
+4. **Coaching impact factors** — rotation tendencies, play style
+5. **Travel impact analysis** — time zones crossed, miles traveled
+6. **REST API** — external access layer
+7. **Web dashboard** — visualization interface
+8. **Automated daily predictions** — scheduled pipeline runs
 
 ---
 
 ## Notes
 
-- The old `ModelManager` class is preserved for backward compatibility
-- New models are saved in compatible format (`.cbm`, `.pkl`)
-- Experiment tracking is optional but recommended
-- GPU auto-detection with CPU fallback
+- Active stack: CatBoost (primary) + Transformer (secondary). LSTM/GNN disabled.
+- Ensemble weights are versioned in `models/blend_weights/` — not hardcoded.
+- `src/services/` directory exists but is empty (unused).
+- `plans/` and `.hermes/plans/` contain implementation plan docs.
+- `project-brain/` contains curated architectural brain docs (including 2MB full project dump).

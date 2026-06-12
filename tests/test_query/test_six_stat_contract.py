@@ -11,10 +11,22 @@ import pytest
 import pandas as pd
 import tempfile
 import os
+import io
 from pathlib import Path
 
 from src.simulation.report_generator import ReportGenerator
 from src.query.projection_loader import ProjectionLoader, PlayerProjection
+
+
+def add_confidence_defaults(df: pd.DataFrame) -> pd.DataFrame:
+    """Populate required calibrated interval columns for hand-built fixtures."""
+    for stat in ["PTS", "REB", "AST", "STL", "BLK", "TOV"]:
+        for conf in (80, 90):
+            df[f"{stat}_INTERVAL_{conf}_LOW"] = pd.NA
+            df[f"{stat}_INTERVAL_{conf}_HIGH"] = pd.NA
+        df[f"{stat}_CONFIDENCE"] = "NO_EDGE"
+        df[f"{stat}_CONFIDENCE_SCORE"] = 0.0
+    return df
 
 
 # Expected column names for all 6 stats (95% CI columns)
@@ -172,15 +184,26 @@ class TestLoaderReadsAllSixStats:
         """Create a minimal projection CSV with all 6 stats."""
         # Single-line CSV with all required columns
         csv_content = (
-            "GAME_ID,DATE,PLAYER_NAME,TEAM,OPPONENT,IS_HOME,"
+            "GAME_ID,DATE,PLAYER_NAME,TEAM,OPPONENT,IS_HOME,DATA_QUALITY,"
+            "PTS,PTS_P10,PTS_P50,PTS_P90,PTS_STD,PTS_SKEW,PTS_ZERO_PROB,PTS_LAMBDA,"
+            "REB,REB_P10,REB_P50,REB_P90,REB_STD,REB_SKEW,REB_ZERO_PROB,REB_LAMBDA,"
+            "AST,AST_P10,AST_P50,AST_P90,AST_STD,AST_SKEW,AST_ZERO_PROB,AST_LAMBDA,"
+            "STL,STL_P10,STL_P50,STL_P90,STL_STD,STL_SKEW,STL_ZERO_PROB,STL_LAMBDA,"
+            "BLK,BLK_P10,BLK_P50,BLK_P90,BLK_STD,BLK_SKEW,BLK_ZERO_PROB,BLK_LAMBDA,"
+            "TOV,TOV_P10,TOV_P50,TOV_P90,TOV_STD,TOV_SKEW,TOV_ZERO_PROB,TOV_LAMBDA,"
             "PROJ_PTS_MEAN,PROJ_PTS_MODE,PTS_CI_LOW,PTS_CI_HIGH,"
             "PROJ_REB_MEAN,PROJ_REB_MODE,REB_CI_LOW,REB_CI_HIGH,"
             "PROJ_AST_MEAN,PROJ_AST_MODE,AST_CI_LOW,AST_CI_HIGH,"
             "PROJ_STL_MEAN,PROJ_STL_MODE,STL_CI_LOW,STL_CI_HIGH,"
             "PROJ_BLK_MEAN,PROJ_BLK_MODE,BLK_CI_LOW,BLK_CI_HIGH,"
-            "PROJ_TOV_MEAN,PROJ_TOV_MODE,TOV_CI_LOW,TOV_CI_HIGH,"
-            "PLAY_PROBABILITY\n"
-            "TEST_001,2025-01-15,Test Player,BOS,LAL,1,"
+            "PROJ_TOV_MEAN,PROJ_TOV_MODE,TOV_CI_LOW,TOV_CI_HIGH,PLAY_PROBABILITY\n"
+            "TEST_001,2025-01-15,Test Player,BOS,LAL,1,FULL,"
+            "25.0,18.0,24.5,32.0,1.0,0.0,0.0,1.0,"
+            "8.0,5.0,8.0,11.0,0.5,0.0,0.0,1.0,"
+            "6.0,3.0,6.0,9.0,0.4,0.0,0.0,1.0,"
+            "1.2,0.0,1.0,3.0,0.2,0.0,0.0,1.0,"
+            "0.8,0.0,1.0,2.0,0.1,0.0,0.0,1.0,"
+            "2.5,1.0,2.0,4.0,0.3,0.0,0.0,1.0,"
             "25.0,24.5,18.0,32.0,"
             "8.0,8.0,5.0,11.0,"
             "6.0,6.0,3.0,9.0,"
@@ -191,8 +214,8 @@ class TestLoaderReadsAllSixStats:
         )
 
         filepath = os.path.join(temp_data_dir, 'player_projections_test.csv')
-        with open(filepath, 'w') as f:
-            f.write(csv_content)
+        df = add_confidence_defaults(pd.read_csv(io.StringIO(csv_content)))
+        df.to_csv(filepath, index=False)
         return filepath
 
     def test_loader_reads_all_six_stats(self, temp_data_dir, sample_csv):
@@ -364,8 +387,8 @@ class TestMissingStatColumnsFailsLoudly:
         with tempfile.TemporaryDirectory() as tmpdir:
             yield tmpdir
 
-    def test_missing_tov_columns_loads_with_defaults(self, temp_data_dir):
-        """Verify CSV missing TOV columns loads with default values."""
+    def test_missing_tov_columns_fails_loudly(self, temp_data_dir):
+        """Verify old-style incomplete CSVs are rejected by the contract validator."""
         # CSV with only PTS, REB, AST (old format)
         csv_content = """GAME_ID,DATE,PLAYER_NAME,TEAM,OPPONENT,IS_HOME,
 PROJ_PTS_MEAN,PROJ_PTS_MODE,PTS_CI_LOW,PTS_CI_HIGH,
@@ -383,14 +406,9 @@ TEST_001,2025-01-15,Test Player,BOS,LAL,1,
             f.write(csv_content)
 
         loader = ProjectionLoader(data_dir=temp_data_dir)
-        projection = loader.find_player('Test Player')
 
-        assert projection is not None
-        # TOV should default to 0.0 when column is missing
-        assert projection.tov_mean == 0.0
-        assert projection.tov_mode == 0.0
-        assert projection.tov_ci_low == 0.0
-        assert projection.tov_ci_high == 0.0
+        with pytest.raises(Exception):
+            loader.find_player('Test Player')
 
 
 class TestInteractiveCLIHelpTextContainsTov:
@@ -430,12 +448,12 @@ class TestQueryAllSixStatsReturnValues:
     @pytest.fixture
     def complete_csv(self, temp_data_dir):
         """Create a CSV with all 6 stats properly populated with non-zero values."""
-        csv_content = """GAME_ID,DATE,PLAYER_NAME,TEAM,OPPONENT,IS_HOME,PROJ_PTS_MEAN,PROJ_PTS_MODE,PTS_CI_LOW,PTS_CI_HIGH,PROJ_REB_MEAN,PROJ_REB_MODE,REB_CI_LOW,REB_CI_HIGH,PROJ_AST_MEAN,PROJ_AST_MODE,AST_CI_LOW,AST_CI_HIGH,PROJ_STL_MEAN,PROJ_STL_MODE,STL_CI_LOW,STL_CI_HIGH,PROJ_BLK_MEAN,PROJ_BLK_MODE,BLK_CI_LOW,BLK_CI_HIGH,PROJ_TOV_MEAN,PROJ_TOV_MODE,TOV_CI_LOW,TOV_CI_HIGH,PLAY_PROBABILITY
-TEST_001,2025-01-15,Test Player,BOS,LAL,1,25.0,24.5,18.0,32.0,8.0,8.0,5.0,11.0,6.0,6.0,3.0,9.0,1.2,1.0,0.0,3.0,0.8,1.0,0.0,2.0,2.5,2.0,1.0,4.0,1.0"""
+        csv_content = """GAME_ID,DATE,PLAYER_NAME,TEAM,OPPONENT,IS_HOME,DATA_QUALITY,PTS,PTS_P10,PTS_P50,PTS_P90,PTS_STD,PTS_SKEW,PTS_ZERO_PROB,PTS_LAMBDA,REB,REB_P10,REB_P50,REB_P90,REB_STD,REB_SKEW,REB_ZERO_PROB,REB_LAMBDA,AST,AST_P10,AST_P50,AST_P90,AST_STD,AST_SKEW,AST_ZERO_PROB,AST_LAMBDA,STL,STL_P10,STL_P50,STL_P90,STL_STD,STL_SKEW,STL_ZERO_PROB,STL_LAMBDA,BLK,BLK_P10,BLK_P50,BLK_P90,BLK_STD,BLK_SKEW,BLK_ZERO_PROB,BLK_LAMBDA,TOV,TOV_P10,TOV_P50,TOV_P90,TOV_STD,TOV_SKEW,TOV_ZERO_PROB,TOV_LAMBDA,PROJ_PTS_MEAN,PROJ_PTS_MODE,PTS_CI_LOW,PTS_CI_HIGH,PROJ_REB_MEAN,PROJ_REB_MODE,REB_CI_LOW,REB_CI_HIGH,PROJ_AST_MEAN,PROJ_AST_MODE,AST_CI_LOW,AST_CI_HIGH,PROJ_STL_MEAN,PROJ_STL_MODE,STL_CI_LOW,STL_CI_HIGH,PROJ_BLK_MEAN,PROJ_BLK_MODE,BLK_CI_LOW,BLK_CI_HIGH,PROJ_TOV_MEAN,PROJ_TOV_MODE,TOV_CI_LOW,TOV_CI_HIGH,PLAY_PROBABILITY
+TEST_001,2025-01-15,Test Player,BOS,LAL,1,FULL,25.0,18.0,24.5,32.0,1.0,0.0,0.0,1.0,8.0,5.0,8.0,11.0,0.5,0.0,0.0,1.0,6.0,3.0,6.0,9.0,0.4,0.0,0.0,1.0,1.2,0.0,1.0,3.0,0.2,0.0,0.0,1.0,0.8,0.0,1.0,2.0,0.1,0.0,0.0,1.0,2.5,1.0,2.0,4.0,0.3,0.0,0.0,1.0,25.0,24.5,18.0,32.0,8.0,8.0,5.0,11.0,6.0,6.0,3.0,9.0,1.2,1.0,0.0,3.0,0.8,1.0,0.0,2.0,2.5,2.0,1.0,4.0,1.0"""
 
         filepath = os.path.join(temp_data_dir, 'player_projections_20250115_120000.csv')
-        with open(filepath, 'w') as f:
-            f.write(csv_content)
+        df = add_confidence_defaults(pd.read_csv(io.StringIO(csv_content)))
+        df.to_csv(filepath, index=False)
         return filepath
 
     def test_all_six_stats_return_nonzero_values(self, temp_data_dir, complete_csv):

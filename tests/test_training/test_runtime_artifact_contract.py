@@ -329,6 +329,10 @@ def test_model_manager_rejects_missing_transformer_when_blend_weights_expect_it(
     blend_weights["PTS"]["catboost"] = 0.7
     joblib.dump(blend_weights, pipeline.models_dir / "blend_weights.pkl")
 
+    # Remove versioned WeightStore so the legacy blend_weights.pkl edit is honored.
+    import shutil
+    shutil.rmtree(pipeline.models_dir / "blend_weights", ignore_errors=True)
+
     manager = ModelManager(
         data_dir=str(tmp_path / "data"),
         models_dir=str(pipeline.models_dir),

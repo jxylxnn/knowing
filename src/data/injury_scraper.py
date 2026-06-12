@@ -316,7 +316,10 @@ class InjuryScraper:
         if os.path.exists(cache_path):
             logger.info(f"Loading cached injury data from {cache_path}")
             df = pd.read_csv(cache_path)
+            if not df.empty and 'TEAM' in df.columns and 'TEAM_ABBR' not in df.columns:
+                df['TEAM_ABBR'] = df['TEAM'].apply(normalize_team)
             self._cached_df = df
+            self._cache_timestamp = datetime.now()
             return df
         return pd.DataFrame()
 

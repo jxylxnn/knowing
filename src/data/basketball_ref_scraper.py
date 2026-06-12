@@ -124,9 +124,24 @@ class BasketballRefScraper:
         
         return result
     
+    @staticmethod
+    def _season_end_year(season: str) -> str:
+        """Return the ending year for a 'YYYY-YY' or 'YYYY-YYYY' season string."""
+        if not season:
+            return season
+        parts = str(season).split('-')
+        if len(parts) != 2:
+            return season
+        start, end = parts
+        # Basketball-Reference uses the full ending year (e.g. 2025 for 2024-25).
+        if len(end) == 2 and len(start) == 4:
+            start_century = start[:2]
+            end = f"{start_century}{end}"
+        return end
+
     def _fetch_team_stats(self, bref_abbr: str, season: str) -> dict:
         """Fetch team stats from basketball-reference team page."""
-        url = f"{self.BASE_URL}/teams/{bref_abbr}/{season.replace('-', '')}.html"
+        url = f"{self.BASE_URL}/teams/{bref_abbr}/{self._season_end_year(season)}.html"
         
         for attempt in range(self.max_retries):
             try:
@@ -353,7 +368,7 @@ class BasketballRefScraper:
     
     def get_league_pace(self, season: str = None) -> float:
         """Get league average pace for a season."""
-        url = f"{self.BASE_URL}/leagues/NBA_{season.replace('-', '')}_ratings.html"
+        url = f"{self.BASE_URL}/leagues/NBA_{self._season_end_year(season)}_ratings.html"
         
         try:
             response = self._session.get(url, timeout=15)

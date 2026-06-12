@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import asdict, dataclass, field, is_dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -210,6 +210,114 @@ def compute_target_metrics(
     )
 
     return metrics
+
+
+def backtest_result_to_json_dict(result: Any) -> dict:
+    """Convert BacktestResult into a stable JSON-serializable dictionary.
+
+    This is used by Beast Mode training so scripts do not scrape terminal output.
+    The output intentionally avoids fixed stat weights and only exposes raw metrics.
+    """
+    if is_dataclass(result):
+        raw = asdict(result)
+    elif hasattr(result, "__dict__"):
+        raw = dict(result.__dict__)
+    elif isinstance(result, dict):
+        raw = result
+    else:
+        raise TypeError(f"Unsupported backtest result type: {type(result)!r}")
+
+    return _normalize_backtest_payload(raw)
+
+
+def _normalize_backtest_payload(raw: dict) -> dict:
+    targets = {}
+
+    possible_target_metrics = (
+        raw.get("per_target")
+        or raw.get("target_metrics")
+        or raw.get("targets")
+        or raw.get("metrics")
+        or {}
+    )
+
+    for stat, metrics in possible_target_metrics.items():
+        if is_dataclass(metrics):
+            metrics = asdict(metrics)
+        elif hasattr(metrics, "__dict__"):
+            metrics = dict(metrics.__dict__)
+
+        stat_upper = str(stat).upper()
+
+        cal_error = metrics.get("calibration_error") or metrics.get("calibration")
+        if cal_error is None:
+            p10 = metrics.get("calibration_p10")
+            p90 = metrics.get("calibration_p90")
+            if p10 is not None and p90 is not None:
+                cal_error = (abs(float(p10) - 0.10) + abs(float(p90) - 0.90)) / 2.0
+
+        sample_size = (
+            metrics.get("sample_size")
+            or metrics.get("n")
+            or metrics.get("count")
+            or metrics.get("num_samples")
+        )
+
+        targets[stat_upper] = {
+            "mae": _safe_float(metrics.get("mae") or metrics.get("MAE")),
+            "rmse": _safe_float(metrics.get("rmse") or metrics.get("RMSE")),
+            "r2": _safe_float(
+                metrics.get("r2")
+                or metrics.get("R2")
+                or metrics.get("r_squared")
+            ),
+            "calibration_error": _safe_float(cal_error),
+            "interval_coverage": _safe_float(
+                metrics.get("interval_coverage") or metrics.get("coverage")
+            ),
+            "sample_size": _safe_int(sample_size),
+        }
+
+    return {
+        "targets": targets,
+        "overall": _overall_from_targets(targets),
+    }
+
+
+def _overall_from_targets(targets: dict) -> dict:
+    maes = [
+        value["mae"]
+        for value in targets.values()
+        if value.get("mae") is not None
+    ]
+    rmses = [
+        value["rmse"]
+        for value in targets.values()
+        if value.get("rmse") is not None
+    ]
+    r2s = [
+        value["r2"]
+        for value in targets.values()
+        if value.get("r2") is not None
+    ]
+
+    return {
+        "mean_mae": sum(maes) / len(maes) if maes else None,
+        "mean_rmse": sum(rmses) / len(rmses) if rmses else None,
+        "mean_r2": sum(r2s) / len(r2s) if r2s else None,
+    }
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
 
 
 def calculate_empirical_crps(simulations: np.ndarray, actual: float) -> float:

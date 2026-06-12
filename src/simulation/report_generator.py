@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 import numpy as np
 
+from src.contracts.projections import validate_projection_frame
 from src.simulation.stat_utils import compute_mode, compute_stats_summary
 
 logger = logging.getLogger(__name__)
@@ -388,6 +389,32 @@ class ReportGenerator:
                 opponent = away if p['team'] == home else home
                 is_home = 1 if p['team'] == home else 0
                 
+                pts_mean = float(p.get('pts', 0.0))
+                pts_mode = float(p.get('pts_mode', pts_mean))
+                pts_p10 = float(p.get('pts_95_ci', [pts_mode * 0.7, pts_mode * 1.3])[0])
+                pts_p90 = float(p.get('pts_95_ci', [pts_mode * 0.7, pts_mode * 1.3])[1])
+                reb_mean = float(p.get('reb', 0.0))
+                reb_mode = float(p.get('reb_mode', reb_mean))
+                reb_p10 = float(p.get('reb_95_ci', [reb_mode * 0.7, reb_mode * 1.3])[0])
+                reb_p90 = float(p.get('reb_95_ci', [reb_mode * 0.7, reb_mode * 1.3])[1])
+                ast_mean = float(p.get('ast', 0.0))
+                ast_mode = float(p.get('ast_mode', ast_mean))
+                ast_p10 = float(p.get('ast_95_ci', [ast_mode * 0.7, ast_mode * 1.3])[0])
+                ast_p90 = float(p.get('ast_95_ci', [ast_mode * 0.7, ast_mode * 1.3])[1])
+                stl_mean = float(p.get('stl', 0.0))
+                stl_mode = float(p.get('stl_mode', stl_mean))
+                stl_p10 = float(p.get('stl_95_ci', [stl_mode * 0.7, stl_mode * 1.3])[0])
+                stl_p90 = float(p.get('stl_95_ci', [stl_mode * 0.7, stl_mode * 1.3])[1])
+                blk_mean = float(p.get('blk', 0.0))
+                blk_mode = float(p.get('blk_mode', blk_mean))
+                blk_p10 = float(p.get('blk_95_ci', [blk_mode * 0.7, blk_mode * 1.3])[0])
+                blk_p90 = float(p.get('blk_95_ci', [blk_mode * 0.7, blk_mode * 1.3])[1])
+                tov_mean = float(p.get('tov', 0.0))
+                tov_mode = float(p.get('tov_mode', tov_mean))
+                tov_p10 = float(p.get('tov_95_ci', [tov_mode * 0.7, tov_mode * 1.3])[0])
+                tov_p90 = float(p.get('tov_95_ci', [tov_mode * 0.7, tov_mode * 1.3])[1])
+                confidence_cols = self._confidence_columns_for_player(p)
+
                 rows.append({
                     'GAME_ID': game_id,
                     'DATE': date,
@@ -395,58 +422,83 @@ class ReportGenerator:
                     'TEAM': p['team'],
                     'OPPONENT': opponent,
                     'IS_HOME': is_home,
+                    'DATA_QUALITY': self._data_quality_from_result(res),
                     # Points
-                    'PROJ_PTS_MODE': p.get('pts_mode', p['pts']),
-                    'PROJ_PTS_MEAN': p['pts'],
+                    'PROJ_PTS_MODE': pts_mode,
+                    'PROJ_PTS_MEAN': pts_mean,
+                    'PTS': pts_mean,
+                    'PTS_P10': pts_p10,
+                    'PTS_P50': pts_mode,
+                    'PTS_P90': pts_p90,
                     'PTS_CI_LOW': p.get('pts_95_ci', [0, 0])[0],
                     'PTS_CI_HIGH': p.get('pts_95_ci', [0, 0])[1],
                     'PTS_99_CI_LOW': p.get('pts_99_ci', [0, 0])[0],
                     'PTS_99_CI_HIGH': p.get('pts_99_ci', [0, 0])[1],
                     # Rebounds
-                    'PROJ_REB_MODE': p.get('reb_mode', p['reb']),
-                    'PROJ_REB_MEAN': p['reb'],
+                    'PROJ_REB_MODE': reb_mode,
+                    'PROJ_REB_MEAN': reb_mean,
+                    'REB': reb_mean,
+                    'REB_P10': reb_p10,
+                    'REB_P50': reb_mode,
+                    'REB_P90': reb_p90,
                     'REB_CI_LOW': p.get('reb_95_ci', [0, 0])[0],
                     'REB_CI_HIGH': p.get('reb_95_ci', [0, 0])[1],
                     'REB_99_CI_LOW': p.get('reb_99_ci', [0, 0])[0],
                     'REB_99_CI_HIGH': p.get('reb_99_ci', [0, 0])[1],
                     # Assists
-                    'PROJ_AST_MODE': p.get('ast_mode', p['ast']),
-                    'PROJ_AST_MEAN': p['ast'],
+                    'PROJ_AST_MODE': ast_mode,
+                    'PROJ_AST_MEAN': ast_mean,
+                    'AST': ast_mean,
+                    'AST_P10': ast_p10,
+                    'AST_P50': ast_mode,
+                    'AST_P90': ast_p90,
                     'AST_CI_LOW': p.get('ast_95_ci', [0, 0])[0],
                     'AST_CI_HIGH': p.get('ast_95_ci', [0, 0])[1],
                     'AST_99_CI_LOW': p.get('ast_99_ci', [0, 0])[0],
                     'AST_99_CI_HIGH': p.get('ast_99_ci', [0, 0])[1],
                     # Steals
-                    'PROJ_STL_MODE': p.get('stl_mode', p.get('stl', 0)),
-                    'PROJ_STL_MEAN': p.get('stl', 0),
+                    'PROJ_STL_MODE': stl_mode,
+                    'PROJ_STL_MEAN': stl_mean,
+                    'STL': stl_mean,
+                    'STL_P10': stl_p10,
+                    'STL_P50': stl_mode,
+                    'STL_P90': stl_p90,
                     'STL_CI_LOW': p.get('stl_95_ci', [0, 0])[0],
                     'STL_CI_HIGH': p.get('stl_95_ci', [0, 0])[1],
                     'STL_99_CI_LOW': p.get('stl_99_ci', [0, 0])[0],
                     'STL_99_CI_HIGH': p.get('stl_99_ci', [0, 0])[1],
                     # Blocks
-                    'PROJ_BLK_MODE': p.get('blk_mode', p.get('blk', 0)),
-                    'PROJ_BLK_MEAN': p.get('blk', 0),
+                    'PROJ_BLK_MODE': blk_mode,
+                    'PROJ_BLK_MEAN': blk_mean,
+                    'BLK': blk_mean,
+                    'BLK_P10': blk_p10,
+                    'BLK_P50': blk_mode,
+                    'BLK_P90': blk_p90,
                     'BLK_CI_LOW': p.get('blk_95_ci', [0, 0])[0],
                     'BLK_CI_HIGH': p.get('blk_95_ci', [0, 0])[1],
                     'BLK_99_CI_LOW': p.get('blk_99_ci', [0, 0])[0],
                     'BLK_99_CI_HIGH': p.get('blk_99_ci', [0, 0])[1],
                     # Turnovers
-                    'PROJ_TOV_MODE': p.get('tov_mode', p.get('tov', 0)),
-                    'PROJ_TOV_MEAN': p.get('tov', 0),
+                    'PROJ_TOV_MODE': tov_mode,
+                    'PROJ_TOV_MEAN': tov_mean,
+                    'TOV': tov_mean,
+                    'TOV_P10': tov_p10,
+                    'TOV_P50': tov_mode,
+                    'TOV_P90': tov_p90,
                     'TOV_CI_LOW': p.get('tov_95_ci', [0, 0])[0],
                     'TOV_CI_HIGH': p.get('tov_95_ci', [0, 0])[1],
                     'TOV_99_CI_LOW': p.get('tov_99_ci', [0, 0])[0],
                     'TOV_99_CI_HIGH': p.get('tov_99_ci', [0, 0])[1],
+                    **confidence_cols,
                     # Common
                     'PLAY_PROBABILITY': p.get('play_probability', 1.0),
                     'SIM_TIMESTAMP': datetime.now().isoformat(),
-                    # Data quality
-                    'DATA_QUALITY': self._data_quality_from_result(res),
                 })
 
         df = pd.DataFrame(rows)
-        # Enrich with distribution parameters from quantile models
+        df = self._ensure_confidence_interval_columns(df)
         df = self._enrich_with_distributions(df)
+        validate_projection_frame(df)
         df.to_csv(filepath, index=False)
         logger.info(f"Player projections exported to {filepath}")
         return filepath
@@ -519,4 +571,35 @@ class ReportGenerator:
             df[f"{stat}_ZERO_PROB"] = [d.zero_prob for d in dists]
             df[f"{stat}_LAMBDA"] = [d.lambda_param for d in dists]
 
+        return df
+
+    @staticmethod
+    def _confidence_columns_for_player(player: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract calibrated interval/confidence columns from player summary."""
+        cols: Dict[str, Any] = {}
+        for stat in ["PTS", "REB", "AST", "STL", "BLK", "TOV"]:
+            sl = stat.lower()
+            cols[f"{stat}_INTERVAL_80_LOW"] = player.get(f"{sl}_interval_80_low", np.nan)
+            cols[f"{stat}_INTERVAL_80_HIGH"] = player.get(f"{sl}_interval_80_high", np.nan)
+            cols[f"{stat}_INTERVAL_90_LOW"] = player.get(f"{sl}_interval_90_low", np.nan)
+            cols[f"{stat}_INTERVAL_90_HIGH"] = player.get(f"{sl}_interval_90_high", np.nan)
+            cols[f"{stat}_CONFIDENCE"] = player.get(f"{sl}_confidence", "NO_EDGE")
+            cols[f"{stat}_CONFIDENCE_SCORE"] = player.get(f"{sl}_confidence_score", 0.0)
+        return cols
+
+    @staticmethod
+    def _ensure_confidence_interval_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Keep projection schema stable when calibration artifacts are absent."""
+        for stat in ["PTS", "REB", "AST", "STL", "BLK", "TOV"]:
+            for conf in (80, 90):
+                for side in ("LOW", "HIGH"):
+                    col = f"{stat}_INTERVAL_{conf}_{side}"
+                    if col not in df.columns:
+                        df[col] = np.nan
+            conf_col = f"{stat}_CONFIDENCE"
+            score_col = f"{stat}_CONFIDENCE_SCORE"
+            if conf_col not in df.columns:
+                df[conf_col] = "NO_EDGE"
+            if score_col not in df.columns:
+                df[score_col] = 0.0
         return df

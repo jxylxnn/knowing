@@ -173,6 +173,14 @@ class TrainingPipeline:
         self.cat_features: List[str] = []
         self.feature_schema: Optional[FeatureSchema] = None
         self.feature_selector = FeatureSelector(self.TARGETS)
+        # Per-target feature subsets produced by the smart feature selector.
+        # When empty, every CatBoost model uses the canonical ``feature_cols``
+        # list — preserving the existing contract. When populated, each
+        # target only sees its own subset at training time.
+        self.target_feature_cols: Dict[str, List[str]] = {}
+        self.feature_selection_manifest: Optional[Dict[str, Any]] = None
+        self.feature_selection_config: Optional[Dict[str, Any]] = None
+        self.feature_selection_profile: Optional[str] = None
         self.models: Dict[str, Any] = {}
         self.catboost_mae_models: Dict[str, Any] = {}
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
@@ -282,6 +290,59 @@ class TrainingPipeline:
         """Select canonical leakage-safe features via the shared selector."""
         return self.feature_selector.fit(df).feature_cols
 
+    def _feature_cols_for_target(self, target: str) -> List[str]:
+        """Return the per-target feature list, falling back to the master list.
+
+        When smart feature selection produced a ``target_feature_cols``
+        mapping, this method returns the per-target subset for the given
+        target.  Otherwise it returns the canonical ``self.feature_cols``
+        list, preserving the original single-list contract.
+        """
+        if not self.target_feature_cols:
+            return list(self.feature_cols or [])
+        per_target = self.target_feature_cols.get(target)
+        if per_target:
+            return list(per_target)
+        return list(self.feature_cols or [])
+
+    def apply_feature_selection_manifest(
+        self,
+        manifest_payload: Dict[str, Any],
+    ) -> None:
+        """Load a feature selection manifest into the pipeline state.
+
+        The manifest comes from
+        ``models/feature_selection_manifest.json`` (or an in-memory dict
+        produced by :class:`SmartFeatureSelector`).  The per-target
+        feature lists are stored on the pipeline so
+        :meth:`_train_catboost_parallel` can pick them up.
+        """
+        if not manifest_payload:
+            return
+        by_target = manifest_payload.get("selected_features_by_target") or {}
+        target_specific = bool(manifest_payload.get("target_specific", True))
+        if target_specific and by_target:
+            target_feature_cols: Dict[str, List[str]] = {}
+            for target, cols in by_target.items():
+                cols = [c for c in cols if c in (self.feature_cols or [])]
+                if cols:
+                    target_feature_cols[str(target)] = cols
+            self.target_feature_cols = target_feature_cols
+        else:
+            global_features = list(
+                manifest_payload.get("selected_features_global")
+                or (self.feature_cols or [])
+            )
+            global_features = [c for c in global_features if c in (self.feature_cols or [])]
+            if global_features:
+                self.target_feature_cols = {t: global_features for t in self.TARGETS}
+        self.feature_selection_manifest = manifest_payload
+        logger.info(
+            "Loaded feature selection manifest: %d targets, target_specific=%s",
+            len(self.target_feature_cols),
+            target_specific,
+        )
+
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fill feature NaNs and coerce targets to numeric."""
         df = df.copy()
@@ -370,7 +431,7 @@ class TrainingPipeline:
                 if trainer.use_quantile:
                     trainer.quantile_low_model = ConstantRegressor(0.0)
                     trainer.quantile_high_model = ConstantRegressor(0.0)
-                trainer.feature_cols = list(self.feature_cols or [])
+                trainer.feature_cols = list(self._feature_cols_for_target(target))
                 trainer.cat_features = list(self.cat_features)
                 trainer.is_trained = True
                 self.models[target] = trainer.primary_model
@@ -416,7 +477,7 @@ class TrainingPipeline:
                 if trainer.use_quantile:
                     trainer.quantile_low_model = ConstantRegressor(fallback_value)
                     trainer.quantile_high_model = ConstantRegressor(fallback_value)
-                trainer.feature_cols = list(self.feature_cols or [])
+                trainer.feature_cols = list(self._feature_cols_for_target(target))
                 trainer.cat_features = list(self.cat_features)
                 trainer.is_trained = True
                 self.models[target] = trainer.primary_model
@@ -431,9 +492,9 @@ class TrainingPipeline:
             results_list = Parallel(n_jobs=max_workers, prefer="threads")(
                 delayed(train_catboost_target)(
                     target=target,
-                    X_train=filtered_frames[target][0][self.feature_cols],
+                    X_train=filtered_frames[target][0][self._feature_cols_for_target(target)],
                     y_train=filtered_frames[target][0][target],
-                    X_val=filtered_frames[target][1][self.feature_cols],
+                    X_val=filtered_frames[target][1][self._feature_cols_for_target(target)],
                     y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
@@ -454,9 +515,9 @@ class TrainingPipeline:
                     continue
                 _, result = train_catboost_target(
                     target=target,
-                    X_train=filtered_frames[target][0][self.feature_cols],
+                    X_train=filtered_frames[target][0][self._feature_cols_for_target(target)],
                     y_train=filtered_frames[target][0][target],
-                    X_val=filtered_frames[target][1][self.feature_cols],
+                    X_val=filtered_frames[target][1][self._feature_cols_for_target(target)],
                     y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
@@ -922,8 +983,39 @@ class TrainingPipeline:
 
     def _save_blend_weights(self) -> None:
         if self.blend_weights:
+            # Legacy binary format (still needed by validate_runtime_artifacts)
             joblib.dump(self.blend_weights, self.models_dir / "blend_weights.pkl")
             logger.info("Saved blend weights for %s targets", len(self.blend_weights))
+
+            # Also persist to versioned WeightStore so ModelManager and the
+            # optimizer can pick up data-driven weights without an explicit
+            # optimize_weights.py run.
+            try:
+                from src.evaluation.weight_store import EnsembleWeights, TargetBlend, WeightStore
+
+                store = WeightStore(str(self.models_dir / "blend_weights"))
+                per_target = {}
+                for target in self.TARGETS:
+                    cfg = self.blend_weights.get(target, {})
+                    if isinstance(cfg, dict):
+                        per_target[target] = TargetBlend(
+                            catboost=float(cfg.get("catboost", 0.7)),
+                            transformer=float(cfg.get("transformer", 0.3)),
+                            intercept=float(cfg.get("intercept", 0.0)),
+                            catboost_mae_blend=float(cfg.get("catboost_mae_blend", 0.7)),
+                        )
+                if per_target:
+                    weights = EnsembleWeights(
+                        description=f"Training-time {self.blend_weights.get('_method', 'ridge')} blend",
+                        per_target=per_target,
+                        catboost_mae_blend=0.7,
+                    )
+                    store.save(weights, set_current=True)
+                    logger.info(
+                        "Saved training blend weights to WeightStore v%d", weights.version
+                    )
+            except Exception as exc:
+                logger.debug("WeightStore save skipped: %s", exc)
 
     def _save_model_stack_metadata(self) -> None:
         transformer_enabled = bool(self.model_config["transformer"]["enabled"])
@@ -939,12 +1031,38 @@ class TrainingPipeline:
             metadata["feature_groups"] = list(feature_groups)
         blend_method = self.blend_weights.get("_method", "inverse_mae")
         metadata["blend_method"] = blend_method
+
+        # Smart feature selection contract — when a manifest is loaded we
+        # record both the per-target selected feature lists and the
+        # profile that produced them so runtime consumers can audit the
+        # what changed between training runs.
+        if self.target_feature_cols:
+            metadata["feature_selection_enabled"] = True
+            metadata["feature_selection_target_specific"] = bool(
+                self.feature_selection_manifest
+                and self.feature_selection_manifest.get("target_specific", True)
+            )
+            metadata["selected_features_by_target"] = {
+                str(t): list(cols) for t, cols in self.target_feature_cols.items()
+            }
+            if self.feature_selection_manifest:
+                metadata["feature_selection_profile"] = (
+                    self.feature_selection_manifest.get("profile")
+                )
+                manifest_path = self.feature_selection_manifest.get("output_path")
+                if manifest_path:
+                    metadata["feature_selection_manifest_path"] = str(manifest_path)
+        else:
+            metadata["feature_selection_enabled"] = False
+
         joblib.dump(metadata, self.models_dir / "model_stack_metadata.pkl")
         logger.info(
-            "Saved model stack metadata (transformer=%s, model_count=%s, preset=%s)",
+            "Saved model stack metadata (transformer=%s, model_count=%s, preset=%s, "
+            "smart_selection=%s)",
             transformer_enabled,
             metadata["model_count"],
             training_preset or "none",
+            metadata.get("feature_selection_enabled", False),
         )
 
     def train(

@@ -524,11 +524,22 @@ def enrich_with_player_bios(
             return players_df
 
         bio_subset = bio_df[[
-            'PLAYER_ID', 'BIRTHDATE', 'AGE', 'POSITION', 'HEIGHT',
+            'PLAYER_ID', 'BIRTHDATE', 'POSITION', 'HEIGHT',
             'WEIGHT', 'DRAFT_YEAR', 'CAREER_START', 'YEARS_EXPERIENCE',
         ]].drop_duplicates('PLAYER_ID')
 
         enriched = players_df.merge(bio_subset, on='PLAYER_ID', how='left')
+
+        # Compute age relative to each game date to avoid future-age leakage
+        # into historical training rows.
+        if 'BIRTHDATE' in enriched.columns and 'GAME_DATE' in enriched.columns:
+            enriched['BIRTHDATE'] = pd.to_datetime(enriched['BIRTHDATE'], errors='coerce')
+            enriched['GAME_DATE'] = pd.to_datetime(enriched['GAME_DATE'], errors='coerce')
+            enriched['AGE'] = (
+                (enriched['GAME_DATE'] - enriched['BIRTHDATE']).dt.days / 365.25
+            ).round(2)
+        else:
+            enriched['AGE'] = float('nan')
 
         # Save standalone bio file for other consumers (aging model, etc.)
         bio_path = os.path.join(data_dir, 'player_bios.csv')

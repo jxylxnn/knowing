@@ -53,6 +53,8 @@ class TrainingPreset:
     enable_groups: Tuple[str, ...]
     disable_groups: Tuple[str, ...] = ()
     targets: Tuple[str, ...] = CANONICAL_TARGETS
+    feature_selection: Optional[Dict[str, Any]] = None
+    feature_selection_profile: Optional[str] = None
 
     def feature_engineer_kwargs(self) -> Dict[str, Any]:
         """Return kwargs for build_feature_engineer(...)."""
@@ -75,6 +77,8 @@ class TrainingPreset:
             "enable_groups": list(self.enable_groups),
             "disable_groups": list(self.disable_groups),
             "targets": list(self.targets),
+            "feature_selection": dict(self.feature_selection) if self.feature_selection else None,
+            "feature_selection_profile": self.feature_selection_profile,
         }
 
 
@@ -163,6 +167,10 @@ def _merge_preset_definition(
         ),
         targets=_coerce_sequence(override.get("targets", base.targets), item_type=str)
         or base.targets,
+        feature_selection=override.get("feature_selection", base.feature_selection),
+        feature_selection_profile=override.get(
+            "feature_selection_profile", base.feature_selection_profile
+        ),
     )
     return merged
 
