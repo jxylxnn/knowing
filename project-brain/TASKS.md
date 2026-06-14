@@ -679,3 +679,19 @@
   - `tests/test_query/test_six_stat_contract.py` updated to reflect the strict schema.
   - `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
 - Targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). Full-suite baseline of `313 passed, 1 skipped` from 2026-06-04 still applies.
+
+### Add fast training diagnostic mode — DONE
+
+- Completed 2026-06-14.
+- Delivered:
+  - `src/training/diagnostics.py` with `diagnostic_stage` context manager, `diagnostic_noop` for skipped stages, `print_data_summary`, `print_selection_summary`, `DiagnosticConfig`, `DiagnosticStop`, `DiagnosticStageFailed`, and `STAGES_ORDERED`.
+  - `train.py --diagnose` and `train.py --diagnose --stop-after <stage>` for all six stages: `preflight`, `data_load`, `feature_engineering`, `feature_selection`, `prepare_data`, `artifact_check`.
+  - `--diagnose` alone stops before model training with a correct message.
+  - `--diagnose --stop-after artifact_check` validates `models/` artifacts using the resolved preset's `transformer_enabled` setting.
+  - `--diagnose --feature-selection off --stop-after feature_selection` prints SKIP and stops correctly.
+  - Each stage prints `[TRAIN-DIAG] START/OK/FAILED/SKIP` markers using custom `DiagnosticStageFailed` / `DiagnosticStop` exceptions (no `sys.exit()` in the library).
+  - After data load and feature engineering, diagnostic mode prints row/column counts and target-column presence summary.
+  - `--stop-after` requires `--diagnose` (parsed error if used alone).
+  - `tests/test_training/test_diagnostics.py` (28 tests) covering the context manager, noop, exceptions, summary helpers, config, stage ordering, and subprocess integration.
+- `pytest tests/test_training/test_diagnostics.py -q` -> `28 passed`.
+- Existing tests unaffected: `pytest tests/test_training/ tests/test_contracts/ tests/test_models/test_model_manager.py -q` -> `75 passed`.

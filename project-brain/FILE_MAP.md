@@ -44,6 +44,7 @@
 - Current note: Step 2 feature-engineering setup should go through `src/preprocessing/feature_engineer.py:build_feature_engineer(...)` so mixed-version checkouts tolerate older constructor signatures; `tests/test_training/test_train_entrypoint.py` statically guards that call shape.
 - Current note: the active training presets now include `archetype`, the deterministic player-style similarity group used to support cold-start prediction.
 - Current note: `train.py` exposes `--feature-selection {off,smart}` and `--selection-profile {fast,balanced,max_accuracy}`. When smart selection is enabled, `train.py` runs `SmartFeatureSelector` between Step 2 (feature engineering) and Step 3 (training) and feeds the resulting `SelectionManifest` into `TrainingPipeline.apply_feature_selection_manifest()`. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list.
+- Current note: `train.py` now exposes `--diagnose` and `--diagnose --stop-after <stage>` for fast crash-stage diagnostics without running full training. Stages: `preflight`, `data_load`, `feature_engineering`, `feature_selection`, `prepare_data`, `artifact_check`. See `src/training/diagnostics.py` and `tests/test_training/test_diagnostics.py`.
 
 ### `train_colab.ipynb`
 
@@ -309,6 +310,19 @@ Important files:
 
 - Writes experiment metadata under `experiments/`.
 - Risk level: low to medium.
+
+### `src/training/diagnostics.py` (NEW — 2026-06-14)
+
+- Role: fast crash-stage diagnostics for the training pipeline without running full model training.
+- Key objects/functions:
+  - `DiagnosticConfig` — dataclass controlling whether diagnostic mode is active and which stage to stop after.
+  - `diagnostic_stage(name, config)` — context manager that wraps a stage block with `[TRAIN-DIAG] START/OK/FAILED` markers, exception handling, and optional early exit.
+  - `print_data_summary(merged_df, full_df)` — prints row counts, column counts, and target-column presence.
+  - `print_selection_summary(manifest)` — prints per-target selected feature counts.
+  - `STAGES_ORDERED` — canonical stage ordering used by `train.py --stop-after`.
+- Called from `train.py` when `--diagnose` is active.
+- Fully tested: `tests/test_training/test_diagnostics.py` (28 tests).
+- Risk level: low. New code, isolated from existing training logic.
 
 ### `src/training/feature_cache.py`
 

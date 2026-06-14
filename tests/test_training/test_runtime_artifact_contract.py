@@ -119,6 +119,7 @@ def _build_pipeline(tmp_path, monkeypatch):
     from src.training.pipeline import TrainingPipeline
 
     monkeypatch.setattr(catboost_module, "CatBoostRegressor", FakeCatBoostModel)
+    monkeypatch.setattr(catboost_module, "CATBOOST_AVAILABLE", True)
 
     pipeline = TrainingPipeline(
         data_dir=tmp_path / "data",

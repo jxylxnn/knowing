@@ -85,6 +85,7 @@ Important current contract:
 - `train.py` now also resolves training presets, passes the preset feature-group selection through `build_feature_engineer(...)`, and records the selected preset in `model_stack_metadata.pkl`.
 - `train.py` runs optional smart feature selection between Step 2 (feature engineering) and Step 3 (training) — see Flow 2.5 below.
 - `train.py` exposes `--feature-selection {off,smart}` and `--selection-profile {fast,balanced,max_accuracy}` CLI flags.
+- `train.py` exposes `--diagnose` and `--diagnose --stop-after <stage>` for fast crash-stage diagnostics without running full training (see Flow 8 below).
 - `train_colab.ipynb` should not infer `train.py` from the Drive models directory; it now searches the actual repo checkout first and keeps Drive-backed `data/` and `models/` separate from code location.
 
 ### Flow 2.5: Smart Per-Target Feature Selection (NEW — 2026-06-04)
@@ -250,6 +251,24 @@ Important named classes/methods for this flow:
 - `calculate_empirical_crps` — O(n log n) CRPS via Gini mean difference
 - `ReportGenerator._enrich_with_distributions` — appends distribution columns to export CSV
 - `ProbabilityCalculator.run_copula_simulation` — correlated multi-stat Monte Carlo
+
+### Flow 8: Fast Training Crash-Stage Diagnostics (NEW — 2026-06-14)
+
+1. `train.py --diagnose` runs the standard training flow but wraps each major stage in a `diagnostic_stage` context manager from `src/training/diagnostics.py`.
+2. Each stage prints `[TRAIN-DIAG] START|OK|FAILED` markers with elapsed time.
+3. On failure, the context manager prints the exception type, message, and full traceback, then raises `DiagnosticStageFailed`. `train.py` catches `DiagnosticStop`/`DiagnosticStageFailed` in `main()` and returns 0 or 1 respectively.
+4. `--stop-after <stage>` causes an early clean exit (code 0) after the named stage completes.
+5. Supported stages: `preflight`, `data_load`, `feature_engineering`, `feature_selection`, `prepare_data`, `artifact_check`.
+6. `--diagnose` alone (no `--stop-after`) runs all stages through `prepare_data` and stops before model training.
+7. `--diagnose --stop-after artifact_check` validates current `models/` artifacts via `validate_runtime_artifacts(ArtifactContract(...))` without loading data or running any training steps.
+8. After data load and feature engineering, diagnostic mode prints row counts, column counts, and target-column presence summaries.
+
+Important named classes/functions:
+
+- `DiagnosticConfig` — dataclass: `enabled`, `stop_after`
+- `diagnostic_stage(name, config)` — context manager that prints markers, catches exceptions, and optionally exits early
+- `print_data_summary(merged_df, full_df)` — prints row/column/target summaries
+- `print_selection_summary(manifest)` — prints per-target selected feature counts
 
 ### Flow 7: Residual Correction and Residual Interval Calibration (NEW — 2026-06-12)
 

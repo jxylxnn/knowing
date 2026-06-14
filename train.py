@@ -31,6 +31,17 @@ from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
 from src.training.pipeline import TrainingPipeline, create_pipeline
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer, build_feature_engineer
+from src.training.diagnostics import (
+    DIAG_PREFIX,
+    DiagnosticConfig,
+    DiagnosticStageFailed,
+    DiagnosticStop,
+    diagnostic_noop,
+    diagnostic_stage,
+    print_data_summary,
+    print_selection_summary,
+    STAGES_ORDERED,
+)
 from src.training.presets import apply_recent_history_window, resolve_training_preset
 from src.training.training_logger import get_training_logger, RichTrainingLogger
 from src.models.gpu_utils import (
@@ -247,8 +258,27 @@ Examples:
         '--cache-dir', type=str, default='cache/training',
         help='Directory for feature caching'
     )
+    parser.add_argument(
+        '--diagnose', action='store_true',
+        help='Run in diagnostic mode: execute staged checks only and print '
+             '[TRAIN-DIAG] markers. Does not run full training by default.'
+    )
+    parser.add_argument(
+        '--stop-after', type=str, default=None,
+        choices=STAGES_ORDERED,
+        help='Stop after the specified stage in diagnostic mode. Only valid '
+             'with --diagnose. Stages: ' + ', '.join(STAGES_ORDERED)
+    )
     
     args = parser.parse_args()
+
+    diag_config = DiagnosticConfig(
+        enabled=args.diagnose,
+        stop_after=args.stop_after,
+    )
+
+    if args.stop_after and not args.diagnose:
+        parser.error("--stop-after requires --diagnose")
 
     config_path = Path(args.config).expanduser()
     runtime_config = load_config(config_path)
@@ -260,6 +290,24 @@ Examples:
     data_dir = resolve_runtime_path(args.data_dir, 'data')
     models_dir = resolve_runtime_path(args.models_dir, 'models')
     cache_dir = resolve_runtime_path(args.cache_dir, 'cache/training')
+
+    # Fast path: artifact_check only — validate existing models/ artifacts
+    # without loading data or running any training stages.
+    if diag_config.enabled and diag_config.stop_after == "artifact_check":
+        transformer_required = bool(preset.transformer_enabled)
+        try:
+            with diagnostic_stage("artifact_check", diag_config):
+                validate_runtime_artifacts(
+                    ArtifactContract(
+                        models_dir=Path(models_dir),
+                        transformer_required=transformer_required,
+                    )
+                )
+            return 0
+        except DiagnosticStop:
+            return 0
+        except DiagnosticStageFailed:
+            return 1
 
     logger.info(
         "Training CLI starting: data_dir=%s models_dir=%s cache_dir=%s config=%s preset=%s mode=%s model_size=%s parallel=%s max_workers=%s no_gpu=%s",
@@ -302,142 +350,151 @@ Examples:
     try:
         # Preflight the runtime directories before doing expensive work.
         current_stage = "preflight checks"
-        logger.info("Step 0/5: %s", current_stage.title())
-        ensure_directory_writable(models_dir, "models")
-        ensure_directory_writable(cache_dir, "cache")
+        with diagnostic_stage("preflight", diag_config):
+            logger.info("Step 0/5: %s", current_stage.title())
+            ensure_directory_writable(models_dir, "models")
+            ensure_directory_writable(cache_dir, "cache")
 
-        # Check for data files
-        players_file = data_dir / 'nba_players.csv'
-        games_file = data_dir / 'nba_games.csv'
+            # Check for data files
+            players_file = data_dir / 'nba_players.csv'
+            games_file = data_dir / 'nba_games.csv'
 
-        if not players_file.exists() or not games_file.exists():
-            if console and RICH_AVAILABLE:
-                console.print("[bold red]ERROR: Data files not found![/bold red]")
-                console.print("Please run 'python update_data.py' first to fetch NBA data.")
-            else:
-                print(f"\nERROR: Data files not found in {data_dir}")
-                print("Please run 'python update_data.py' first to fetch NBA data.")
-            raise FileNotFoundError(
-                f"Missing required data files in {data_dir}: "
-                f"{'nba_players.csv' if not players_file.exists() else ''}"
-                f"{', ' if (not players_file.exists() and not games_file.exists()) else ''}"
-                f"{'nba_games.csv' if not games_file.exists() else ''}"
-            )
+            if not players_file.exists() or not games_file.exists():
+                if console and RICH_AVAILABLE:
+                    console.print("[bold red]ERROR: Data files not found![/bold red]")
+                    console.print("Please run 'python update_data.py' first to fetch NBA data.")
+                else:
+                    print(f"\nERROR: Data files not found in {data_dir}")
+                    print("Please run 'python update_data.py' first to fetch NBA data.")
+                raise FileNotFoundError(
+                    f"Missing required data files in {data_dir}: "
+                    f"{'nba_players.csv' if not players_file.exists() else ''}"
+                    f"{', ' if (not players_file.exists() and not games_file.exists()) else ''}"
+                    f"{'nba_games.csv' if not games_file.exists() else ''}"
+                )
 
         # Load data
         current_stage = "loading and merging datasets"
-        logger.info("Step 1/5: %s", current_stage.title())
-        if console and RICH_AVAILABLE:
-            console.print("\n[bold cyan]Step 1: Loading and merging datasets...[/bold cyan]")
-        else:
-            print("Step 1: Loading and merging datasets...")
-        
-        loader = DataLoader(str(players_file), str(games_file))
-        merged_df = loader.merge_datasets()
-        
-        if console and RICH_AVAILABLE:
-            console.print(f"  [green]✓[/green] Loaded {len(merged_df):,} player-game records")
-        else:
-            print(f"  Loaded {len(merged_df)} player-game records")
+        with diagnostic_stage("data_load", diag_config):
+            logger.info("Step 1/5: %s", current_stage.title())
+            if console and RICH_AVAILABLE:
+                console.print("\n[bold cyan]Step 1: Loading and merging datasets...[/bold cyan]")
+            else:
+                print("Step 1: Loading and merging datasets...")
+            
+            loader = DataLoader(str(players_file), str(games_file))
+            merged_df = loader.merge_datasets()
+            
+            if console and RICH_AVAILABLE:
+                console.print(f"  [green]✓[/green] Loaded {len(merged_df):,} player-game records")
+            else:
+                print(f"  Loaded {len(merged_df)} player-game records")
+
+        if diag_config.enabled:
+            print_data_summary(merged_df)
         
         # Engineer features
         current_stage = "feature engineering"
-        logger.info("Step 2/5: %s", current_stage.title())
-        if console and RICH_AVAILABLE:
-            console.print("\n[bold cyan]Step 2: Engineering features...[/bold cyan]")
-        else:
-            print("\nStep 2: Engineering features...")
-        
-        feature_engineer_kwargs = dict(preset.feature_engineer_kwargs())
-        disable_columns = []
-        if args.feature_ablation:
-            ablation_probe = build_feature_engineer(**preset.feature_engineer_kwargs())
-            ablation_report = ablation_probe.benchmark_feature_variants(merged_df, target='PTS')
-            logger.info("Feature ablation report: %s", ablation_report)
-            best_variant = ablation_report.get('best', {}).get('variant')
-            if best_variant == 'no_matchup':
-                feature_engineer_kwargs['disable_groups'] = ['matchup', 'opponent_strength']
-            elif best_variant == 'no_context':
-                feature_engineer_kwargs['disable_groups'] = ['context', 'fatigue']
-            elif best_variant == 'no_target_encoding':
-                feature_engineer_kwargs['disable_groups'] = ['target_encoding', 'league_rank']
-            elif best_variant == 'formula_raw_only':
-                disable_columns = ablation_probe._formula_columns_hint()
-
-        if disable_columns:
-            feature_engineer_kwargs['disable_columns'] = disable_columns
-
-        if preset.recent_seasons is not None:
-            current_stage = "preset history trimming"
-            logger.info("Step 1.5/5: %s", current_stage.title())
+        with diagnostic_stage("feature_engineering", diag_config):
+            logger.info("Step 2/5: %s", current_stage.title())
             if console and RICH_AVAILABLE:
-                console.print(
-                    f"\n[bold cyan]Applying preset recent-history window: last {preset.recent_seasons} seasons...[/bold cyan]"
-                )
-            trimmed_df = apply_recent_history_window(merged_df, preset.recent_seasons)
-            if len(trimmed_df) != len(merged_df):
-                logger.info(
-                    "Recent-history preset trimmed merged data from %s to %s rows",
-                    len(merged_df),
-                    len(trimmed_df),
-                )
-                merged_df = trimmed_df
-            elif 'SEASON_ID' not in merged_df.columns:
-                logger.warning(
-                    "Preset %s requested a recent-history window, but SEASON_ID is unavailable; training on full history.",
-                    preset.name,
-                )
+                console.print("\n[bold cyan]Step 2: Engineering features...[/bold cyan]")
+            else:
+                print("\nStep 2: Engineering features...")
 
-        # ---- Precompute lifecycle aging curves (B-Ianus + KAN) ----
-        # Must run before feature engineering so caches exist for feature groups to load.
-        lifecycle_cfg = getattr(runtime_config, 'lifecycle', {}) or {}
-        try:
-            if lifecycle_cfg.get('aging_curve_enabled', True):
-                from src.lifecycle.aging_model import BIanusAgingModel
-                aging_model = BIanusAgingModel(
-                    prior_strength=lifecycle_cfg.get('aging_prior_strength', 10.0),
-                )
-                bios_path = os.path.join(data_dir, 'player_bios.csv')
-                if os.path.exists(bios_path):
-                    bios_df = pd.read_csv(bios_path)
-                    aging_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
-                    logger.info("Precomputed B-Ianus aging curves for all players")
-                else:
-                    logger.info("No player_bios.csv found; aging curve precompute skipped (defaults used)")
-        except Exception as e:
-            logger.warning(f"Aging curve precompute failed (non-fatal): {e}")
+            feature_engineer_kwargs = dict(preset.feature_engineer_kwargs())
+            disable_columns = []
+            if args.feature_ablation:
+                ablation_probe = build_feature_engineer(**preset.feature_engineer_kwargs())
+                ablation_report = ablation_probe.benchmark_feature_variants(merged_df, target='PTS')
+                logger.info("Feature ablation report: %s", ablation_report)
+                best_variant = ablation_report.get('best', {}).get('variant')
+                if best_variant == 'no_matchup':
+                    feature_engineer_kwargs['disable_groups'] = ['matchup', 'opponent_strength']
+                elif best_variant == 'no_context':
+                    feature_engineer_kwargs['disable_groups'] = ['context', 'fatigue']
+                elif best_variant == 'no_target_encoding':
+                    feature_engineer_kwargs['disable_groups'] = ['target_encoding', 'league_rank']
+                elif best_variant == 'formula_raw_only':
+                    disable_columns = ablation_probe._formula_columns_hint()
 
-        try:
-            if lifecycle_cfg.get('kan_aging_enabled', True):
-                from src.lifecycle.kan_age_model import KANAgeModel
-                kan_model = KANAgeModel(
-                    hidden_dim=lifecycle_cfg.get('kan_hidden_dim', 8),
-                    grid_size=lifecycle_cfg.get('kan_grid_size', 5),
-                    device='cpu',  # always CPU to avoid GPU contention
-                )
-                bios_path = os.path.join(data_dir, 'player_bios.csv')
-                if os.path.exists(bios_path):
-                    bios_df = pd.read_csv(bios_path)
-                    kan_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
-                    logger.info("Precomputed KAN aging outputs for all players")
-                else:
-                    logger.info("No player_bios.csv found; KAN aging precompute skipped (fallback used)")
-        except Exception as e:
-            logger.warning(f"KAN aging precompute failed (non-fatal): {e}")
+            if disable_columns:
+                feature_engineer_kwargs['disable_columns'] = disable_columns
 
-        feature_engineer = build_feature_engineer(
-            rolling_windows=feature_engineer_kwargs.get('rolling_windows'),
-            enable_groups=feature_engineer_kwargs.get('enable_groups'),
-            disable_groups=feature_engineer_kwargs.get('disable_groups'),
-            disable_columns=feature_engineer_kwargs.get('disable_columns'),
-            cache_dir=cache_dir,
-        )
-        full_df = feature_engineer.create_features(merged_df)
+            if preset.recent_seasons is not None:
+                current_stage = "preset history trimming"
+                logger.info("Step 1.5/5: %s", current_stage.title())
+                if console and RICH_AVAILABLE:
+                    console.print(
+                        f"\n[bold cyan]Applying preset recent-history window: last {preset.recent_seasons} seasons...[/bold cyan]"
+                    )
+                trimmed_df = apply_recent_history_window(merged_df, preset.recent_seasons)
+                if len(trimmed_df) != len(merged_df):
+                    logger.info(
+                        "Recent-history preset trimmed merged data from %s to %s rows",
+                        len(merged_df),
+                        len(trimmed_df),
+                    )
+                    merged_df = trimmed_df
+                elif 'SEASON_ID' not in merged_df.columns:
+                    logger.warning(
+                        "Preset %s requested a recent-history window, but SEASON_ID is unavailable; training on full history.",
+                        preset.name,
+                    )
 
-        if console and RICH_AVAILABLE:
-            console.print(f"  [green]✓[/green] Created {len(full_df.columns):,} features")
-        else:
-            print(f"  Created {len(full_df.columns)} features")
+            # ---- Precompute lifecycle aging curves (B-Ianus + KAN) ----
+            # Must run before feature engineering so caches exist for feature groups to load.
+            lifecycle_cfg = getattr(runtime_config, 'lifecycle', {}) or {}
+            try:
+                if lifecycle_cfg.get('aging_curve_enabled', True):
+                    from src.lifecycle.aging_model import BIanusAgingModel
+                    aging_model = BIanusAgingModel(
+                        prior_strength=lifecycle_cfg.get('aging_prior_strength', 10.0),
+                    )
+                    bios_path = os.path.join(data_dir, 'player_bios.csv')
+                    if os.path.exists(bios_path):
+                        bios_df = pd.read_csv(bios_path)
+                        aging_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
+                        logger.info("Precomputed B-Ianus aging curves for all players")
+                    else:
+                        logger.info("No player_bios.csv found; aging curve precompute skipped (defaults used)")
+            except Exception as e:
+                logger.warning(f"Aging curve precompute failed (non-fatal): {e}")
+
+            try:
+                if lifecycle_cfg.get('kan_aging_enabled', True):
+                    from src.lifecycle.kan_age_model import KANAgeModel
+                    kan_model = KANAgeModel(
+                        hidden_dim=lifecycle_cfg.get('kan_hidden_dim', 8),
+                        grid_size=lifecycle_cfg.get('kan_grid_size', 5),
+                        device='cpu',  # always CPU to avoid GPU contention
+                    )
+                    bios_path = os.path.join(data_dir, 'player_bios.csv')
+                    if os.path.exists(bios_path):
+                        bios_df = pd.read_csv(bios_path)
+                        kan_model.precompute_all(bios_df, merged_df, cache_dir=os.path.join(data_dir, 'cache'))
+                        logger.info("Precomputed KAN aging outputs for all players")
+                    else:
+                        logger.info("No player_bios.csv found; KAN aging precompute skipped (fallback used)")
+            except Exception as e:
+                logger.warning(f"KAN aging precompute failed (non-fatal): {e}")
+
+            feature_engineer = build_feature_engineer(
+                rolling_windows=feature_engineer_kwargs.get('rolling_windows'),
+                enable_groups=feature_engineer_kwargs.get('enable_groups'),
+                disable_groups=feature_engineer_kwargs.get('disable_groups'),
+                disable_columns=feature_engineer_kwargs.get('disable_columns'),
+                cache_dir=cache_dir,
+            )
+            full_df = feature_engineer.create_features(merged_df)
+
+            if console and RICH_AVAILABLE:
+                console.print(f"  [green]✓[/green] Created {len(full_df.columns):,} features")
+            else:
+                print(f"  Created {len(full_df.columns)} features")
+
+        if diag_config.enabled:
+            print_data_summary(merged_df, full_df)
 
         # ---- Smart feature selection (per-target) ----
         # When --feature-selection smart is passed, build all features
@@ -457,145 +514,159 @@ Examples:
             or (cli_selection is None and bool(config_selection_cfg.get('enabled', False)))
         )
         if fs_enabled:
-            current_stage = "smart feature selection"
-            logger.info("Step 2.5/5: %s", current_stage.title())
-            if console and RICH_AVAILABLE:
-                console.print(
-                    "\n[bold cyan]Step 2.5: Smart per-target feature selection...[/bold cyan]"
-                )
-            else:
-                print("\nStep 2.5: Smart per-target feature selection...")
-
-            try:
-                from src.evaluation import (
-                    ProfileConfig,
-                    SelectorConfig,
-                    SmartFeatureSelector,
-                )
-
-                # CLI overrides YAML config when explicitly set.
-                fs_cfg = dict(config_selection_cfg or {})
-                if cli_selection == 'smart':
-                    fs_cfg['enabled'] = True
-                    fs_cfg['mode'] = 'smart'
-                else:
-                    fs_cfg.setdefault('enabled', True)
-                if args.selection_profile and args.selection_profile != 'balanced':
-                    fs_cfg['profile'] = args.selection_profile
-                fs_cfg.setdefault(
-                    'output_path', 'models/feature_selection_manifest.json'
-                )
-                fs_cfg.setdefault('random_state', 42)
-
-                selector_config = SelectorConfig.from_config(fs_cfg)
-                profile_config = ProfileConfig.resolve(
-                    selector_config.profile, config_profile
-                )
-
-                selector = SmartFeatureSelector(
-                    config=selector_config, profile=profile_config
-                )
-                master_feature_cols = [
-                    c for c in full_df.columns
-                    if c not in selector.targets
-                    and c not in FeatureSelector.EXCLUDE_ALWAYS
-                    and c
-                ]
-                # Use the engineer's group_columns mapping (set on
-                # last_result.group_columns) so the ablator knows which
-                # columns belong to which group.
-                group_columns = feature_engineer.get_group_columns()
-                if not group_columns:
-                    logger.warning(
-                        "Smart feature selection: no group_columns recorded; "
-                        "falling back to a single all-features group"
-                    )
-                    group_columns = {"all": list(master_feature_cols)}
-
-                manifest = selector.run(
-                    full_df=full_df,
-                    feature_cols=master_feature_cols,
-                    group_columns=group_columns,
-                    targets=preset.targets,
-                )
-                feature_selection_manifest_payload = manifest.to_dict()
-                logger.info(
-                    "Smart feature selection complete: profile=%s targets=%d global=%d",
-                    manifest.profile,
-                    len(manifest.targets),
-                    len(manifest.selected_features_global),
-                )
+            with diagnostic_stage("feature_selection", diag_config):
+                current_stage = "smart feature selection"
+                logger.info("Step 2.5/5: %s", current_stage.title())
                 if console and RICH_AVAILABLE:
                     console.print(
-                        f"  [green]✓[/green] Selected "
-                        f"{len(manifest.selected_features_global)} global features, "
-                        f"{len(manifest.selected_features_by_target)} per-target lists"
+                        "\n[bold cyan]Step 2.5: Smart per-target feature selection...[/bold cyan]"
                     )
-            except Exception as exc:
-                logger.warning(
-                    "Smart feature selection failed (%s); continuing with the "
-                    "full feature set", exc,
-                )
-                feature_selection_manifest_payload = None
+                else:
+                    print("\nStep 2.5: Smart per-target feature selection...")
+
+                try:
+                    from src.evaluation import (
+                        ProfileConfig,
+                        SelectorConfig,
+                        SmartFeatureSelector,
+                    )
+
+                    # CLI overrides YAML config when explicitly set.
+                    fs_cfg = dict(config_selection_cfg or {})
+                    if cli_selection == 'smart':
+                        fs_cfg['enabled'] = True
+                        fs_cfg['mode'] = 'smart'
+                    else:
+                        fs_cfg.setdefault('enabled', True)
+                    if args.selection_profile and args.selection_profile != 'balanced':
+                        fs_cfg['profile'] = args.selection_profile
+                    fs_cfg.setdefault(
+                        'output_path', 'models/feature_selection_manifest.json'
+                    )
+                    fs_cfg.setdefault('random_state', 42)
+
+                    selector_config = SelectorConfig.from_config(fs_cfg)
+                    profile_config = ProfileConfig.resolve(
+                        selector_config.profile, config_profile
+                    )
+
+                    selector = SmartFeatureSelector(
+                        config=selector_config, profile=profile_config
+                    )
+                    master_feature_cols = [
+                        c for c in full_df.columns
+                        if c not in selector.targets
+                        and c not in FeatureSelector.EXCLUDE_ALWAYS
+                        and c
+                    ]
+                    # Use the engineer's group_columns mapping (set on
+                    # last_result.group_columns) so the ablator knows which
+                    # columns belong to which group.
+                    group_columns = feature_engineer.get_group_columns()
+                    if not group_columns:
+                        logger.warning(
+                            "Smart feature selection: no group_columns recorded; "
+                            "falling back to a single all-features group"
+                        )
+                        group_columns = {"all": list(master_feature_cols)}
+
+                    manifest = selector.run(
+                        full_df=full_df,
+                        feature_cols=master_feature_cols,
+                        group_columns=group_columns,
+                        targets=preset.targets,
+                    )
+                    feature_selection_manifest_payload = manifest.to_dict()
+                    logger.info(
+                        "Smart feature selection complete: profile=%s targets=%d global=%d",
+                        manifest.profile,
+                        len(manifest.targets),
+                        len(manifest.selected_features_global),
+                    )
+                    if console and RICH_AVAILABLE:
+                        console.print(
+                            f"  [green]✓[/green] Selected "
+                            f"{len(manifest.selected_features_global)} global features, "
+                            f"{len(manifest.selected_features_by_target)} per-target lists"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Smart feature selection failed (%s); continuing with the "
+                        "full feature set", exc,
+                    )
+                    if diag_config.enabled:
+                        print(f"{DIAG_PREFIX} WARN feature_selection fallback_to_full_features ({exc})", flush=True)
+                    feature_selection_manifest_payload = None
+        else:
+            diagnostic_noop("feature_selection", diag_config, reason="disabled")
+
+        if diag_config.enabled and feature_selection_manifest_payload is not None:
+            print_selection_summary(feature_selection_manifest_payload)
         
         # Create and run pipeline
         current_stage = "pipeline initialization"
-        logger.info("Step 3/5: %s", current_stage.title())
-        if console and RICH_AVAILABLE:
-            console.print(
-                f"\n[bold cyan]Step 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...[/bold cyan]"
+        with diagnostic_stage("prepare_data", diag_config):
+            logger.info("Step 3/5: %s", current_stage.title())
+            if console and RICH_AVAILABLE:
+                console.print(
+                    f"\n[bold cyan]Step 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...[/bold cyan]"
+                )
+            else:
+                print(f"\nStep 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...")
+            
+            pipeline = create_pipeline(
+                mode=resolved_mode,
+                data_dir=data_dir,
+                models_dir=models_dir,
+                cache_dir=cache_dir,
+                model_size=resolved_model_size,
+                parallel=args.parallel,
+                max_workers=args.max_workers,
+                use_gpu=gpu_available,
+                experiment_name=args.experiment_name,
             )
-        else:
-            print(f"\nStep 3: Initializing training pipeline ({resolved_mode} mode, {preset.name} preset)...")
-        
-        pipeline = create_pipeline(
-            mode=resolved_mode,
-            data_dir=data_dir,
-            models_dir=models_dir,
-            cache_dir=cache_dir,
-            model_size=resolved_model_size,
-            parallel=args.parallel,
-            max_workers=args.max_workers,
-            use_gpu=gpu_available,
-            experiment_name=args.experiment_name,
-        )
-        pipeline.training_preset = preset.name
-        pipeline.feature_group_selection = list(preset.enable_groups)
-        pipeline.model_config["transformer"]["enabled"] = bool(preset.transformer_enabled)
-        pipeline.model_config.setdefault("metadata", {})
-        pipeline.model_config["metadata"]["training_preset"] = preset.name
-        pipeline.model_config["metadata"]["recent_seasons"] = preset.recent_seasons
+            pipeline.training_preset = preset.name
+            pipeline.feature_group_selection = list(preset.enable_groups)
+            pipeline.model_config["transformer"]["enabled"] = bool(preset.transformer_enabled)
+            pipeline.model_config.setdefault("metadata", {})
+            pipeline.model_config["metadata"]["training_preset"] = preset.name
+            pipeline.model_config["metadata"]["recent_seasons"] = preset.recent_seasons
 
-        # Apply the smart feature selection manifest (if any) so the
-        # per-target CatBoost models use the selected feature subsets.
-        if feature_selection_manifest_payload:
-            pipeline.feature_selection_config = feature_selection_manifest_payload
-            pipeline.feature_selection_profile = (
-                feature_selection_manifest_payload.get("profile")
-            )
-            pipeline.apply_feature_selection_manifest(
-                feature_selection_manifest_payload
-            )
-            pipeline.model_config["metadata"]["feature_selection_enabled"] = True
-            pipeline.model_config["metadata"]["feature_selection_profile"] = (
-                feature_selection_manifest_payload.get("profile")
-            )
+            # Apply the smart feature selection manifest (if any) so the
+            # per-target CatBoost models use the selected feature subsets.
+            if feature_selection_manifest_payload:
+                pipeline.feature_selection_config = feature_selection_manifest_payload
+                pipeline.feature_selection_profile = (
+                    feature_selection_manifest_payload.get("profile")
+                )
+                pipeline.apply_feature_selection_manifest(
+                    feature_selection_manifest_payload
+                )
+                pipeline.model_config["metadata"]["feature_selection_enabled"] = True
+                pipeline.model_config["metadata"]["feature_selection_profile"] = (
+                    feature_selection_manifest_payload.get("profile")
+                )
+            
+            # Print hardware info
+            print_hardware_info(pipeline.hw_info, console)
+            
+            # Prepare data
+            current_stage = "data preparation and splitting"
+            logger.info("Step 4/5: %s", current_stage.title())
+            if console and RICH_AVAILABLE:
+                console.print("\n[bold cyan]Step 4: Preparing data splits...[/bold cyan]")
+            else:
+                print("\nStep 4: Preparing data splits...")
+            
+            fit_df, val_df, test_df = pipeline.prepare_data(full_df)
+            
+            # Print data info
+            print_data_info(merged_df, full_df, fit_df, val_df, test_df, console)
         
-        # Print hardware info
-        print_hardware_info(pipeline.hw_info, console)
-        
-        # Prepare data
-        current_stage = "data preparation and splitting"
-        logger.info("Step 4/5: %s", current_stage.title())
-        if console and RICH_AVAILABLE:
-            console.print("\n[bold cyan]Step 4: Preparing data splits...[/bold cyan]")
-        else:
-            print("\nStep 4: Preparing data splits...")
-        
-        fit_df, val_df, test_df = pipeline.prepare_data(full_df)
-        
-        # Print data info
-        print_data_info(merged_df, full_df, fit_df, val_df, test_df, console)
+        # Stop before model training in diagnostic mode.
+        if diag_config.enabled and (diag_config.stop_after is None or diag_config.stop_after == "prepare_data"):
+            print(f"{DIAG_PREFIX} Diagnostic mode stops before model training by design. Run without --diagnose to perform full training.", flush=True)
+            return 0
         
         # Train models
         current_stage = "model training"
@@ -604,7 +675,7 @@ Examples:
             console.print(f"\n[bold cyan]Step 5: Training models (this may take a while)...[/bold cyan]")
         else:
             print(f"\nStep 5: Training models (this may take a while)...")
-        
+
         results = pipeline.train(fit_df, val_df)
         validate_runtime_artifacts(
             ArtifactContract(
@@ -685,6 +756,10 @@ Examples:
         
         return 0
         
+    except DiagnosticStop:
+        return 0
+    except DiagnosticStageFailed:
+        return 1
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user.")
         return 130

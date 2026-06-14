@@ -2,9 +2,11 @@
 
 ## Snapshot
 
-- Observed date: 2026-06-12
+- Observed date: 2026-06-14
 - Repository health: good
 - Test status in this workspace:
+  - diagnostic mode tests on 2026-06-14: `pytest tests/test_training/test_diagnostics.py -q` -> `28 passed`.
+  - existing tests after diagnostic mode: `pytest tests/test_training/ tests/test_contracts/ tests/test_models/test_model_manager.py -q` -> `75 passed`.
   - full non-slow suite on 2026-06-12 after bug-fix batch: `pytest -m "not slow" -q` -> `368 passed, 1 skipped, 1 deselected`.
   - targeted subset on 2026-06-12 after residual interval calibration: `pytest tests/test_correction/ tests/test_query/ tests/test_contracts/ tests/test_simulation/test_game_simulator.py::TestGameSimulatorUpgrade -q` -> `90 passed`.
   - targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). This is on top of the 2026-06-04 baseline.
@@ -139,8 +141,18 @@
   - `src/correction/interval_store.py` loads `models/calibration/*_intervals.json` non-fatally; missing artifacts disable interval output without breaking prediction.
   - `src/correction/confidence_scorer.py` maps interval width, `DATA_QUALITY`, minutes-confidence signals, and residual-model availability into `HIGH` / `MEDIUM` / `LOW` / `NO_EDGE`.
   - `ModelManager.predict_player_stats(..., include_confidence=True)` appends `{STAT}_INTERVAL_80_LOW/HIGH`, `{STAT}_INTERVAL_90_LOW/HIGH`, `{STAT}_CONFIDENCE`, and `{STAT}_CONFIDENCE_SCORE` when calibration artifacts are loaded. Default calls remain backward-compatible.
-  - `GameSimulator` requests confidence-aware batch predictions and carries interval/confidence metadata into `player_averages`; `ReportGenerator.export_player_projections()` writes the new columns for all six stats and validates them before saving.
-  - Projection CSV contract now requires all six stats x 14 columns: the previous 8 projection/distribution columns plus 80/90 calibrated interval bounds, confidence label, and confidence score.
+   - `GameSimulator` requests confidence-aware batch predictions and carries interval/confidence metadata into `player_averages`; `ReportGenerator.export_player_projections()` writes the new columns for all six stats and validates them before saving.
+   - Projection CSV contract now requires all six stats x 14 columns: the previous 8 projection/distribution columns plus 80/90 calibrated interval bounds, confidence label, and confidence score.
+- **New: Fast training diagnostic mode** (2026-06-14):
+   - `python train.py --diagnose --stop-after <stage>` runs staged checks without full model training.
+   - Supported stages: `preflight`, `data_load`, `feature_engineering`, `feature_selection`, `prepare_data`, `artifact_check`.
+   - Each stage prints `[TRAIN-DIAG] START/OK/FAILED/SKIP` markers with exception type, message, and full traceback on failure.
+   - `--diagnose` alone runs all pre-training stages and stops before model training.
+   - `--diagnose --stop-after artifact_check` validates existing `models/` artifacts using the resolved preset's `transformer_enabled` setting.
+   - `--feature-selection off --stop-after feature_selection` prints SKIP and still honors the stop point.
+   - After data load and feature engineering, diagnostic mode prints row counts, column counts, and target-column presence.
+   - `src/training/diagnostics.py` provides `diagnostic_stage`, `diagnostic_noop`, `DiagnosticStop`, `DiagnosticStageFailed`, and summary helpers.
+   - Uses custom exceptions instead of `sys.exit()` in library code.
 
 ## What Partially Works
 
