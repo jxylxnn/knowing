@@ -95,6 +95,7 @@ tests/             — mirrors src/ structure; conftest.py injects project root 
 ## Gotchas
 
 - **Disabled models**: LSTM and GNN are `enabled: false` in `config/default.yaml`. CatBoost + Transformer is the active stack.
+- **Feature engineering is cached**: `FeatureEngineer.create_features()` caches results to `cache/training/*.parquet`, keyed on the input DataFrame hash + FE config (rolling windows, enabled/disabled groups) + mtime/size of external files some groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). The cache is active by default in `DataPipeline` and `ModelManager` (training + live/simulation paths). Feature groups declare their external deps via `FeatureGroup.external_files()` so cached features are never stale when those files grow/update. To force recompute: `python clear_cache.py --all --yes` (or delete `cache/training/`).
 - **CatBoost parallelism**: On GPU use `max_workers=1` (CUDA context contention); on CPU size workers to machine cores.
 - **Gitignored at root only**: `.gitignore` uses `/data/` and `/models/` (with leading slash), so only root-level `data/` and `models/` are ignored — `src/data/` and `src/models/` are tracked.
 - **PyTorch test shim**: `src/__init__.py` installs a NumPy-backed torch shim when running under pytest on machines without a working PyTorch. Tests import `src` and get the shim automatically; real runtime still requires real torch.

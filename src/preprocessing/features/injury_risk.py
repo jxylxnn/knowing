@@ -57,6 +57,9 @@ class InjuryRiskFeatureGroup(FeatureGroup):
         self.data_dir = data_dir
         self._injury_history: Optional[pd.DataFrame] = None
 
+    def external_files(self) -> List[str]:
+        return [os.path.join(self.data_dir, 'injury_history.csv')]
+
     def _load_injury_history(self) -> pd.DataFrame:
         """Load injury history CSV, cache in memory for the session."""
         if self._injury_history is not None:

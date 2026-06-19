@@ -4,7 +4,7 @@
 
 - Architecture style: local batch/CLI pipeline with file-based persistence.
 - No server process, no request router, no auth layer, no database.
-- The repo is organized around six operational phases:
+- The repo is organized around seven operational phases:
   1. data ingestion
   2. feature engineering, smart feature selection, and training
   3. simulation and projection export
@@ -12,6 +12,7 @@
   5. backtesting and ensemble weight optimization
   6. variance optimization and copula simulation
   7. residual correction and residual interval calibration
+  8. residual correction monitoring (Ticket 6)
 
 ## Top-Level Execution Flow
 
@@ -36,9 +37,9 @@ Important named functions in `update_data.py`:
 
 1. `train.py` loads `config/default.yaml`, resolves a named preset from `training_presets`, and selects the matching feature-group/Transformer configuration.
 2. `src/preprocessing/data_loader.py` reads the raw CSVs and joins player/team context.
-3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming.
+3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming. The `laptop_quality` preset sits between `small` and `full`: CatBoost-first (Transformer off), a 13-group feature set, `recent_seasons=3`, and smart feature selection on by default. **Feature engineering is cached (DR-034)**: `DataPipeline` constructs its `FeatureEngineer` with `cache_dir="cache/training"`, so `create_features()` serves repeated identical calls from `cache/training/*.parquet` instead of recomputing the full 25-group pipeline. The cache key hashes the input DataFrame + FE config + mtime/size of external files the feature groups read (declared via `FeatureGroup.external_files()`), so it invalidates when those inputs change.
    - When `--feature-ablation` is enabled, the Step 2 benchmark probe also goes through `build_feature_engineer(...)` so the ablation search stays compatible with older constructors that may reject `disable_groups`.
-4. **Smart feature selection (optional, Step 2.5)** — when `--feature-selection smart` (or `feature_selection.enabled: true` in YAML) is set, `train.py` runs `SmartFeatureSelector` after the full feature set is built and before `TrainingPipeline` starts. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` containing per-target feature lists. The manifest is then loaded by `TrainingPipeline.apply_feature_selection_manifest()` and consumed by `_feature_cols_for_target()` so each per-target CatBoost model trains on its own subset. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list.
+4. **Smart feature selection (optional, Step 2.5)** — when `--feature-selection smart` is set, the resolved preset turns it on (e.g. `laptop_quality`), or `feature_selection.enabled: true` is set in YAML, `train.py` runs `SmartFeatureSelector` after the full feature set is built and before `TrainingPipeline` starts. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` containing per-target feature lists. The manifest is then loaded by `TrainingPipeline.apply_feature_selection_manifest()` and consumed by `_feature_cols_for_target()` so each per-target CatBoost model trains on its own subset. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list. In `--diagnose` mode the expensive selection work is skipped (emits a `SKIP` marker) so preflight stays fast while confirming the stage is wired.
 5. `src/training/pipeline.py` creates chronological train/validation/test splits.
 5. The training pipeline fits:
    - CatBoost regressors per target — each target's training frame is sliced to its per-target feature list when smart selection is active
@@ -64,7 +65,8 @@ Important named methods in this path:
 
 - `DataLoader.load_data`
 - `DataLoader.merge_datasets`
-- `FeatureEngineer.create_features`
+- `FeatureEngineer.create_features` — now parquet-cached when `cache_dir` is set (active in `DataPipeline` and `ModelManager`); key includes external-file mtimes via `_external_deps_hash()`
+- `FeatureEngineer._cache_key` / `_external_deps_hash`
 - `FeatureEngineer.create_features_chunked`
 - `TrainingPipeline.prepare_data`
 - `TrainingPipeline.train`
@@ -354,21 +356,22 @@ Key invariant:
 - Training and inference rely on stable feature-column semantics. Adding or renaming columns without updating saved schema expectations is risky.
 - `rolling.py` now materializes its wide rolling/efficiency/momentum outputs in temporary structures and appends them with a single concat per group to avoid pandas fragmentation.
 - `archetype.py` computes hard labels plus soft similarities to a fixed playstyle template set, which means cold-start players can still be mapped to a nearby bucket without a separate clustering fit artifact.
+- Feature groups that read external on-disk files (`injury_risk`, `aging_curve`, `kan_aging`) declare them via `FeatureGroup.external_files()` so the feature-engineering parquet cache key invalidates when those files change (DR-034).
 
 ### `src/training/`
 
 - Owns model fitting, experiment logging, and training orchestration.
 - `pipeline.py` is the active end-to-end training pipeline.
 - `catboost_trainer.py` owns CatBoost training and per-target artifact persistence behavior.
-- `presets.py` is the named preset boundary for the CLI: it defines the small/full stack shape, rolling-window defaults, optional recent-history trimming, and the feature-group allowlist used by `train.py`.
+- `presets.py` is the named preset boundary for the CLI: it defines the `small` / `laptop_quality` / `full` stack shapes, rolling-window defaults, optional recent-history trimming, and the feature-group allowlist used by `train.py`. `laptop_quality` is a laptop-friendly midpoint — CatBoost + smart feature selection, Transformer off, 13 feature groups, `recent_seasons=3` — and still trains the canonical six targets. The preset's `feature_selection`/`feature_selection_profile` fields let a preset turn on smart selection by default; `train.py` honors that when `--feature-selection` is not explicitly set.
 - `experiment.py` writes experiment summaries under `experiments/`.
-- `feature_cache.py` contains reusable cache infrastructure but is not clearly wired into the active top-level training flow.
+- `feature_cache.py` contains reusable `FeatureCache`/`DataSplitCache` (joblib) cache infrastructure, still unused by the active path — the active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()` (DR-034), not this module.
 
 ### `src/models/`
 
 - Owns runtime model definitions and model loading.
 - `transformer_model.py` implements the Transformer wrapper, checkpoint compatibility handling, and the eager-safe inference path used by validation/runtime callers.
-- `model_manager.py` loads saved artifacts and exposes runtime prediction methods to the simulator.
+- `model_manager.py` loads saved artifacts and exposes runtime prediction methods to the simulator. It constructs its `FeatureEngineer` with `cache_dir="cache/training"` (DR-034), so the simulation path's shared feature-engineering step (`game_simulator.py` → `create_features`) is also parquet-cached.
 
 Critical coupling:
 
@@ -406,9 +409,37 @@ Fragility notes:
 - **Strict mode** (`--strict` CLI flag on `simulate_season.py`): halts execution when any optional InputHealth record reports `failed` or `fallback`. Passed through `GameSimulator(strict_mode=True)` and `SeasonSimulator(strict_mode=True)`.
 - **Data quality column** (`DATA_QUALITY`): exported in `player_projections_*.csv` as `FULL`, `DEGRADED_FALLBACK`, or `DEGRADED_MISSING`. Surfaces a CLI warning in the query layer via `ProjectionLoader.find_player()`.
 
-### `src/evaluation/` (NEW — 2026-05-09)
+### Flow 9: Residual Correction Monitoring (NEW — 2026-06-18)
 
-- Owns backtesting, ensemble weight optimization, drift detection, and weight versioning.
+1. `monitor_residual_corrections.py` loads a prediction history parquet/CSV (default: `data/evaluation/prediction_history.parquet`, fallback: `data/evaluation/residual_training.parquet`).
+2. `src/evaluation/residual_monitor.py::ResidualMonitor.evaluate()` produces a structured per-target report comparing base vs corrected MAE for all six stats.
+3. The monitor computes:
+   - **Overall metrics**: base/corrected MAE, RMSE, bias, improvement %, correction hit/harm/neutral rate
+   - **Data-quality breakdown**: metrics sliced by DATA_QUALITY bucket (FULL, DEGRADED_FALLBACK, DEGRADED_MISSING)
+   - **Confidence breakdown**: metrics sliced by confidence label (HIGH, MEDIUM, LOW, NO_EDGE)
+   - **Rolling-window status**: status for last N days and season-to-date (helps detect recent degradation)
+   - **Status labels**: HELPING / NEUTRAL / HURTING / INSUFFICIENT_DATA per target
+   - **Recommendations**: KEEP_ENABLED / DISABLE_CORRECTION / NEUTRAL_REVIEW / INSUFFICIENT_DATA
+4. `src/evaluation/residual_report.py` writes the report to `reports/residual_monitoring/` as:
+   - `latest_summary.json` (stable filename for downstream tools)
+   - `residual_report_<timestamp>.json` (full JSON)
+   - `residual_report_<timestamp>.csv` (flattened per-target rows, optional)
+5. The CLI accepts `--input`, `--output-dir`, `--targets`, `--windows`, `--min-rows`, `--helping-threshold`, `--hurting-threshold`, `--print-summary`, `--csv`/`--no-csv`.
+6. Config-driven defaults come from `config/default.yaml` → `residual_monitoring:` block.
+
+Important named classes/functions:
+
+- `ResidualMonitor.evaluate()` — run the full monitoring pipeline
+- `ResidualMonitor.load_input()` — load parquet or CSV
+- `MonitoringThresholds.status_for_pct()` — classify MAE improvement as HELPING/NEUTRAL/HURTING
+- `MonitoringThresholds.recommendation_for_status()` — map status to actionable recommendation
+- `MonitoringReport.to_dict()` — JSON-serializable report payload
+- `write_report()` — write full artifact set (JSON + optional CSV)
+- `render_console_summary()` — human-readable stdout output
+
+### `src/evaluation/` (NEW — 2026-05-09, extended 2026-06-18)
+
+- Owns backtesting, ensemble weight optimization, drift detection, weight versioning, and residual correction monitoring.
 - Important modules:
   - `metrics.py` — `BacktestResult`, `TargetMetrics`, `compute_target_metrics` dataclasses (MAE, RMSE, R², MAPE, calibration, interval coverage), plus `calculate_empirical_crps()` for probabilistic forecast evaluation (O(n log n) Gini mean difference approximation) and `backtest_result_to_json_dict()` for machine-readable JSON serialization (used by `backtest.py --json-output`)
   - `backtest_runner.py` — `BacktestRunner`: runs model predictions against historical completed games, compares against actual box scores
@@ -418,6 +449,8 @@ Fragility notes:
   - **`feature_group_ablation.py` (NEW — 2026-06-04)** — `FeatureGroupAblator`: trains baseline + leave-one-out `HistGradientBoostingRegressor` per feature group, computes per-target MAE deltas. Backbone of the `backtest_gain` signal in smart feature selection.
   - **`shadow_feature_filter.py` (NEW — 2026-06-04)** — `ShadowFeatureFilter`: injects random control columns (`SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET`) and uses their median importance as a noise floor for pruning real features.
   - **`smart_feature_selector.py` (NEW — 2026-06-04)** — `SmartFeatureSelector` + `ProfileConfig` + `SelectorConfig` + `SelectionManifest` + `TargetSelection`: combines 5 signals (backtest_gain, stability, catboost_importance, permutation_importance, missingness_penalty) into a per-target final score and writes a manifest to `models/feature_selection_manifest.json`. Profiles (`fast` / `balanced` / `max_accuracy`) gate which stages run.
+  - **`residual_monitor.py` (NEW — 2026-06-18)** — `ResidualMonitor`: structured per-target comparison of base vs corrected prediction error with data-quality/confidence breakdowns, rolling-window status, and actionable recommendations (HELPING / NEUTRAL / HURTING / INSUFFICIENT_DATA).
+  - **`residual_report.py` (NEW — 2026-06-18)** — JSON/CSV report writer for `ResidualMonitor` output with atomic writes and strict NaN-free JSON output.
 - Key contracts:
   - `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores
   - `EnsembleOptimizer` owns a `BacktestRunner` internally and creates/validates candidate weight configs
@@ -491,7 +524,7 @@ Three new feature groups in `src/preprocessing/features/`, wired into the 23 exi
 - `team_motivation.py` — `TeamMotivationFeatureGroup`: late-season tanking/load management signals. Outputs: `TEAM_CUMULATIVE_WIN_PCT` (shifted to prevent leakage), `IS_LATE_SEASON` (March+), `IS_TANKING_PROXY` (late + win pct < 0.35), `IS_PLAYOFF_LOCK_PROXY` (late + win pct > 0.65).
 - `postseason_context.py` — `PostseasonContextFeatureGroup`: playoff detection. Outputs: `IS_PLAYOFF_GAME` (parsed from `SEASON_TYPE` or `GAME_TYPE`), `PLAYOFF_PACE_PRIOR` (0.95 historical prior for playoff pace drop, model learns exact coefficient).
 
-All three groups use the batched-assembly pattern (`_concat_new_columns`) to avoid pandas fragmentation warnings. They are in the `full` training preset only (not `small`).
+All three groups use the batched-assembly pattern (`_concat_new_columns`) to avoid pandas fragmentation warnings. They are in the `full` training preset only (not `small` or `laptop_quality`).
 
 ### Rest Density Cap
 
@@ -532,6 +565,14 @@ Total feature groups: 26 (19 original + 4 lifecycle + 3 season context).
 - `SeasonSimulator` aggregates per-game source health into `last_run_summary`.
 - `simulate_season.py` surfaces that summary directly to the operator and exits non-zero when schedule health fails.
 
+### `src/query/confidence_adjustment.py` (NEW — 2026-06-18)
+
+- Confidence-aware probability adjustment helpers.
+- Key functions: `get_projection_value`, `get_confidence_label`, `get_confidence_score`, `std_from_interval`, `damp_probability`.
+- Strength multipliers: HIGH=1.00, MEDIUM=0.85, LOW=0.65, NO_EDGE=0.50.
+- Used by the query CLI and probability calculator for safer over/under recommendations.
+- Risk level: low. Pure functions, no external dependencies.
+
 ### `src/query/`
 
 - Owns CLI parsing, projection lookup, and probability math.
@@ -562,6 +603,7 @@ Important boundary:
   - `tests/test_training/test_training_pipeline_colab.py`
   - `tests/test_training/test_nn_trainer.py`
   - `tests/test_models/test_transformer_model.py`
+  - `tests/test_training/test_laptop_quality_smoke.py` — end-to-end smoke test that runs the real CatBoost training path with the `laptop_quality` preset against a tiny checked-in fixture (`tests/fixtures/laptop_quality/data/`, ~2160 player-game rows). Asserts all six `.cbm` artifacts, shared runtime artifacts, metadata preset/transformer flags, and passes `ArtifactContract` validation. Marked `slow` + `integration`.
 
 ## File-Based Storage Contracts
 

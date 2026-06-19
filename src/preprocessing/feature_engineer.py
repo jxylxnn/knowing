@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -162,7 +163,14 @@ class FeatureEngineer:
         return out, added
 
     def _cache_key(self, df: pd.DataFrame) -> str:
-        """Compute a stable cache key from input data and FE configuration."""
+        """Compute a stable cache key from input data, FE config, and external deps.
+
+        Some feature groups read on-disk files that are NOT part of the input
+        DataFrame (e.g. ``data/injury_history.csv``, ``data/cache/aging_curves.csv``).
+        Those files can change between runs while the input DataFrame hash stays
+        identical, so we fold each file's size and mtime into the key. This keeps
+        cached features correct when those external inputs grow or are updated.
+        """
         config_str = (
             f"windows={sorted(self.rolling_windows)}"
             f"|groups={sorted(self.enable_groups or [])}"
@@ -175,7 +183,29 @@ class FeatureEngineer:
             pd.util.hash_pandas_object(df, index=True).values
         ).hexdigest()[:16]
         config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:16]
-        return f"fe_{data_hash}_{config_hash}"
+        deps_hash = self._external_deps_hash()
+        return f"fe_{data_hash}_{config_hash}_{deps_hash}"
+
+    def _external_deps_hash(self) -> str:
+        """Hash the (path, size, mtime) of every external file the groups read.
+
+        Files that do not exist contribute a stable ``MISSING`` token, so a
+        cache entry built with no external data stays valid until such a file
+        actually appears.
+        """
+        parts = []
+        for group in self.feature_groups:
+            if not self._should_run_group(group):
+                continue
+            for fpath in group.external_files():
+                try:
+                    st = os.stat(fpath)
+                    parts.append(f"{fpath}:{st.st_size}:{int(st.st_mtime)}")
+                except OSError:
+                    parts.append(f"{fpath}:MISSING")
+        if not parts:
+            return "none"
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
     def create_features(self, df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
         """Create leakage-safe features with explicit diagnostics."""

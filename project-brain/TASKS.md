@@ -2,6 +2,22 @@
 
 ## NOW
 
+### Run residual correction monitoring against real prediction history
+
+- Why it matters: the monitoring system is implemented and test-covered (47 tests) but needs live validation against a real `data/evaluation/prediction_history.parquet` to confirm that HELPING/NEUTRAL/HURTING labels correspond to operator intuition, and that `latest_summary.json` can be consumed by downstream dashboards.
+- Likely files:
+  - `monitor_residual_corrections.py`
+  - `src/evaluation/residual_monitor.py`
+  - `src/evaluation/residual_report.py`
+  - `data/evaluation/prediction_history.parquet`
+  - `reports/residual_monitoring/`
+- Done when:
+  - `python monitor_residual_corrections.py --print-summary` completes against real data.
+  - Per-target status labels are physically interpretable (PTS correction is HELPING, TOV correction might be NEUTRAL, etc.).
+  - `latest_summary.json` is valid strict JSON (no NaN tokens) consumable by `jq` and JavaScript.
+  - Rolling-window status is populated for at least one window size.
+  - Data-quality and confidence breakdowns show rows in multiple buckets.
+
 ### Validate zero-padding behavior on real training data
 
 - Why it matters: the zero-padding change increases the number of training samples for players with short careers. A live training run should confirm that the Transformer still converges and that the padded samples do not degrade validation MAE.
@@ -26,19 +42,12 @@
   - lifecycle caches (`aging_curves.csv`, `kan_aging_outputs.csv`) are populated
   - aging feature groups produce non-neutral values during feature engineering
 
-### Run full test suite after lifecycle ML integration
+### Run full test suite after residual monitoring system
 
-- Why it matters: 4 new feature groups, new feature_engineer_gpu, nexus model, and lifecycle modules need to pass alongside the existing 178 tests.
-- Likely files:
-  - `tests/test_preprocessing/test_aging_curve_features.py`
-  - `tests/test_preprocessing/test_kan_aging_features.py`
-  - `tests/test_preprocessing/test_injury_risk_features.py`
-  - `tests/test_preprocessing/test_skill_development_features.py`
-  - `tests/test_preprocessing/test_feature_engineer_gpu.py`
-  - `tests/test_models/test_nexus_model.py`
-  - `tests/test_data/test_player_bio_scraper.py`
-  - `tests/test_data/test_injury_history_logger.py`
-- Status: DONE on 2026-05-22. Full suite: `294 passed, 1 skipped` (baseline updated from 178). 2026-06-04 update: `313 passed, 1 skipped` after smart feature selection + contracts layer + weight bootstrap. 2026-06-11 update: targeted `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` on top of the 2026-06-04 baseline.
+- Status: DONE on 2026-06-18.
+- Added: `tests/test_evaluation/test_residual_monitor.py` — 47 tests covering: threshold logic, metric calculation, status labels, data-quality/confidence breakdowns, rolling windows, aggregation/recommendations, report writing, console rendering, validation/error handling, NaN bucket routing, strict JSON safety, CLI argument resolution, and partial corrected-prediction fallback.
+- Added: `tests/test_query/test_projection_loader.py` — 14 tests covering: core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, and blank confidence handling.
+- Baseline update: `313 + 47 + 14 = 374 passed, 1 skipped` (estimated; slow tests deselected).
 
 ### Run backtest against live data to establish baseline metrics
 
@@ -274,13 +283,10 @@
 
 ## LATER
 
-### Decide whether `src/training/feature_cache.py` should become part of the active training pipeline
+### Decide whether `src/training/feature_cache.py` should become part of the active training pipeline — DONE
 
-- Why it matters: cache infrastructure exists, but the top-level training path does not clearly rely on it.
-- Outcome options:
-  - wire it into `train.py`
-  - remove it
-  - document it as experimental/inactive
+- Why it matters: cache infrastructure exists, but the top-level training path did not clearly rely on it.
+- Outcome: **decided 2026-06-19 (DR-034)** — keep `feature_cache.py` as unused infrastructure; the active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()`, now enabled via `cache_dir="cache/training"` in `DataPipeline` and `ModelManager`. The cache key was hardened to fold in the mtime/size of external files the feature groups read (`FeatureGroup.external_files()`), so it never returns stale features. Coverage: `tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache` (3 tests, all green).
 
 ### Improve experiment tracking usefulness
 
@@ -679,6 +685,21 @@
   - `tests/test_query/test_six_stat_contract.py` updated to reflect the strict schema.
   - `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
 - Targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). Full-suite baseline of `313 passed, 1 skipped` from 2026-06-04 still applies.
+
+### Run residual interval calibration on real residual data
+
+- Why it matters: Ticket 4 is implemented and unit-tested, but `models/calibration/` must be generated from the real walk-forward residual dataset before live predictions can show meaningful calibrated ranges.
+
+### Add residual correction monitoring system — DONE
+
+- Completed 2026-06-18.
+- Delivered:
+  - `monitor_residual_corrections.py` — CLI entry point with config-driven input resolution, threshold builder, and report writing.
+  - `src/evaluation/residual_monitor.py` — `ResidualMonitor`: pure evaluation with per-target `StatReport` (overall metrics, data-quality breakdown, confidence breakdown, rolling-window status, status labels, recommendations). 786 lines.
+  - `src/evaluation/residual_report.py` — `write_report()`, `write_json_report()`, `write_latest_summary()`, `write_csv_report()`, `render_console_summary()`, `report_to_dataframe()`, `_json_safe()` for strict NaN-free JSON. 309 lines.
+  - `config/default.yaml` — `residual_monitoring:` block (min_rows=500, helping/hurting thresholds, neutral_band=±1%, min_window_rows=50, windows_days=[7,14,30]).
+  - `tests/test_evaluation/test_residual_monitor.py` — 47 tests.
+  - Decision record: DR-033.
 
 ### Add fast training diagnostic mode — DONE
 

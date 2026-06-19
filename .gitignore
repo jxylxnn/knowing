@@ -12,6 +12,7 @@ __pycache__/
 catboost_info/
 *.pyc
 *.pyo
+/cache/
 
 # Logs
 logs/

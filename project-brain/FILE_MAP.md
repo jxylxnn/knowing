@@ -96,6 +96,7 @@
 - Role: safe cleanup for generated artifacts.
 - Risk level: low to medium.
 - Important behavior: preserves raw source data in `data/`.
+- Current note (DR-034): now also clears the feature-engineering parquet cache at `cache/training/` (it already removed the root `cache/` directory). `python clear_cache.py --all --yes` forces a full feature recompute on the next run.
 
 ### `optimize_variance.py` (NEW — 2026-05-21)
 
@@ -114,6 +115,20 @@
 - Outputs: `models/calibration/calibration_metadata.json` and one `{stat}_intervals.json` file for each calibrated target.
 - CLI modes: `--confidence-levels`, `--min-bucket-rows`, `--targets`.
 - Risk level: low to medium. It does not retrain the base model, but its artifacts influence runtime interval/confidence output.
+
+### `monitor_residual_corrections.py` (NEW — 2026-06-18)
+
+- Role: CLI entry point for residual correction monitoring; generates reports under `reports/residual_monitoring/`.
+- Reads prediction history parquet/CSV (default: `data/evaluation/prediction_history.parquet`, fallback: `data/evaluation/residual_training.parquet`).
+- Calls into: `src.evaluation.residual_monitor.ResidualMonitor`, `src.evaluation.residual_report`.
+- Outputs: `latest_summary.json`, `residual_report_<timestamp>.json`, optionally `residual_report_<timestamp>.csv`.
+- CLI flags: `--input`, `--output-dir`, `--targets`, `--windows`, `--min-rows`, `--helping-threshold`, `--hurting-threshold`, `--print-summary`, `--csv`/`--no-csv`, `--config`.
+- Config-driven defaults via `config/default.yaml` → `residual_monitoring:` block.
+- Risk level: low. Independent of training artifacts — operates on prediction history.
+
+### `train_residual_models.py` (root)
+
+- Role: trains per-target CatBoost residual correction models under `models/residual/`.
 
 ## Configuration
 
@@ -203,7 +218,8 @@ Important files:
 - Role: central orchestrator for feature generation.
 - High-value methods:
   - `_build_groups`
-  - `create_features`
+  - `create_features` — parquet-cached when `cache_dir` is set (DR-034, 2026-06-19); on a cache hit it skips `_compute_features` and loads `cache/training/*.parquet`.
+  - `_cache_key` / `_external_deps_hash` — key = hash(input DataFrame) + hash(FE config) + hash((path,size,mtime) of external files declared by feature groups). Absent external files contribute a stable `MISSING` token.
   - `create_features_chunked`
   - `get_group_columns`
   - `get_diagnostics`
@@ -214,6 +230,7 @@ Important files:
 - Risk level: high.
 - Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.
 - Current note: `FeatureEngineeringResult` now records `n_rows` and `n_features` for selector diagnostics. The `get_group_columns()` output is consumed by `SmartFeatureSelector.run` to map columns back to their groups for ablation scoring.
+- Current note (DR-034): `cache_dir="cache/training"` is now passed by `DataPipeline` and `ModelManager`. `walk_forward_residuals` already passed it. `BacktestRunner` retains its own separate `.pkl` cache and does not use this path.
 
 ### `src/training/presets.py`
 
@@ -326,8 +343,8 @@ Important files:
 
 ### `src/training/feature_cache.py`
 
-- Contains cache helpers not clearly wired into the main `train.py` flow.
-- Treat as secondary/uncertain until a caller is confirmed.
+- Contains reusable `FeatureCache`/`DataSplitCache` (joblib `.pkl`) cache helpers.
+- Still unused by the active path. The active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()` (DR-034, 2026-06-19), not this module. Kept as infrastructure.
 
 ### `src/training/__init__.py`
 
@@ -544,6 +561,22 @@ These are important but secondary to the main orchestration files above.
 - Accept/verify gates prevent regressions from being deployed.
 - Risk level: medium — modifies production weight config.
 
+### `src/evaluation/residual_monitor.py` (NEW — 2026-06-18)
+
+- Role: structured per-target comparison of base vs corrected prediction error.
+- Key types: `ResidualMonitor`, `MonitoringReport`, `StatReport`, `StatMetrics`, `MonitoringThresholds`.
+- Key constants: `STATUS_HELPING`, `STATUS_NEUTRAL`, `STATUS_HURTING`, `STATUS_INSUFFICIENT_DATA`, `RECOMMENDATION_KEEP`, `RECOMMENDATION_DISABLE`, `RECOMMENDATION_REVIEW`, `RECOMMENDATION_INSUFFICIENT`.
+- Pure evaluation (no file I/O). Persistence is handled by `residual_report.py`.
+- Risk level: low. Heavily tested (47 tests in `test_residual_monitor.py`).
+
+### `src/evaluation/residual_report.py` (NEW — 2026-06-18)
+
+- Role: JSON/CSV report writer for `ResidualMonitor` output.
+- Key functions: `write_report`, `write_json_report`, `write_latest_summary`, `write_csv_report`, `render_console_summary`, `report_to_dataframe`, `_json_safe`.
+- Atomic temp-file writes prevent corruption on crash.
+- Strict NaN-free JSON via `_json_safe` + `json.dumps(..., allow_nan=False)`.
+- Risk level: low. Standalone file I/O, no evaluation logic.
+
 ### `src/evaluation/weight_store.py`
 
 - Role: versioned JSON weight storage with atomic writes and rollback.
@@ -716,6 +749,7 @@ These are important but secondary to the main orchestration files above.
   - `tests/test_simulation/test_game_simulator.py`
   - `tests/test_query/test_probability_calculator.py`
   - `tests/test_query/test_interactive_cli.py`
+  - **`tests/test_query/test_projection_loader.py` (NEW — 2026-06-18)** — 14 tests for ProjectionLoader with correction/calibration columns: core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, blank confidence handling.
   - `tests/test_training/test_training_pipeline_colab.py`
   - `tests/test_training/test_nn_trainer.py`
   - `tests/test_models/test_transformer_model.py` — now includes config, zero-padding, and regression tests for the transformer sequence builder
@@ -750,7 +784,7 @@ These are important but secondary to the main orchestration files above.
   - currently empty
   - do not assume it owns anything yet
 - `src/evaluation/`
-  - now contains 8 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`, `feature_group_ablation.py`, `shadow_feature_filter.py`, `smart_feature_selector.py`
+  - now contains 10 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`, `feature_group_ablation.py`, `shadow_feature_filter.py`, `smart_feature_selector.py`, `residual_monitor.py`, `residual_report.py`
   - no longer a placeholder
 - `plans/`, `cline_docs/`, and local PDFs
   - useful historical context, not active runtime code

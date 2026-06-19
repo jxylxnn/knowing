@@ -35,7 +35,7 @@ class DataPipeline:
         """
         self.data_config = data_config
         self.training_config = training_config
-        self.feature_engineer = FeatureEngineer()
+        self.feature_engineer = FeatureEngineer(cache_dir="cache/training")
         self._feature_cols: Optional[List[str]] = None
         self.feature_schema: Optional[FeatureSchema] = None
         self.feature_selector = FeatureSelector(self.training_config.targets)

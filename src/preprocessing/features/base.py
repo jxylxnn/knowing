@@ -127,6 +127,16 @@ class FeatureGroup(ABC):
         """Best-effort feature name discovery for schema bookkeeping."""
         return [c for c in df.columns if c.startswith(self.name.upper())]
 
+    def external_files(self) -> List[str]:
+        """Declare on-disk files this group reads that are NOT in the input DataFrame.
+
+        The FeatureEngineer folds these into its feature cache key (by path +
+        size + mtime) so that cached features are invalidated whenever the
+        external data changes. Groups with no external dependencies return an
+        empty list (the default).
+        """
+        return []
+
     def _check_columns(self, df: pd.DataFrame, diagnostics: Optional[FeatureDiagnostics]) -> None:
         missing_required = [c for c in self.required_columns if c not in df.columns]
         missing_optional = [c for c in self.optional_columns if c not in df.columns]

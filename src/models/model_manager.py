@@ -87,7 +87,7 @@ class ModelManager:
 
         self.use_gpu = False
         self.device = None
-        self.feature_engineer = FeatureEngineer()
+        self.feature_engineer = FeatureEngineer(cache_dir="cache/training")
         self.feature_selector = FeatureSelector(self.targets)
 
         self.residual_correction_model: Optional[ResidualCorrectionModel] = None

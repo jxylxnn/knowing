@@ -54,6 +54,12 @@ class AgingCurveFeatureGroup(FeatureGroup):
     def __init__(self, data_dir: str = 'data'):
         self.data_dir = data_dir
 
+    def external_files(self) -> List[str]:
+        return [
+            os.path.join(self.data_dir, 'cache', 'aging_curves.csv'),
+            os.path.join(self.data_dir, 'player_bios.csv'),
+        ]
+
     def create(
         self,
         df: pd.DataFrame,

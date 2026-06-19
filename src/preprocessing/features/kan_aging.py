@@ -53,6 +53,9 @@ class KANAgingFeatureGroup(FeatureGroup):
         self.data_dir = data_dir
         self._kan_cache: Optional[pd.DataFrame] = None
 
+    def external_files(self) -> List[str]:
+        return [os.path.join(self.data_dir, 'cache', 'kan_aging_outputs.csv')]
+
     def _load_kan_outputs(self) -> pd.DataFrame:
         if self._kan_cache is not None:
             return self._kan_cache

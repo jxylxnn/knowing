@@ -18,8 +18,10 @@
 - Treat filesystem artifact names and locations as API contracts unless you update every consumer in the same change.
 - Update `/project-brain` after every meaningful code change.
 - Do not silently change target-stat semantics, query names, or exported CSV schemas.
-- Keep the named training presets in `config/default.yaml`, `src/training/presets.py`, and `train.py` synchronized; preset drift across those files is a contract bug, not a cosmetic difference.
-- Do not change the canonical six-target training contract when adding presets. `small` may change stack breadth, but it must still train `PTS`, `REB`, `AST`, `STL`, `BLK`, and `TOV`.
+- Keep the named training presets in `config/default.yaml`, `src/training/presets.py`, and `train.py` synchronized; preset drift across those files is a contract bug, not a cosmetic difference. The registered presets are `small`, `laptop_quality`, and `full`.
+- Do not change the canonical six-target training contract when adding presets. `small` and `laptop_quality` may change stack breadth, but every preset must still train `PTS`, `REB`, `AST`, `STL`, `BLK`, and `TOV`.
+- New presets must use the canonical feature-group names from `ALL_FEATURE_GROUPS` in `src/training/presets.py` (e.g. `context`, `rest_density`, `archetype` — not `contextual`, `rest_game_density`, `player_archetype`). Non-canonical names are silently dropped by `FeatureEngineer._should_run_group`.
+- A preset may turn on smart feature selection by default via its `feature_selection` / `feature_selection_profile` fields. `train.py` honors the preset default when `--feature-selection` is not explicitly passed, and resolves the profile from CLI flag → preset → global config → `balanced`. In `--diagnose` mode the expensive `SmartFeatureSelector` work is skipped so preflight stays fast.
 
 ## Naming And Data Conventions
 
@@ -66,6 +68,7 @@
 - Register new feature groups through the active feature-engineering flow instead of embedding ad hoc feature logic in `train.py`.
 - When `train.py` or notebook launchers need feature-group ablation filters, construct the orchestrator through `build_feature_engineer(...)` instead of passing compatibility-sensitive kwargs like `disable_groups` directly into `FeatureEngineer(...)`.
 - When `FeatureEngineer` is used for ablation benchmarking, use `build_feature_engineer(...)` there as well; the benchmark path is part of the compatibility boundary and should not assume every checkout accepts `disable_groups`.
+- When a feature group reads on-disk files that are NOT part of the input DataFrame (e.g. `data/injury_history.csv`, lifecycle precompute CSVs), it MUST declare them via `FeatureGroup.external_files()` so the feature-engineering cache key invalidates when those files change. Failing to do so risks returning stale cached features (DR-034).
 - When adding features:
   - document the feature purpose
   - verify column naming consistency
@@ -87,6 +90,8 @@
 - Keep Transformer validation/runtime inference on the eager model path by default. If `torch.compile` is re-enabled for the Transformer, it must stay behind an explicit safety flag and should never be the only validation path.
 - When touching CUDA attention code, prefer math SDPA fallback controls for validation and add regression coverage for the eager path.
 - `model_stack_metadata.pkl` is part of the shared runtime contract and may now include the selected training preset and feature-group list; keep it in sync with any preset changes.
+- `TrainingPipeline.cat_features` must be filtered to only columns present in `feature_cols` before being passed to CatBoost. The `FeatureSelector` lists `PLAYER_ID`/`TEAM_ID`/`OPPONENT_ID` as categorical columns, but those are in `EXCLUDE_ALWAYS` and never appear in `feature_cols`. Passing unfiltered string `cat_features` to CatBoost after converting the frame to a numpy float array causes a `CatBoostError`. The model_manager already filters at load time — the training pipeline must do the same.
+- `TrainingPipeline.train()` enforces a `len(fit_df) >= 1000` minimum. Smoke-test fixtures must produce at least 1000 fit rows after the chronological split (use `tests/fixtures/laptop_quality/data/` as a reference fixture with ~2160 player-game rows).
 - Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) must use zero-padding for players with fewer than `seq_len` context games. Do not revert to skipping short players — the zero-padding behavior is now covered by regression tests.
 - When changing `SIZE_TIER_SPECS` in `src/config/model_config.py`, remember that `seq_len` and `max_seq_length` affect both the Transformer model's sequence window and the training pipeline's batch construction. Changes here must be reflected in both `_create_sequences()` and `_build_sequence_batch()`.
 
@@ -130,7 +135,7 @@
 - `src/preprocessing/features/season_phase.py` — early-season ramp-up (cap `DAYS_SINCE_SEASON_START` at 30 days so the feature isolates the opening-month effect). `GAMES_WITH_CURRENT_TEAM` resets on trade — ensure `PLAYER_ID` and `TEAM_ID` columns are present and sorted by `GAME_DATE` before the groupby.
 - `src/preprocessing/features/team_motivation.py` — always shift `TEAM_CUMULATIVE_WIN_PCT` by 1 to prevent label leakage (the model should see the team's record *before* the current game). `WL` column must be present with values `'W'`/`'L'`.
 - `src/preprocessing/features/postseason_context.py` — checks both `SEASON_TYPE` and `GAME_TYPE` columns for playoff strings (`'Playoffs'`, `'Postseason'`, `'4'`). If neither column exists, all games default to regular season.
-- Season-context groups are in the `full` preset but intentionally excluded from `small` to preserve its iteration speed.
+- Season-context groups are in the `full` preset but intentionally excluded from `small` and `laptop_quality` to preserve their iteration speed.
 - The rest cap in `RestGameDensityFeatureGroup` (`DAYS_SINCE_LAST_GAME.clip(upper=14.0)`) applies to ALL games, not just off-season gaps. Do not remove or raise the cap without validating the effect on B2B detection (a 1-day gap still correctly produces B2B=1).
 
 ### Phase-Aware Drift Detection (NEW)
@@ -139,6 +144,16 @@
 - When passing `phase` to `detect()`, the function filters history to that phase only. If no phase-specific data exists, it falls back to the full history.
 - The `_infer_phase_from_date()` heuristic (Apr 15–Jun 20 = PLAYOFF) is a rough approximation. Explicitly pass `phase='PLAYOFF'` during postseason backtesting for accuracy.
 - The phase tag is persisted in `drift_state.json` so it survives restarts — old (pre-phase) entries will not have a `phase` key and are treated as `REGULAR`.
+
+### Residual Correction Monitoring (NEW — 2026-06-18)
+
+- `monitor_residual_corrections.py` is the top-level CLI entry point. It delegates to `ResidualMonitor` (pure evaluation) and `residual_report.py` (file I/O). Keep the separation: the monitor does not write files; the report writer does not evaluate.
+- `MonitoringThresholds` is the single source of truth for HELPING/NEUTRAL/HURTING classification rules. If the rules change (e.g., widening the neutral band), update `MonitoringThresholds.status_for_pct()` and the ticket spec in lockstep.
+- The overall_status aggregation rule is conservative: HURTING > INSUFFICIENT_DATA > NEUTRAL > HELPING. A single hurting target dominates the report. Do not soften this — the report is a safety check.
+- JSON reports must never emit NaN/Infinity tokens (invalid strict JSON). `_json_safe()` in `residual_report.py` converts non-finite floats to `None` before serialization with `allow_nan=False`. Any new report format added to the module must do the same.
+- The monitor supports two input column paths: `CORRECTED_PREDICTION` (direct) or `RESIDUAL_CORRECTION` + `BASE_PREDICTION` (derived). When both are present, NaN rows in `CORRECTED_PREDICTION` fall back row-by-row to `BASE + RESIDUAL_CORRECTION`. Do not drop rows with partial coverage.
+- Rolling windows use `min_window_rows` (not `min_rows`) for their status threshold so that short windows are not silenced by a high global row requirement. This is a deliberate design choice — short windows should surface recent degradation even with limited data.
+- `_resolve_input_path()` in the CLI entry point is strict about explicit `--input`: if the user passes an explicit path, it must exist. No silent fallback to config defaults when the user meant a specific file.
 
 ### Evaluation And Optimization (NEW)
 
@@ -186,7 +201,7 @@
 - `SmartFeatureSelector`, `FeatureGroupAblator`, and `ShadowFeatureFilter` live in `src/evaluation/`. They are training-time helpers, not runtime predictors.
 - The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json`. The manifest is the contract between selector, training, and downstream inference. Do not write a parallel manifest format.
 - `TrainingPipeline._feature_cols_for_target(target)` is the single source of truth for "what features does this target see during training". It must fall back to the canonical `self.feature_cols` list when no manifest is loaded, preserving the original contract.
-- `TrainingPreset` may carry `feature_selection` and `feature_selection_profile`. If the YAML config sets `feature_selection.enabled: true` on a preset, the manifest is applied to the pipeline before training.
+- `TrainingPreset` may carry `feature_selection` and `feature_selection_profile`. If the YAML config sets `feature_selection.enabled: true` on a preset (as `laptop_quality` does), the manifest is applied to the pipeline before training. `train.py` also honors the preset default at runtime when `--feature-selection` is not explicitly passed, and skips the expensive selector work in `--diagnose` mode.
 - The selector's signal weights (`WEIGHTS` in `smart_feature_selector.py`) are the ticket spec. If you change them, update DR-028 and the docstrings in lockstep.
 - Selector failure (insufficient samples, fitting error, etc.) must be non-fatal. `train.py` and the pipeline fall back to the full feature set with a warning.
 - `FeatureGroupAblator` uses `HistGradientBoostingRegressor` (sklearn) for speed — its scores are an approximation, not the exact CatBoost gain. Do not assume equivalence with the production trainer.
@@ -234,6 +249,7 @@
 - In `src/preprocessing/features/*`, prefer collecting wide feature outputs in temporary dicts/DataFrames and attaching them with one `pd.concat(axis=1)` per feature group.
 - Be cautious with extra work inside simulation loops; seemingly small per-player or per-draw overhead multiplies quickly.
 - Keep lazy imports for PyTorch-heavy code paths when they reduce startup overhead for non-training commands.
+- Feature engineering is the dominant CPU bottleneck; the in-place parquet cache (`cache/training/*.parquet`, DR-034) is active by default in `DataPipeline` and `ModelManager`. Never construct a production `FeatureEngineer` without `cache_dir` unless you intentionally want to recompute. The cache key already invalidates on input data, FE config, and external-file changes, so prefer letting it reuse results over hand-recomputing.
 
 ## Reliability Rules For Scrapers And External Data
 

@@ -4,7 +4,47 @@ This file records confirmed or strongly inferred architectural decisions visible
 
 When a decision is labeled "inferred", it means the repo shows a clear implementation choice but does not contain explicit historical rationale.
 
-> **Numbering note (2026-06-04)**: DR-020 and DR-021 are each used twice in this file (DR-020 appears once for the Batch-1 feature groups and again for the deterministic playstyle templates; DR-021 appears once for the Transformer seq_len/zero-padding work and again for the self-optimizing ensemble weight system). DR-022 is missing. The duplicates and the gap were preserved rather than renumbered to avoid churning cross-references in `CODE_RULES.md`, `ARCHITECTURE.md`, and the existing TASK log. New decisions should pick the next unused number (DR-029 for the contracts layer).
+> **Numbering note (2026-06-04)**: DR-020 and DR-021 are each used twice in this file (DR-020 appears once for the Batch-1 feature groups and again for the deterministic playstyle templates; DR-021 appears once for the Transformer seq_len/zero-padding work and again for the self-optimizing ensemble weight system). DR-022 is missing. The duplicates and the gap were preserved rather than renumbered to avoid churning cross-references in `CODE_RULES.md`, `ARCHITECTURE.md`, and the existing TASK log. New decisions should pick the next unused number (the highest used as of 2026-06-19 is DR-033; use DR-034 next).
+
+---
+
+## DR-034: Enable The Feature-Engineering Parquet Cache With External-File Invalidation
+
+- Status: active
+- Date: 2026-06-19
+- Confidence: high
+
+### Context
+
+- `FeatureEngineer.create_features()` already contained a complete parquet on-disk cache (load/store keyed on an input-DataFrame hash + FE-config hash), but it was inert: `cache_dir` defaulted to `None`, and the dominant production call sites — `DataPipeline` (training) and `ModelManager` (live prediction + simulation) — constructed `FeatureEngineer()` with no `cache_dir`. Only `walk_forward_residuals` passed `cache_dir="cache/training"`.
+- The result was the dominant runtime bottleneck: the full 25-group CPU pipeline (~24s on the 52k-row dataset, up to ~3.5min) re-ran from scratch on every call. `debug.log` showed `FeatureEngineer running on CPU path.` 59 times and the full feature-engineering pipeline starting 57 times in a single recent session.
+- The separate `FeatureCache`/`DataSplitCache` classes in `src/training/feature_cache.py` remained unused — TASKS.md LATER item flagged this as undecided.
+
+### Options Considered
+
+1. Wire the existing `FeatureCache` (joblib `.pkl`) class into the call sites.
+2. Activate the parquet cache already inside `create_features` by passing a `cache_dir` at the dead call sites.
+3. Vectorize/GPU-accelerate the feature groups instead of caching.
+
+### Decision
+
+- Option 2: activate the existing in-place parquet cache. It already works and uses parquet (columnar, compact) rather than the unused `FeatureCache` joblib layer.
+- Pass `cache_dir="cache/training"` in `DataPipeline.__init__` and `ModelManager.__init__`. Leave `BacktestRunner` (has its own `.pkl` cache keyed on raw-file mtime) and `walk_forward_residuals` (already enabled) untouched.
+- **Correctness guard**: extend `_cache_key` to also hash `(path, size, mtime)` of the external on-disk files some feature groups read but that are NOT part of the input DataFrame (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). Feature groups declare these via a new `FeatureGroup.external_files()` hook (default `[]`; overridden in `injury_risk`, `aging_curve`, `kan_aging`). Absent files contribute a stable `MISSING` token. This prevents stale cached features when those external inputs grow or update (e.g. the incremental injury history).
+
+### Tradeoffs
+
+- First call after any data/config/external-file change still pays the full compute cost (cold). Only repeated identical calls benefit.
+- Disk cost: one parquet per distinct (data, config, external-deps) combination in `cache/training/` (~36–50MB each at full scale). Mitigated by `clear_cache.py --all`.
+- mtime-based invalidation can produce a spurious recompute if a file is `touch`ed without content change; acceptable vs. the alternative of returning stale features.
+
+### Consequences
+
+- Repeated feature engineering across training re-runs, simulation context prep, and `prepare_data` calls is served from cache instead of recomputed.
+- `/cache/` added to `.gitignore`; a stale tracked `cache/training/*.parquet` (old key format, 36MB) was untracked.
+- Three new tests in `tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache` lock in: (a) repeated calls hit cache (`_compute_features` called once), (b) external-file appearance changes the key, (c) external-file change after a hit forces recompute (no stale return).
+- `src/training/feature_cache.py` remains unused; the TASKS.md LATER item is resolved as "keep as infrastructure, the active path uses the in-place parquet cache."
+- AGENTS.md Gotchas updated.
 
 ---
 
@@ -1566,3 +1606,56 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
 - If live calibration coverage is materially off target, revise bucket definitions, confidence thresholds, or quantile selection.
 - If probability calculation needs calibrated intervals directly, Ticket 5 should consume these artifacts through `CalibrationIntervalStore` rather than re-reading JSON ad hoc.
 - If operators need backwards-compatible legacy projection loading, add an explicit migration/regeneration command rather than weakening `validate_projection_frame(...)`.
+
+---
+
+## DR-033: Residual Correction Monitoring as a Pure Evaluation + Report Writer Split
+
+- Status: active
+- Date: 2026-06-18
+- Confidence: high
+
+### Context
+
+- Tickets 1-4 shipped residual correction models and calibrated confidence intervals. The system could correct predictions and describe their uncertainty, but there was no feedback loop to tell operators whether correction was actually helping.
+- The existing metrics infra (`BacktestRunner`, `TargetMetrics`, `metrics.py`) computes point-prediction accuracy but does not produce a structured per-stat comparison of base vs corrected error with data-quality and confidence breakdowns, rolling-window status, or actionable recommendations.
+- Without a monitoring loop, operators could silently deploy correction models that degrade predictions in specific contexts (e.g., hurting on FULL data quality while helping on DEGRADED).
+
+### Options Considered
+
+1. Extend `BacktestRunner` to add corrected-prediction comparison and status labels.
+2. Build a standalone `ResidualMonitor` with a pure-evaluation API (no file I/O) and a separate report writer.
+3. Fold monitoring into the existing `train_residual_models.py` or `calibrate_residual_intervals.py` workflows.
+
+### Decision
+
+- Option 2: standalone `ResidualMonitor` (pure evaluation) + `residual_report.py` (file I/O) + `monitor_residual_corrections.py` (CLI entry point).
+- The monitor produces a `MonitoringReport` with per-target `StatReport` blocks containing overall metrics, data-quality breakdown, confidence breakdown, rolling-window status, and recommendations.
+- The report writer produces strict NaN-free JSON and optional CSV files under `reports/residual_monitoring/`.
+- The CLI entry point reads config from `config/default.yaml` → `residual_monitoring:` block with explicit fallback resolution.
+
+### Why
+
+- Keeping the evaluation logic pure (no file I/O) makes it directly testable without temp files.
+- The split between monitor, report writer, and CLI follows the existing `BacktestRunner`/`metrics.py`/`backtest.py` pattern.
+- JSON reports with strict NaN safety (via `_json_safe` + `allow_nan=False`) make the output consumable by JavaScript dashboards and strict JSON parsers without pre-processing.
+
+### Tradeoffs
+
+- Three files instead of one, but each is focused and testable in isolation.
+- The monitor reimplements base-vs-corrected comparison logic that partially overlaps with `BacktestRunner`. This is acceptable because the monitoring question ("is correction helping right now?") is different from the backtest question ("how accurate are predictions overall?").
+- `MonitoringThresholds` introduces separate configuration (min_rows, helping/hurting thresholds) that must stay in sync with operator expectations.
+
+### Consequences
+
+- New CLI: `python monitor_residual_corrections.py [--input ...] [--output-dir ...] [--targets ...]`.
+- New config block: `residual_monitoring:` in `config/default.yaml`.
+- `MonitoringThresholds` enforces a conservative aggregation rule (HURTING > INSUFFICIENT_DATA > NEUTRAL > HELPING) so a single hurting target cannot be hidden.
+- `_resolve_input_path()` is strict about explicit `--input`: no silent fallback to config defaults when the user names a specific file.
+- Full test suite for the monitor: 47 tests covering all evaluation paths, report writing, strict JSON, and CLI argument resolution.
+
+### Revisit Triggers
+
+- If the monitor grows to need its own persistent state (e.g., historical trend tracking), add a `MonitoringStore` separate from the report-writer.
+- If the HELPING/NEUTRAL/HURTING classification proves too coarse, add finer-grained status levels or numeric scores.
+- If operators need automated alerting on HURTING status, add a `--alert-threshold` flag or a CI-compatible exit code. Currently the CLI always exits 0 (monitoring is advisory, not blocking).

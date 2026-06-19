@@ -2,9 +2,10 @@
 
 ## Snapshot
 
-- Observed date: 2026-06-14
+- Observed date: 2026-06-19
 - Repository health: good
 - Test status in this workspace:
+  - feature-engineer cache tests on 2026-06-19: `pytest tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache -q` -> `3 passed`. Full preprocessing package: `pytest tests/test_preprocessing/ -q` -> `107 passed`. Affected modules (pipeline/models/correction/evaluation, not-slow): `182 passed, 1 skipped`.
   - diagnostic mode tests on 2026-06-14: `pytest tests/test_training/test_diagnostics.py -q` -> `28 passed`.
   - existing tests after diagnostic mode: `pytest tests/test_training/ tests/test_contracts/ tests/test_models/test_model_manager.py -q` -> `75 passed`.
   - full non-slow suite on 2026-06-12 after bug-fix batch: `pytest -m "not slow" -q` -> `368 passed, 1 skipped, 1 deselected`.
@@ -153,6 +154,16 @@
    - After data load and feature engineering, diagnostic mode prints row counts, column counts, and target-column presence.
    - `src/training/diagnostics.py` provides `diagnostic_stage`, `diagnostic_noop`, `DiagnosticStop`, `DiagnosticStageFailed`, and summary helpers.
    - Uses custom exceptions instead of `sys.exit()` in library code.
+- **New: Residual correction monitoring system (Ticket 6, 2026-06-18)**:
+   - `monitor_residual_corrections.py` — CLI entry point that loads prediction history and produces per-target HELPING/NEUTRAL/HURTING status.
+   - `src/evaluation/residual_monitor.py` — `ResidualMonitor`: pure evaluation logic with data-quality breakdown, confidence breakdown, rolling-window status (7/14/30 day windows + season-to-date), and actionable recommendations (KEEP_ENABLED / DISABLE_CORRECTION / NEUTRAL_REVIEW / INSUFFICIENT_DATA).
+   - `src/evaluation/residual_report.py` — JSON/CSV report writer with atomic temp-file writes and strict NaN-free JSON output.
+   - `config/default.yaml` — `residual_monitoring:` config block with thresholds (min_rows=500, helping=1%, hurting=-1%, neutral_band=±1%), rolling windows (7/14/30 days), and fallback input paths.
+   - Full test suite: `tests/test_evaluation/test_residual_monitor.py` — 47 tests covering threshold logic, metric calculation, status labels, data-quality/confidence breakdowns, rolling windows, aggregation/recommendations, report writing, console rendering, validation, NaN routing, strict JSON safety, CLI resolution, and partial corrected-prediction fallback.
+- **New: Confidence adjustment helpers (2026-06-18)**:
+   - `src/query/confidence_adjustment.py` — `get_projection_value`, `get_confidence_label`, `get_confidence_score`, `std_from_interval`, `damp_probability` for safer over/under recommendations.
+- **New: Projection loader tests (2026-06-18)**:
+   - `tests/test_query/test_projection_loader.py` — 14 tests covering core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, and blank confidence handling.
 
 ## What Partially Works
 
@@ -180,6 +191,7 @@
 - No checked-in trained models are present in this workspace beyond cache directories.
 - The repo uses many local file contracts rather than strong typed interfaces between phases — though the simulation layer is moving toward typed dataclasses.
 - `simulate_season.py` carries a run-level input health summary and exits non-zero for hard schedule failures, but still needs a live smoke test against current upstream sources.
+- Feature-engineering cache (DR-034, 2026-06-19): the first call after any input-data, FE-config, or external-file change is still a cold full compute; only repeated identical calls are served from the parquet cache. Each distinct cache entry is ~36–50MB at full scale.
 
 ## Active Risks
 
@@ -192,6 +204,7 @@
 - If lineup, injury, betting, or defense context scrapers fail, `GameSimulator` now continues in explicit degraded mode (or fails fast with `--strict`).
 - Query users can query all six stats (PTS, REB, AST, STL, BLK, TOV) from exported projection CSVs. A `DATA_QUALITY` warning surfaces when a projection uses fallback data.
 - `clear_cache.py` can reset generated state while preserving raw input CSVs.
+- Feature engineering is now cached by default (DR-034, 2026-06-19): `DataPipeline` and `ModelManager` write/read `cache/training/*.parquet`. The cache key folds in the mtime/size of external files the feature groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`), so cached features auto-invalidate when those grow. To force a recompute: `python clear_cache.py --all --yes` or delete `cache/training/`.
 - `optimize_weights.py --rollback N` can revert to previous weight versions if a retune degrades accuracy.
 - If `player_bios.csv` is missing, aging features default to neutral (1.0 factor). Run `update_data.py` with `--interactive` to populate it.
 - Delete `data/cache/aging_curves.csv` and `data/cache/kan_aging_outputs.csv` to force recomputation of lifecycle caches after retraining.

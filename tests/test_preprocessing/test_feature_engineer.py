@@ -306,6 +306,109 @@ class TestFeatureEngineer:
         assert selector.feature_schema.schema_hash == schema.schema_hash
 
 
+class TestFeatureEngineerCache:
+    """Caching behavior for create_features.
+
+    The full feature pipeline is the dominant runtime bottleneck (~24s+ on the
+    52k-row dataset, repeated dozens of times). A parquet cache keyed on the
+    input data + FE config already exists inside create_features but is only
+    active when cache_dir is set. These tests lock in (a) that the cache
+    short-circuits repeated computation and (b) that the cache key is
+    invalidated when the external CSVs consumed by some feature groups change,
+    so enabling the cache never returns stale features.
+    """
+
+    def test_repeated_create_features_is_cache_hit(self, sample_player_data, tmp_path):
+        """A second call with the same df + cache_dir must skip recomputation."""
+        from src.preprocessing.feature_engineer import FeatureEngineer
+
+        fe = FeatureEngineer(cache_dir=str(tmp_path))
+        call_count = {"n": 0}
+        real_compute = fe._compute_features
+
+        def counting_compute(df):
+            call_count["n"] += 1
+            return real_compute(df)
+
+        fe._compute_features = counting_compute
+
+        first = fe.create_features(sample_player_data, is_training=True)
+        assert call_count["n"] == 1
+        # parquet file must have been written
+        assert list(tmp_path.glob("*.parquet"))
+
+        second = fe.create_features(sample_player_data, is_training=True)
+        assert call_count["n"] == 1, "second call should be served from cache"
+        # cached result must be content-equal to the computed one
+        pd.testing.assert_frame_equal(
+            second.reset_index(drop=True),
+            first.reset_index(drop=True),
+            check_like=True,
+        )
+
+    def test_cache_key_reflects_external_file_mtime(self, sample_player_data, tmp_path):
+        """Touching an external dependency must change the cache key."""
+        from src.preprocessing.feature_engineer import FeatureEngineer
+
+        fe = FeatureEngineer(cache_dir=str(tmp_path))
+        key_before = fe._cache_key(sample_player_data)
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        # Simulate one of the external files aging/injury groups read growing.
+        injury = data_dir / "injury_history.csv"
+        injury.write_text("PLAYER_ID,DATE\n101,2024-01-01\n")
+        # The groups hardcode data_dir='data'; point them at our temp data dir.
+        for group in fe.feature_groups:
+            if hasattr(group, "data_dir"):
+                group.data_dir = str(data_dir)
+                # bust any in-memory cached reads
+                group._injury_history = None
+                group._kan_cache = None
+
+        key_after = fe._cache_key(sample_player_data)
+        assert key_after != key_before, (
+            "cache key must change when an external dependency appears/changes "
+            "so cached features are never stale relative to those files"
+        )
+
+    def test_external_file_change_forces_recompute(self, sample_player_data, tmp_path):
+        """After a cache hit, an external file change must trigger recompute."""
+        from src.preprocessing.feature_engineer import FeatureEngineer
+
+        fe = FeatureEngineer(cache_dir=str(tmp_path))
+
+        # Point the external-file-reading groups at a temp data dir so we can
+        # mutate their inputs without touching the real data/ directory.
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        for group in fe.feature_groups:
+            if hasattr(group, "data_dir"):
+                group.data_dir = str(data_dir)
+
+        call_count = {"n": 0}
+        real_compute = fe._compute_features
+
+        def counting_compute(df):
+            call_count["n"] += 1
+            return real_compute(df)
+
+        fe._compute_features = counting_compute
+
+        fe.create_features(sample_player_data, is_training=True)
+        assert call_count["n"] == 1
+        # second call, nothing changed -> cache hit
+        fe.create_features(sample_player_data, is_training=True)
+        assert call_count["n"] == 1
+
+        # Now mutate an external dependency the key tracks.
+        (data_dir / "injury_history.csv").write_text("PLAYER_ID,DATE\n101,2024-01-02\n")
+        fe.create_features(sample_player_data, is_training=True)
+        assert call_count["n"] == 2, (
+            "external dependency changed but cached (stale) result was returned"
+        )
+
+
 class TestDataLoader:
     """Tests for DataLoader class."""
     
