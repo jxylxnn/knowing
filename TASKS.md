@@ -38,6 +38,7 @@ Delivered:
 - `src/contracts/errors.py` — ContractError hierarchy.
 - `check_contracts.py` — standalone validator CLI.
 - Both `train.py` and `simulate_season.py` validate at startup.
+- `feature_schema_v4` semantic safety quarantine is active; legacy artifacts require the explicit `--allow-legacy-artifacts` migration flag.
 
 ### Smart Feature Selection
 Completed 2026.

@@ -56,6 +56,7 @@ from src.evaluation.shadow_feature_filter import (
     ShadowFeatureFilter,
     ShadowFilterResult,
 )
+from src.contracts.features import validate_feature_names
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +470,7 @@ class SmartFeatureSelector:
         targets: Sequence[str] = DEFAULT_TARGETS,
     ) -> SelectionManifest:
         """Run the full smart selection pipeline."""
+        validate_feature_names(feature_cols, context="smart-selection candidate schema")
         feature_cols = [c for c in feature_cols if c in full_df.columns]
         if not feature_cols:
             raise ValueError("No feature columns available for smart selection")

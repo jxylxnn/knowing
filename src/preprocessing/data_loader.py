@@ -76,104 +76,137 @@ class DataLoader:
         return self.players_df, self.games_df
 
     def merge_datasets(self) -> pd.DataFrame:
-        """Vectorized merge logic (Much Faster)."""
-        if self.players_df is None or self.games_df is None: self.load_data()
-            
-        # 1. Prepare Game Stats for Self-Join
-        # We need to join the game table on itself to get opponent stats
-        games = self.games_df[['GAME_ID', 'TEAM_ID', 'PTS', 'REB', 'AST', 'FGA', 'FTA', 'FGM', 'OREB', 'DREB', 'TOV']].copy()
-        
-        # Self-merge to get opponent stats for each team
-        # If Team A played Team B in Game 1, we get two rows. 
-        # We merge Game 1 (Team A) with Game 1 (Team B) to get what B scored against A.
-        merged_games = pd.merge(
-            games, 
-            games, 
-            on='GAME_ID', 
-            suffixes=('', '_OPP')
+        """Merge player rows with pregame context only.
+
+        Player box-score columns remain in the returned frame as labels for
+        training.  Team box-score outcomes are deliberately *not* merged into
+        that frame.  Only opponent identity and shifted/rolling team context
+        may cross the player/team boundary.
+        """
+        if self.players_df is None or self.games_df is None:
+            self.load_data()
+
+        assert self.players_df is not None
+        assert self.games_df is not None
+
+        base_games = self.games_df.copy()
+        game_keys = base_games[["GAME_ID", "TEAM_ID", "GAME_DATE"]].drop_duplicates()
+        outcome_columns = [
+            column
+            for column in [
+                "PTS",
+                "REB",
+                "AST",
+                "FGA",
+                "FTA",
+                "FGM",
+                "OREB",
+                "DREB",
+                "TOV",
+            ]
+            if column in base_games.columns
+        ]
+
+        # Build opponent identity from keys only.  This map contains no
+        # outcomes and therefore cannot leak a same-game score into a player
+        # row even if a caller mutates the game totals.
+        opponent_keys = game_keys[["GAME_ID", "TEAM_ID"]].rename(
+            columns={"TEAM_ID": "OPPONENT_ID"}
         )
-        
-        # Filter to ensure we aren't matching a team with itself (defensive check)
-        merged_games = merged_games[merged_games['TEAM_ID'] != merged_games['TEAM_ID_OPP']]
-        
-        # Rename Opponent stats to Defensive Stats allowed by Team
-        # Example: PTS_OPP is the points the opponent scored, which is the points Team_ID allowed
-        merged_games.rename(columns={
-            'PTS_OPP': 'OPP_PTS_ALLOWED', 'REB_OPP': 'OPP_REB_ALLOWED', 'AST_OPP': 'OPP_AST_ALLOWED',
-            'FGA_OPP': 'OPP_FGA_ALLOWED', 'FGM_OPP': 'OPP_FGM_ALLOWED'
-        }, inplace=True)
-        
-        # Calculate Rolling Defensive Ratings for the TEAM
-        for stat in ['OPP_PTS_ALLOWED', 'OPP_REB_ALLOWED', 'OPP_AST_ALLOWED']:
-            merged_games[f'TEAM_DEF_{stat}_ROLL_10'] = merged_games.groupby('TEAM_ID')[stat].transform(
-                lambda x: x.shift(1).rolling(10, min_periods=3).mean()
-            )
-            
-        # Merge Defensive Stats back to main Games DF
-        # We only need the team's defensive stats
-        team_def = merged_games[['GAME_ID', 'TEAM_ID', 'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10', 
-                                  'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10']]
-        
-        # Remove duplicates from self-merge
-        team_def = team_def.drop_duplicates()
+        team_pairs = game_keys[["GAME_ID", "TEAM_ID"]].merge(
+            opponent_keys, on="GAME_ID", how="left"
+        )
+        team_pairs = team_pairs[team_pairs["TEAM_ID"] != team_pairs["OPPONENT_ID"]]
+        team_pairs = team_pairs.drop_duplicates(["GAME_ID", "TEAM_ID"])
 
-        self.games_df = pd.merge(self.games_df, team_def, on=['GAME_ID', 'TEAM_ID'], how='left')
-
-        # Add safe opponent-team rolling context columns by merging on opponent identity.
-        rolling_cols = [c for c in self.games_df.columns if c.startswith('TEAM_') and c.endswith(('_ROLL_10', '_ROLL_5'))]
-        if rolling_cols:
-            opp_roll = self.games_df[['GAME_ID', 'TEAM_ID'] + rolling_cols].copy()
-            opp_roll = opp_roll.rename(columns={'TEAM_ID': 'OPPONENT_ID'})
-            rename_map = {
-                c: f'OPP_TEAM_{c.replace("TEAM_", "", 1).replace("DEF_OPP_", "DEF_")}'
-                for c in rolling_cols
+        # Opponent outcomes are used only to construct shifted defensive
+        # history.  The current game's opponent row is shifted out before the
+        # rolling window is calculated, so changing either team's current
+        # outcome cannot change its current feature row.
+        opponent_outcomes = base_games[["GAME_ID", "TEAM_ID"] + outcome_columns].rename(
+            columns={
+                "TEAM_ID": "OPPONENT_ID",
+                **{column: f"OPP_{column}_ALLOWED" for column in outcome_columns},
             }
-            opp_roll = opp_roll.rename(columns=rename_map)
-        else:
-            opp_roll = pd.DataFrame(columns=['GAME_ID', 'OPPONENT_ID'])
-
-        # 2. Merge with Player Stats
-        game_merge_defaults = {
-            'WL': '',
-            'PTS': 0, 'REB': 0, 'AST': 0, 'FGA': 0, 'FTA': 0,
-            'OREB': 0, 'DREB': 0, 'TOV': 0,
-            'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10': 0.0,
-            'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10': 0.0,
-            'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10': 0.0,
-        }
-        self.games_df = self._ensure_columns(self.games_df, game_merge_defaults)
-
-        own_team_roll_cols = [c for c in self.games_df.columns if c.startswith('TEAM_') and c.endswith(('_ROLL_10', '_ROLL_5'))]
-        cols_to_select = list(dict.fromkeys([
-            'GAME_ID', 'TEAM_ID', 'WL', 'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
-            'TEAM_DEF_OPP_PTS_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_REB_ALLOWED_ROLL_10', 'TEAM_DEF_OPP_AST_ALLOWED_ROLL_10'
-        ] + own_team_roll_cols))
-        merged_df = pd.merge(
-            self.players_df,
-            self.games_df[cols_to_select],
-            on=['GAME_ID', 'TEAM_ID'],
-            how='left',
-            suffixes=('', '_TEAM')
         )
-        
-        # 3. Add Opponent Identity (Using the pre-merged_games table is efficient)
-        # We need the OPPONENT_ID for the player row
-        opp_map = merged_games[['GAME_ID', 'TEAM_ID', 'TEAM_ID_OPP']].drop_duplicates()
-        opp_map.rename(columns={'TEAM_ID_OPP': 'OPPONENT_ID_FROM_GAME'}, inplace=True)
-        merged_df = pd.merge(merged_df, opp_map, on=['GAME_ID', 'TEAM_ID'], how='left')
-        if 'OPPONENT_ID' in merged_df.columns:
-            merged_df['OPPONENT_ID'] = merged_df['OPPONENT_ID'].fillna(merged_df['OPPONENT_ID_FROM_GAME'])
-            merged_df = merged_df.drop(columns=['OPPONENT_ID_FROM_GAME'])
-        else:
-            merged_df = merged_df.rename(columns={'OPPONENT_ID_FROM_GAME': 'OPPONENT_ID'})
-
-        if not opp_roll.empty:
-            merged_df = pd.merge(
-                merged_df,
-                opp_roll,
-                on=['GAME_ID', 'OPPONENT_ID'],
-                how='left',
+        defensive = game_keys.merge(opponent_outcomes, on="GAME_ID", how="left")
+        defensive = defensive[defensive["TEAM_ID"] != defensive["OPPONENT_ID"]]
+        defensive = defensive.sort_values(
+            ["TEAM_ID", "GAME_DATE", "GAME_ID"], kind="mergesort"
+        )
+        defensive_columns: list[str] = []
+        for stat in ("PTS", "REB", "AST"):
+            source = f"OPP_{stat}_ALLOWED"
+            if source not in defensive.columns:
+                continue
+            output = f"TEAM_DEF_OPP_{stat}_ALLOWED_ROLL_10"
+            defensive[output] = defensive.groupby("TEAM_ID")[source].transform(
+                lambda values: values.shift(1).rolling(10, min_periods=3).mean()
             )
-        
-        logger.info(f"Merged dataset shape: {merged_df.shape}")
+            defensive_columns.append(output)
+
+        safe_context = base_games[["GAME_ID", "TEAM_ID"]].copy()
+        rolling_columns = [
+            column
+            for column in base_games.columns
+            if column.startswith("TEAM_")
+            and column.endswith(("_ROLL_10", "_ROLL_5"))
+        ]
+        safe_context = safe_context.merge(
+            base_games[["GAME_ID", "TEAM_ID"] + rolling_columns],
+            on=["GAME_ID", "TEAM_ID"],
+            how="left",
+        )
+        if defensive_columns:
+            safe_context = safe_context.merge(
+                defensive[["GAME_ID", "TEAM_ID"] + defensive_columns].drop_duplicates(
+                    ["GAME_ID", "TEAM_ID"]
+                ),
+                on=["GAME_ID", "TEAM_ID"],
+                how="left",
+            )
+
+        # Only pregame context is selected here.  In particular, do not add
+        # WL or any raw team stat; those are current-game outcomes.
+        merged_df = self.players_df.merge(
+            safe_context.drop_duplicates(["GAME_ID", "TEAM_ID"]),
+            on=["GAME_ID", "TEAM_ID"],
+            how="left",
+            suffixes=("", "_TEAM_CONTEXT"),
+        )
+
+        # Carry the same shifted context for the opponent without carrying
+        # its current outcome columns.
+        opponent_roll = safe_context.rename(columns={"TEAM_ID": "OPPONENT_ID"})
+        opponent_roll = opponent_roll.rename(
+            columns={
+                column: f"OPP_TEAM_{column.replace('TEAM_', '', 1).replace('DEF_OPP_', 'DEF_')}"
+                for column in opponent_roll.columns
+                if column.startswith("TEAM_")
+            }
+        )
+        if not opponent_roll.empty:
+            merged_df = merged_df.merge(
+                team_pairs[["GAME_ID", "TEAM_ID", "OPPONENT_ID"]],
+                on=["GAME_ID", "TEAM_ID"],
+                how="left",
+                suffixes=("", "_FROM_GAME"),
+            )
+            if "OPPONENT_ID_FROM_GAME" in merged_df.columns:
+                merged_df["OPPONENT_ID"] = merged_df["OPPONENT_ID"].fillna(
+                    merged_df.pop("OPPONENT_ID_FROM_GAME")
+                )
+            merged_df = merged_df.merge(
+                opponent_roll,
+                on=["GAME_ID", "OPPONENT_ID"],
+                how="left",
+            )
+        else:
+            merged_df = merged_df.merge(
+                team_pairs[["GAME_ID", "TEAM_ID", "OPPONENT_ID"]],
+                on=["GAME_ID", "TEAM_ID"],
+                how="left",
+            )
+
+        logger.info("Merged dataset shape: %s", merged_df.shape)
         return merged_df

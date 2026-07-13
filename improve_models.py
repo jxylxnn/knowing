@@ -126,10 +126,17 @@ def main() -> int:
     parser.add_argument("--parallel", action="store_true")
     parser.add_argument("--no-gpu", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate but do not promote")
+    parser.add_argument(
+        "--allow-legacy-artifacts", action="store_true",
+        help="Allow quarantined legacy artifacts for diagnostics only; promotion is disabled.",
+    )
     parser.add_argument("--rollback", default=None, help="Point the champion manifest at a prior version")
     parser.add_argument("--report", default="reports/continual_learning/latest.json")
     parser.add_argument("--ledger-path", default="data/evaluation/prediction_history.parquet")
     args = parser.parse_args()
+
+    if args.allow_legacy_artifacts and not args.dry_run:
+        parser.error("--allow-legacy-artifacts disables promotion; use --dry-run")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     root = Path(args.models_dir)
@@ -165,8 +172,18 @@ def main() -> int:
                 shutil.copytree(champion_dir, candidate_dir, dirs_exist_ok=True)
             _run_residual_training(args, candidate_dir)
 
-        champion_manager = ModelManager(data_dir=str(data_dir), models_dir=str(root))
-        challenger_manager = ModelManager(data_dir=str(data_dir), models_dir=str(candidate_dir))
+        if args.allow_legacy_artifacts:
+            print("UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled")
+        champion_manager = ModelManager(
+            data_dir=str(data_dir),
+            models_dir=str(root),
+            allow_legacy_artifacts=args.allow_legacy_artifacts,
+        )
+        challenger_manager = ModelManager(
+            data_dir=str(data_dir),
+            models_dir=str(candidate_dir),
+            allow_legacy_artifacts=args.allow_legacy_artifacts,
+        )
         champion_runner = BacktestRunner(champion_manager, data_dir=str(data_dir), models_dir=str(champion_dir))
         challenger_runner = BacktestRunner(challenger_manager, data_dir=str(data_dir), models_dir=str(candidate_dir))
         champion_result = champion_runner.run(date_start, date_end, progress=False)

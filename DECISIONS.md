@@ -11,6 +11,14 @@ While DR-005 and DR-009 established resilient fallbacks and visible degradation 
 ### Decision
 1. Introduce a `--strict` CLI flag to `simulate_season.py` that halts execution if any optional `InputHealth` record reports `failed` or `fallback`.
 2. Append a `DATA_QUALITY` column to the `player_projections_<timestamp>.csv` export schema.
+
+## 2026-07-13 — Feature safety quarantine
+
+Persisted feature schemas use `feature_schema_v4`. Current-game player/team
+outcomes are forbidden by one canonical contract and are rejected before
+runtime loading, validation, or promotion. Legacy execution is available only
+through an explicit `--allow-legacy-artifacts` migration flag; that mode is
+visibly unsafe and cannot feed replay or promotion.
 3. Wire `ProjectionLoader` to read `DATA_QUALITY` and emit a visible warning during interactive queries.
 
 ### Consequences

@@ -60,6 +60,7 @@ class ModelManager:
         model_size: str = "M",
         model_config: Optional[Dict[str, Any]] = None,
         registry: Optional[ModelRegistry] = None,
+        allow_legacy_artifacts: bool = False,
     ):
         if not isinstance(data_dir, str) or not data_dir:
             raise ValueError(f"Invalid data_dir: {data_dir}")
@@ -68,6 +69,7 @@ class ModelManager:
 
         self.data_dir = data_dir
         self.models_root = str(Path(models_dir))
+        self.allow_legacy_artifacts = bool(allow_legacy_artifacts)
         self.version_registry = ModelVersionRegistry(self.models_root)
         self.models_dir = str(self.version_registry.active_dir())
         Path(self.models_dir).mkdir(parents=True, exist_ok=True)
@@ -131,6 +133,7 @@ class ModelManager:
             ArtifactContract(
                 models_dir=Path(self.models_dir),
                 transformer_required=self._blend_requires_transformer(),
+                allow_legacy_artifacts=self.allow_legacy_artifacts,
             )
         )
 

@@ -149,6 +149,8 @@ A dedicated `src/contracts/` module validates the inter-step artifact contract. 
 
 Validates: required model files, target set match, feature schema consistency, projection CSV schema (incl. `DATA_QUALITY` column), schedule schema.
 
+Feature schemas are strict `feature_schema_v4` contracts. Same-game player and team outcomes are rejected before model loading; the current legacy flat bundle is expected to fail `check_contracts.py` until retraining produces a clean schema. For migration-only diagnostics, pass `--allow-legacy-artifacts` to a model-consuming CLI. This prints `UNSAFE LEGACY ARTIFACT MODE`; replay and promotion are disabled in that mode.
+
 ### 6. Input Health & Strict Mode (DR-025)
 
 Every optional context source (injuries, lineups, betting) reports a health status. `simulate_season.py --strict` fails fast if any optional source is `fallback` or `failed`. Without `--strict`, the simulation runs with visible warnings and the `DATA_QUALITY` column on `player_projections_*.csv` flags degraded inputs (FULL / DEGRADED_FALLBACK / DEGRADED_MISSING). The query CLI surfaces these warnings at lookup time.

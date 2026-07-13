@@ -133,6 +133,10 @@ Examples:
         action='store_true',
         help='Include evidence-based reasoning for the requested stat'
     )
+    parser.add_argument(
+        '--allow-legacy-artifacts', action='store_true',
+        help='Use quarantined legacy artifacts for migration-only live diagnostics',
+    )
     
     parser.add_argument(
         '--sims',
@@ -147,7 +151,11 @@ Examples:
     from src.query.probability_calculator import ProbabilityCalculator
     from src.query.projection_loader import ProjectionLoader
     
-    cli = InteractiveCLI(data_dir=args.data_dir, num_sims=args.sims)
+    cli = InteractiveCLI(
+        data_dir=args.data_dir,
+        num_sims=args.sims,
+        allow_legacy_artifacts=args.allow_legacy_artifacts,
+    )
     
     if args.list_players:
         cli._list_players()

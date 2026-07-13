@@ -74,12 +74,14 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnov
         self,
         data_dir: str = 'data/sim_results',
         model_dir: str = 'models',
-        num_sims: int = 100
+        num_sims: int = 100,
+        allow_legacy_artifacts: bool = False,
     ):
         self.calculator = ProbabilityCalculator()
         self.loader = ProjectionLoader(data_dir=data_dir)
         self.parser = QueryParser()
         self.model_dir = model_dir
+        self.allow_legacy_artifacts = bool(allow_legacy_artifacts)
         self.num_sims = num_sims
         self._simulator = None
         self._running = True
@@ -965,7 +967,9 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnov
                 from src.models.model_manager import ModelManager
                 from src.simulation.game_simulator import GameSimulator
                 
-                manager = ModelManager()
+                if self.allow_legacy_artifacts:
+                    print("UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled")
+                manager = ModelManager(allow_legacy_artifacts=self.allow_legacy_artifacts)
                 manager._load_models()
                 self._simulator = GameSimulator(manager)
             

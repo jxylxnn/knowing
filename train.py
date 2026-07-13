@@ -269,6 +269,10 @@ Examples:
              '[TRAIN-DIAG] markers. Does not run full training by default.'
     )
     parser.add_argument(
+        '--allow-legacy-artifacts', action='store_true',
+        help='Allow quarantined legacy schemas for migration-only checks; disables replay/promotion.',
+    )
+    parser.add_argument(
         '--stop-after', type=str, default=None,
         choices=STAGES_ORDERED,
         help='Stop after the specified stage in diagnostic mode. Only valid '
@@ -276,6 +280,9 @@ Examples:
     )
     
     args = parser.parse_args()
+
+    if args.allow_legacy_artifacts:
+        print('UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled', flush=True)
 
     diag_config = DiagnosticConfig(
         enabled=args.diagnose,
@@ -306,6 +313,7 @@ Examples:
                     ArtifactContract(
                         models_dir=Path(models_dir),
                         transformer_required=transformer_required,
+                        allow_legacy_artifacts=args.allow_legacy_artifacts,
                     )
                 )
             return 0
@@ -738,6 +746,7 @@ Examples:
             ArtifactContract(
                 models_dir=Path(models_dir),
                 transformer_required=bool(pipeline.model_config.get("transformer", {}).get("enabled", False)),
+                allow_legacy_artifacts=args.allow_legacy_artifacts,
             )
         )
 

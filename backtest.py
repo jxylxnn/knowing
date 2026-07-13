@@ -97,6 +97,10 @@ Examples:
         "--verbose", "-v", action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--allow-legacy-artifacts", action="store_true",
+        help="Use quarantined legacy artifacts; output cannot feed replay promotion.",
+    )
 
     return parser.parse_args()
 
@@ -130,6 +134,7 @@ def main() -> None:
         data_dir=args.data_dir,
         models_dir=args.models_dir,
         model_size=args.model_size,
+        allow_legacy_artifacts=args.allow_legacy_artifacts,
     )
 
     runner = BacktestRunner(

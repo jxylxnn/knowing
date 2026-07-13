@@ -5,7 +5,13 @@ from pathlib import Path
 import pickle
 import time
 
-from src.contracts.errors import ArtifactContractError
+from src.contracts.errors import ArtifactContractError, FeatureSchemaContractError
+from src.contracts.features import (
+    FEATURE_SCHEMA_VERSION,
+    load_expected_feature_cols,
+    load_feature_schema,
+    validate_feature_names,
+)
 
 CANONICAL_TARGETS = ("PTS", "REB", "AST", "STL", "BLK", "TOV")
 
@@ -16,6 +22,7 @@ class ArtifactContract:
     transformer_required: bool = False
     max_age_hours: float | None = None
     residual_required: bool = False
+    allow_legacy_artifacts: bool = False
 
 
 def _required_files(transformer_required: bool, residual_required: bool = False) -> list[str]:
@@ -61,6 +68,11 @@ def validate_runtime_artifacts(contract: ArtifactContract) -> None:
     if missing:
         raise ArtifactContractError("Missing required runtime artifacts:\n" + "\n".join(f"- {name}" for name in missing))
 
+    _validate_feature_schema(
+        models_dir,
+        allow_legacy_artifacts=contract.allow_legacy_artifacts,
+    )
+
     if contract.max_age_hours is not None:
         newest_allowed_age = contract.max_age_hours * 3600
         now = time.time()
@@ -89,6 +101,39 @@ def validate_runtime_artifacts(contract: ArtifactContract) -> None:
             raise ArtifactContractError(
                 f"Model bundle manifest validation failed: {bundle_manifest}"
             ) from exc
+
+
+def _validate_feature_schema(models_dir: Path, *, allow_legacy_artifacts: bool) -> None:
+    """Validate both persisted schema files and their semantic safety."""
+
+    try:
+        feature_cols = load_expected_feature_cols(models_dir)
+        schema_cols, schema_version = load_feature_schema(models_dir / "feature_schema.pkl")
+    except FeatureSchemaContractError as exc:
+        if allow_legacy_artifacts:
+            return
+        raise ArtifactContractError(str(exc)) from exc
+
+    if feature_cols != schema_cols and not allow_legacy_artifacts:
+        raise ArtifactContractError(
+            "feature_schema.pkl and feature_cols.pkl do not describe the same "
+            "ordered feature list"
+        )
+
+    if allow_legacy_artifacts:
+        return
+
+    try:
+        validate_feature_names(feature_cols, context="runtime feature schema")
+    except FeatureSchemaContractError as exc:
+        raise ArtifactContractError(str(exc)) from exc
+
+    if schema_version != FEATURE_SCHEMA_VERSION:
+        raise ArtifactContractError(
+            "Unsupported feature schema version: "
+            f"{schema_version!r}; expected {FEATURE_SCHEMA_VERSION!r}. "
+            "Use --allow-legacy-artifacts only for explicitly quarantined migration runs."
+        )
 
 
 def _validate_metadata(path: Path) -> None:

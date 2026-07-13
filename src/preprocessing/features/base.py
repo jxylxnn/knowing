@@ -46,7 +46,7 @@ class FeatureContext:
     enabled_groups: Optional[Set[str]] = None
     disabled_groups: Optional[Set[str]] = None
     ablation_mode: bool = False
-    schema_version: str = 'feature_schema_v3'
+    schema_version: str = 'feature_schema_v4'
 
 
 @dataclass

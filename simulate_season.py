@@ -103,6 +103,8 @@ def main() -> None:
     parser.add_argument('--output-dir', type=str, default=None, help='Output directory for projections (default: <data-dir>/sim_results)')
     parser.add_argument('--strict', action='store_true',
                        help='Fail fast if optional context (injuries, lineups, betting) is missing or degraded')
+    parser.add_argument('--allow-legacy-artifacts', action='store_true',
+                       help='Use quarantined legacy artifacts with an explicit unsafe-mode warning')
     
     args = parser.parse_args()
 
@@ -122,7 +124,13 @@ def main() -> None:
     try:
         output_dir = args.output_dir if args.output_dir else os.path.join(args.data_dir, 'sim_results')
         
-        manager = ModelManager(data_dir=args.data_dir, models_dir=args.models_dir)
+        if args.allow_legacy_artifacts:
+            print('UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled', flush=True)
+        manager = ModelManager(
+            data_dir=args.data_dir,
+            models_dir=args.models_dir,
+            allow_legacy_artifacts=args.allow_legacy_artifacts,
+        )
         manager.load_models()
             
         game_sim = GameSimulator(manager, strict_mode=args.strict)

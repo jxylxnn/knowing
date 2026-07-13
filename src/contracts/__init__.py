@@ -11,6 +11,15 @@ from .forecast import (
     ForecastRequest,
     validate_forecast_frame,
 )
+from .features import (
+    CURRENT_GAME_TEAM_OUTCOMES,
+    FEATURE_SCHEMA_VERSION,
+    FORBIDDEN_EXACT_COLUMNS,
+    RAW_CURRENT_GAME_COLUMNS,
+    TARGET_COLUMNS,
+    is_forbidden_feature,
+    validate_feature_names,
+)
 
 __all__ = [
     "ArtifactContractError",
@@ -22,4 +31,11 @@ __all__ = [
     "FORECAST_HORIZONS",
     "ForecastRequest",
     "validate_forecast_frame",
+    "CURRENT_GAME_TEAM_OUTCOMES",
+    "FEATURE_SCHEMA_VERSION",
+    "FORBIDDEN_EXACT_COLUMNS",
+    "RAW_CURRENT_GAME_COLUMNS",
+    "TARGET_COLUMNS",
+    "is_forbidden_feature",
+    "validate_feature_names",
 ]

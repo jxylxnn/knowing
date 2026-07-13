@@ -16,6 +16,13 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from src.contracts.features import (
+    CURRENT_GAME_TEAM_OUTCOMES as CONTRACT_CURRENT_GAME_TEAM_OUTCOMES,
+    FEATURE_SCHEMA_VERSION,
+    is_forbidden_feature,
+    validate_feature_names,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -35,10 +42,11 @@ class FeatureSchema:
     categorical_cols: List[str] = field(default_factory=list)
     group_columns: Dict[str, List[str]] = field(default_factory=dict)
     dtype_map: Dict[str, str] = field(default_factory=dict)
-    version: str = 'feature_schema_v3'
+    version: str = FEATURE_SCHEMA_VERSION
     schema_hash: str = ''
 
     def __post_init__(self) -> None:
+        validate_feature_names(self.feature_cols, context="FeatureSchema")
         if not self.schema_hash:
             payload = json.dumps(
                 {
@@ -294,13 +302,7 @@ class FeatureSelector:
     # DataLoader historically appends same-game team totals with the
     # ``*_TEAM`` suffix. They are outcomes, not pregame context, and must
     # never be admitted by a broad prefix/keyword rule.
-    CURRENT_GAME_TEAM_OUTCOMES = frozenset(
-        f"{stat}_TEAM"
-        for stat in (
-            'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
-            'FGM', 'FTM', 'FG3A', 'FG3M', 'MIN', 'STL', 'BLK',
-        )
-    )
+    CURRENT_GAME_TEAM_OUTCOMES = CONTRACT_CURRENT_GAME_TEAM_OUTCOMES
     RAW_BOX_SCORE = {
         'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'MIN', 'FGA', 'FGM', 'FTA',
         'FTM', 'FG3A', 'FG3M', 'OREB', 'DREB',
@@ -347,7 +349,7 @@ class FeatureSelector:
     def _is_safe_feature(self, col: str) -> bool:
         if (
             col in self.EXCLUDE_ALWAYS
-            or col in self.CURRENT_GAME_TEAM_OUTCOMES
+            or is_forbidden_feature(col)
             or col in self.targets
             or col in self.RAW_BOX_SCORE
         ):
@@ -395,15 +397,14 @@ class FeatureSelector:
             later :meth:`align_frame` calls.
         """
         if allowed_features is not None:
-            # When a target-specific allow-list is supplied, trust it
-            # but still drop anything not numeric / leakage-safe.
+            if target not in self.targets:
+                raise ValueError(f"Unknown target for feature selection: {target}")
+            # A manifest is an input, not a trust boundary. Apply the exact
+            # same semantic safety predicate used by the master selector.
             safe_features = [
                 c for c in allowed_features
                 if c in df.columns
-                and c not in self.EXCLUDE_ALWAYS
-                and c not in self.CURRENT_GAME_TEAM_OUTCOMES
-                and c != target
-                and c not in self.targets
+                and self._is_safe_feature(c)
                 and self._is_numeric(df[c])
             ]
             cat_cols = [
@@ -438,6 +439,7 @@ class FeatureSelector:
         ]
 
         safe_features = [c for c in candidate_cols if self._is_safe_feature(c)]
+        validate_feature_names(safe_features, context="selected feature schema")
 
         # Visibility for the historical silent-drop trap: surface any numeric
         # engineered column that was discarded because it matched no safe
