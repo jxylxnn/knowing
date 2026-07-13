@@ -241,6 +241,27 @@ class FeatureEngineerGPU:
             ('defense_position', DefensePositionFeatureGroup()),
         ]
 
+        # Append any extension feature groups discovered via the registry.
+        # Extensions default to ``gpu_compatible = False`` and therefore always
+        # run on the CPU pandas path here, which is the safe default for
+        # arbitrary new feature logic. An extension that opts into the GPU
+        # path sets ``gpu_compatible = True`` and is skipped here (it would be
+        # expected to provide its own GPU implementation, but at minimum it
+        # must not break the CPU fallback).
+        try:
+            from src.preprocessing.features.registry import get_registry
+
+            builtin_names = {name for name, _ in groups}
+            registry = get_registry()
+            for group in registry.build_groups(include_extensions=True):
+                if group.name in builtin_names:
+                    continue
+                if getattr(group, "gpu_compatible", False):
+                    continue
+                groups.append((group.name, group))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Could not load extension groups for GPU/CPU path: %s", exc)
+
         for name, group in groups:
             if self.enable_groups is not None and name not in self.enable_groups:
                 continue

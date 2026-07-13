@@ -503,6 +503,67 @@ class ReportGenerator:
         logger.info(f"Player projections exported to {filepath}")
         return filepath
 
+    def export_reasoning_sidecar(self, reports, projection_filename: str) -> str:
+        """Write optional structured reasoning beside a projection CSV.
+
+        Simulation/report generation does not require reasoning reports, so
+        callers can opt in after obtaining them from ``ModelManager``.  The
+        CSV contract remains unchanged.
+        """
+        from src.reasoning.sidecar import sidecar_path, write_reasoning_sidecar
+
+        target = sidecar_path(os.path.join(self.output_dir, projection_filename))
+        return str(write_reasoning_sidecar(reports, target))
+
+    def record_prediction_ledger(
+        self,
+        results: List[Dict[str, Any]],
+        *,
+        ledger_path: str = "data/evaluation/prediction_history.parquet",
+        model_version: str = "unknown",
+    ) -> str:
+        """Record pregame player projections for later outcome reconciliation."""
+        from src.evaluation.prediction_ledger import PredictionLedger
+
+        rows = []
+        generated_at = datetime.now().isoformat()
+        for result in results or []:
+            if "error" in result:
+                continue
+            game_id = result.get("game_id", "UNKNOWN")
+            game_date = result.get("date")
+            home = result.get("team_a", "")
+            away = result.get("team_b", "")
+            for player in result.get("player_averages", []):
+                player_id = player.get("player_id", player.get("PLAYER_ID", player.get("id")))
+                if player_id is None:
+                    # A stable name fallback keeps the ledger usable for old
+                    # simulation artifacts that lack numeric player IDs.
+                    player_id = str(player.get("name", ""))
+                team = player.get("team", "")
+                opponent = away if team == home else home
+                for stat in ("PTS", "REB", "AST", "STL", "BLK", "TOV"):
+                    value = player.get(stat.lower(), player.get(stat))
+                    if value is None:
+                        continue
+                    rows.append({
+                        "MODEL_VERSION": model_version,
+                        "GAME_ID": game_id,
+                        "PLAYER_ID": player_id,
+                        "PLAYER_NAME": player.get("name", ""),
+                        "GAME_DATE": game_date,
+                        "TEAM": team,
+                        "OPPONENT": opponent,
+                        "STAT": stat,
+                        "BASE_PREDICTION": float(value),
+                        "PREDICTION": float(value),
+                        "DATA_QUALITY": self._data_quality_from_result(result),
+                        "GENERATED_AT": generated_at,
+                    })
+        ledger = PredictionLedger(ledger_path)
+        ledger.append(rows)
+        return str(ledger.path)
+
     def print_quick_summary(self, results: List[Dict[str, Any]], stat_type: str = 'mode'):
         """Prints a quick one-line summary for each game."""
         print(f"\n{'='*90}", flush=True)

@@ -127,6 +127,12 @@ Examples:
         action='store_true',
         help='Output results as JSON'
     )
+
+    parser.add_argument(
+        '--explain',
+        action='store_true',
+        help='Include evidence-based reasoning for the requested stat'
+    )
     
     parser.add_argument(
         '--sims',
@@ -219,12 +225,31 @@ Examples:
         result.matchup_avg = context.get('matchup_avg')
         result.opponent_defense = context.get('opponent_defense')
         result.trend = context.get('trend')
+
+        reasoning = None
+        if args.explain:
+            reasoning = cli.get_projection_reasoning(
+                projection.player_name,
+                stat=args.stat,
+                opponent=projection.opponent,
+            )
         
         if args.json:
             import json
-            print(json.dumps(result.to_dict(), indent=2))
+            payload = result.to_dict()
+            if reasoning is not None:
+                payload['reasoning'] = (
+                    reasoning.to_dict() if hasattr(reasoning, 'to_dict') else reasoning
+                )
+            print(json.dumps(payload, indent=2))
         else:
             print(calculator.format_detailed_result(result))
+            if reasoning is not None:
+                if isinstance(reasoning, dict):
+                    print(cli._format_cached_reasoning(reasoning, args.stat))
+                else:
+                    from src.reasoning import ReasoningEngine
+                    print(ReasoningEngine.format_concise(reasoning, args.stat))
         
         return
     

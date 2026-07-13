@@ -78,6 +78,17 @@ def validate_runtime_artifacts(contract: ArtifactContract) -> None:
             )
 
     _validate_metadata(models_dir / "model_stack_metadata.pkl")
+    bundle_manifest = models_dir / "bundle_manifest.json"
+    if bundle_manifest.exists():
+        try:
+            from src.models.versioning import ModelBundleManifest
+
+            manifest = ModelBundleManifest.load(bundle_manifest)
+            manifest.validate(models_dir)
+        except Exception as exc:
+            raise ArtifactContractError(
+                f"Model bundle manifest validation failed: {bundle_manifest}"
+            ) from exc
 
 
 def _validate_metadata(path: Path) -> None:

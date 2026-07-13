@@ -1,8 +1,4 @@
-"""Active model manager for the CatBoost + Transformer prediction stack.
-
-This class is kept as the bridge for the simulator and query CLI, but the old
-joint/LSTM/GNN/stacked-ensemble paths have been removed.
-"""
+"""Active model manager for the CatBoost + Transformer prediction stack."""
 
 from __future__ import annotations
 
@@ -17,6 +13,7 @@ import pandas as pd
 
 from src.config.model_config import get_model_config, normalize_model_size
 from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
+from src.contracts.errors import ArtifactContractError
 from src.contracts.features import align_feature_frame, load_expected_feature_cols
 from src.correction.confidence_scorer import ConfidenceScorer
 from src.correction.correction_applier import CorrectionApplier
@@ -31,8 +28,10 @@ from src.models.base import (
     load_transformer_from_disk,
     validate_blend_contract,
 )
+from src.models.versioning import ModelVersionRegistry
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
+from src.reasoning import PredictionTrace, PlayerReasoningReport, ReasoningEngine
 from src.training.catboost_trainer import CatBoostTrainer
 from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
@@ -68,7 +67,9 @@ class ModelManager:
             raise ValueError(f"Invalid models_dir: {models_dir}")
 
         self.data_dir = data_dir
-        self.models_dir = models_dir
+        self.models_root = str(Path(models_dir))
+        self.version_registry = ModelVersionRegistry(self.models_root)
+        self.models_dir = str(self.version_registry.active_dir())
         Path(self.models_dir).mkdir(parents=True, exist_ok=True)
 
         self.core_targets = list(self.CORE_TARGETS)
@@ -95,6 +96,9 @@ class ModelManager:
         self.residual_corrections_enabled: bool = False
         self.calibration_interval_store: Optional[CalibrationIntervalStore] = None
         self.confidence_scorer = ConfidenceScorer()
+        self.reasoning_engine = ReasoningEngine()
+        self.model_version = "legacy"
+        self.training_cutoff: Optional[str] = None
 
         if model_config is not None:
             self.model_config = model_config
@@ -204,7 +208,18 @@ class ModelManager:
 
     def _load_models(self) -> Dict[str, int]:
         """Load CatBoost and Transformer models from disk."""
-        self.validate_runtime_artifacts()
+        bundle_validation_error = None
+        try:
+            self.validate_runtime_artifacts()
+        except ArtifactContractError as exc:
+            # Load the persisted blend file before surfacing a bundle hash
+            # failure.  This preserves the older, more actionable dependency
+            # error when a caller edits legacy blend weights to require a
+            # missing Transformer artifact.
+            if "bundle manifest validation failed" not in str(exc):
+                raise
+            bundle_validation_error = exc
+        self._load_model_version()
         self._load_feature_cols()
         self.models = {}
         self.catboost_mae_models = {}
@@ -271,6 +286,8 @@ class ModelManager:
             logger.debug("WeightStore bootstrap skipped: %s", exc)
 
         self._validate_blend_contract()
+        if bundle_validation_error is not None:
+            raise bundle_validation_error
 
         logger.info(
             "Loaded %s CatBoost models, %s MAE companions, %s quantile sets",
@@ -288,6 +305,37 @@ class ModelManager:
         self._load_interval_calibration()
 
         return counts
+
+    def _load_model_version(self) -> str:
+        """Load a human-readable model version without requiring a manifest."""
+        manifest = Path(self.models_root) / "champion.json"
+        try:
+            if manifest.exists():
+                import json
+
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                version = payload.get("version") or payload.get("model_version")
+                self.training_cutoff = payload.get("data_cutoff")
+                if version:
+                    self.model_version = str(version)
+        except Exception as exc:  # pragma: no cover - defensive runtime path
+            logger.warning("Could not read model champion manifest: %s", exc)
+
+        metadata_path = Path(self.models_dir) / "model_stack_metadata.pkl"
+        try:
+            if metadata_path.exists():
+                metadata = joblib.load(metadata_path)
+                if isinstance(metadata, dict):
+                    version = metadata.get("model_version") or metadata.get("version")
+                    self.training_cutoff = (
+                        metadata.get("training_data_cutoff")
+                        or self.training_cutoff
+                    )
+                    if version:
+                        self.model_version = str(version)
+        except Exception as exc:  # pragma: no cover - optional legacy metadata
+            logger.debug("Could not read model version metadata: %s", exc)
+        return self.model_version
 
     def _load_residual_corrections(self) -> None:
         """Attempt to load residual correction models.
@@ -371,7 +419,10 @@ class ModelManager:
         Returns:
             True if weights were successfully reloaded, False otherwise.
         """
-        store = WeightStore(store_dir)
+        resolved_store_dir = store_dir
+        if store_dir == "models/blend_weights":
+            resolved_store_dir = str(Path(self.models_dir) / "blend_weights")
+        store = WeightStore(resolved_store_dir)
         weights = store.load_current()
         if weights is None:
             logger.warning("No current weights found in %s", store_dir)
@@ -464,13 +515,57 @@ class ModelManager:
             return None
         return float(preds[target_idx])
 
+    @staticmethod
+    def _opportunity_prediction(target: str, context_row: pd.DataFrame) -> Optional[float]:
+        """Estimate a stat from safe minutes/rate features when available.
+
+        This is an independent sanity-check expert.  It is not used to alter
+        the legacy blend until its walk-forward reliability is measured.
+        """
+        if context_row is None or context_row.empty:
+            return None
+        row = context_row.iloc[0]
+
+        def number(names: List[str]) -> Optional[float]:
+            for name in names:
+                if name in row.index:
+                    try:
+                        value = float(row[name])
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(value):
+                        return value
+            return None
+
+        minutes = number(["MINUTES_PRED", "PREDICTED_MINUTES", "MIN_PRED", "ROLL_MIN_5", "MIN_ROLLING_5"])
+        if minutes is None or minutes <= 0:
+            return None
+        stat = target.upper()
+        rate = number([f"{stat}_PER_MIN", f"ROLL_{stat}_PER_MIN", f"EWMA_{stat}_PER_MIN"])
+        if rate is None:
+            stat_roll = number([f"ROLL_{stat}_5", f"ROLL_{stat}_10", f"{stat}_ROLLING_AVG"])
+            min_roll = number(["ROLL_MIN_5", "ROLL_MIN_10", "MIN_ROLLING_5"])
+            if stat_roll is not None and min_roll is not None and min_roll > 0:
+                rate = stat_roll / min_roll
+        if rate is None:
+            return None
+        pace = number(["PACE_FACTOR", "PACE_MULTIPLIER"])
+        multiplier = pace if pace is not None and 0.5 < pace < 1.5 else 1.0
+        return float(max(0.0, rate * minutes * multiplier))
+
     def predict_player_stats(
         self,
         player_context_df: pd.DataFrame,
         history_df: pd.DataFrame = None,
         include_confidence: bool = False,
+        _return_trace: bool = False,
     ) -> Dict[str, Any]:
-        """Predict a single player's stat line using the active model stack."""
+        """Predict a single player's stat line using the active model stack.
+
+        ``_return_trace`` is an internal compatibility hook used by
+        :meth:`explain_player_stats`; the default return shape remains the
+        historical flat prediction dictionary.
+        """
         if player_context_df is None or player_context_df.empty:
             return self._fallback_prediction(pd.DataFrame())
 
@@ -501,12 +596,20 @@ class ModelManager:
 
         predictions: Dict[str, Any] = {}
         base_predictions: Dict[str, float] = {}
+        trace_inputs: Dict[str, Dict[str, Any]] = {}
 
         for target in self.targets:
             if target not in self.models:
                 value = self._get_fallback_value(player_context_df, target)
                 predictions[target] = value
                 base_predictions[target] = value
+                trace_inputs[target] = {
+                    "catboost_prediction": value,
+                    "pre_correction_prediction": value,
+                    "catboost_weight": 1.0,
+                    "transformer_weight": 0.0,
+                    "intercept": 0.0,
+                }
                 continue
 
             try:
@@ -517,6 +620,7 @@ class ModelManager:
 
             base_predictions[target] = base
             final_pred = base
+            cb_weight, tx_weight, intercept = 1.0, 0.0, 0.0
 
             transformer_pred = self._predict_transformer_target(target, history_df)
             if transformer_pred is not None:
@@ -537,12 +641,23 @@ class ModelManager:
                 final_pred = (base * cb_weight) + (transformer_pred * tx_weight) + intercept
 
             predictions[target] = float(max(0.0, final_pred))
+            trace_inputs[target] = {
+                "catboost_prediction": base,
+                "transformer_prediction": transformer_pred,
+                "opportunity_prediction": self._opportunity_prediction(target, player_context_df),
+                "catboost_weight": cb_weight,
+                "transformer_weight": tx_weight,
+                "intercept": intercept,
+                "pre_correction_prediction": predictions[target],
+            }
 
             q_preds = self._predict_catboost_quantiles(target, context)
             if q_preds and "low" in q_preds and "high" in q_preds:
                 low = float(q_preds["low"][0])
                 high = float(q_preds["high"][0])
                 predictions[f"{target}_STD"] = max(0.0, (high - low) / 2.56)
+                trace_inputs[target]["interval_low"] = low
+                trace_inputs[target]["interval_high"] = high
 
         if self.residual_corrections_enabled and self.correction_applier is not None:
             predictions, correction_meta = self._apply_residual_corrections(
@@ -558,7 +673,132 @@ class ModelManager:
                 correction_meta=correction_meta,
             )
 
+        if _return_trace:
+            traces: Dict[str, PredictionTrace] = {}
+            data_quality = "UNKNOWN"
+            if "DATA_QUALITY" in player_context_df.columns:
+                data_quality = str(player_context_df.iloc[0].get("DATA_QUALITY", "UNKNOWN"))
+            data_as_of = None
+            if "GAME_DATE" in player_context_df.columns:
+                value = player_context_df.iloc[0].get("GAME_DATE")
+                if pd.notna(value):
+                    data_as_of = str(value)
+
+            for target in self.targets:
+                details = trace_inputs.get(target, {})
+                correction = correction_meta.get(target, {})
+                final_prediction = float(predictions.get(target, details.get("pre_correction_prediction", 0.0)))
+                feature_contributions = self._local_feature_contributions(
+                    target, context
+                )
+                traces[target] = PredictionTrace(
+                    stat=target,
+                    catboost_prediction=float(details.get("catboost_prediction", final_prediction)),
+                    transformer_prediction=details.get("transformer_prediction"),
+                    opportunity_prediction=details.get("opportunity_prediction"),
+                    catboost_weight=float(details.get("catboost_weight", 1.0)),
+                    transformer_weight=float(details.get("transformer_weight", 0.0)),
+                    opportunity_weight=0.0,
+                    intercept=float(details.get("intercept", 0.0)),
+                    pre_correction_prediction=float(details.get("pre_correction_prediction", final_prediction)),
+                    residual_correction=float(correction.get("residual_correction", 0.0)),
+                    final_prediction=final_prediction,
+                    interval_low=predictions.get(
+                        f"{target}_INTERVAL_90_LOW", details.get("interval_low")
+                    ),
+                    interval_high=predictions.get(
+                        f"{target}_INTERVAL_90_HIGH", details.get("interval_high")
+                    ),
+                    confidence=predictions.get(f"{target}_CONFIDENCE"),
+                    confidence_score=predictions.get(f"{target}_CONFIDENCE_SCORE"),
+                    feature_contributions=feature_contributions,
+                    model_version=self.model_version,
+                    data_as_of=data_as_of,
+                    data_quality=data_quality,
+                )
+            return predictions, traces, player_context_df
+
         return predictions
+
+    def _local_feature_contributions(
+        self, target: str, context: pd.DataFrame
+    ) -> Dict[str, float]:
+        """Return local CatBoost SHAP contributions when supported.
+
+        SHAP is optional at runtime.  An unavailable attribution backend
+        yields an empty mapping rather than changing prediction behaviour.
+        """
+        model = self.models.get(target)
+        if model is None or context is None or context.empty:
+            return {}
+        try:
+            shap_values = model.get_feature_importance(data=context, type="ShapValues")
+            values = np.asarray(shap_values, dtype=float)
+            if values.ndim == 2:
+                values = values[0]
+            names = list(context.columns)
+            if len(values) == len(names) + 1:
+                values = values[:-1]  # final value is the SHAP base value
+            if len(values) != len(names):
+                return {}
+            return {
+                str(name): float(value)
+                for name, value in zip(names, values)
+                if np.isfinite(value) and abs(float(value)) > 1e-8
+            }
+        except Exception as exc:  # pragma: no cover - depends on CatBoost build
+            logger.debug("Local attribution unavailable for %s: %s", target, exc)
+            return {}
+
+    def explain_player_stats(
+        self,
+        player_context_df: pd.DataFrame,
+        history_df: pd.DataFrame = None,
+        *,
+        player_name: str = "",
+        player_id: Optional[Any] = None,
+        team: str = "",
+        opponent: str = "",
+    ) -> PlayerReasoningReport:
+        """Return a structured, auditable explanation for a player projection."""
+        result = self.predict_player_stats(
+            player_context_df,
+            history_df=history_df,
+            include_confidence=True,
+            _return_trace=True,
+        )
+        if not isinstance(result, tuple) or len(result) != 3:
+            # Empty/fallback contexts still receive a useful report.
+            fallback = result if isinstance(result, dict) else {}
+            traces = {
+                stat: PredictionTrace(
+                    stat=stat,
+                    catboost_prediction=float(fallback.get(stat, self._FALLBACK_VALUES[stat])),
+                    pre_correction_prediction=float(fallback.get(stat, self._FALLBACK_VALUES[stat])),
+                    final_prediction=float(fallback.get(stat, self._FALLBACK_VALUES[stat])),
+                    model_version=self.model_version,
+                )
+                for stat in self.targets
+            }
+            context = player_context_df
+        else:
+            _, traces, context = result
+        if not player_name and context is not None and not context.empty:
+            player_name = str(context.iloc[0].get("PLAYER_NAME", ""))
+        if player_id is None and context is not None and not context.empty:
+            player_id = context.iloc[0].get("PLAYER_ID")
+        if not team and context is not None and not context.empty:
+            team = str(context.iloc[0].get("TEAM_ABBREVIATION", context.iloc[0].get("TEAM", "")))
+        if not opponent and context is not None and not context.empty:
+            opponent = str(context.iloc[0].get("OPPONENT_ABBR", context.iloc[0].get("OPPONENT", "")))
+        return self.reasoning_engine.build_report(
+            traces,
+            context=context,
+            player_name=player_name,
+            player_id=player_id,
+            team=team,
+            opponent=opponent,
+        )
 
     def _apply_residual_corrections(
         self,

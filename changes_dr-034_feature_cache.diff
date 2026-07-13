@@ -1,0 +1,977 @@
+================================================================================
+DIFF: Feature-Engineering Cache Fix (DR-034) — 2026-06-19
+Generated: 2026-06-19
+Base: HEAD (adfcb6f)   Branch: codex-model-training-cleanup
+Summary: Activate the inert FeatureEngineer parquet cache and harden its cache
+         key against external-file staleness. Plus project-brain documentation
+         updates for the same change.
+================================================================================
+
+MANIFEST — what this diff contains
+--------------------------------------------------------------------------------
+A. CODE / TEST / CONFIG changes (100% this session — the cache fix):
+   [CACHE-FIX]  .gitignore                                  ( +1: /cache/ )
+   [CACHE-FIX]  AGENTS.md                                   ( +1: gotcha )
+   [CACHE-FIX]  src/preprocessing/feature_engineer.py       ( _cache_key + _external_deps_hash )
+   [CACHE-FIX]  src/preprocessing/features/base.py          ( FeatureGroup.external_files() )
+   [CACHE-FIX]  src/preprocessing/features/aging_curve.py   ( external_files() override )
+   [CACHE-FIX]  src/preprocessing/features/injury_risk.py   ( external_files() override )
+   [CACHE-FIX]  src/preprocessing/features/kan_aging.py     ( external_files() override )
+   [CACHE-FIX]  src/pipeline/data_pipeline.py               ( cache_dir="cache/training" )
+   [CACHE-FIX]  src/models/model_manager.py                 ( cache_dir="cache/training" )
+   [CACHE-FIX]  tests/test_preprocessing/test_feature_engineer.py ( +3 cache tests )
+   [CACHE-FIX]  cache/training/fe_365b2f828c990330_*.parquet ( DELETED from git index; stale old-key cache file untracked; kept on disk )
+
+B. PROJECT-BRAIN documentation (mixed — see note):
+   These 6 files were ALREADY modified in the working tree by a PRIOR session
+   (residual-correction monitoring, DR-033, dated 2026-06-18) before this cache
+   work began. This session ADDED the DR-034 cache-fix documentation to them.
+   So each file's git-diff-vs-HEAD below contains BOTH the prior residual-
+   monitoring edits AND this session's cache edits. Only the DR-034 / cache-
+   related hunks are from this session.
+   [MIXED]  project-brain/ARCHITECTURE.md
+   [MIXED]  project-brain/CODE_RULES.md
+   [MIXED]  project-brain/CURRENT_STATE.md
+   [MIXED]  project-brain/DECISIONS.md            ( top: +DR-034 [this session]; bottom: +DR-033 [prior] )
+   [MIXED]  project-brain/FILE_MAP.md
+   [MIXED]  project-brain/TASKS.md
+
+C. GITIGNORED mirror file (updated this session, NOT tracked by git):
+   [CACHE-FIX]  project-brain/FULL_PROJECT_DUMP.md   ( gitignored at .gitignore:34 'project-brain/'
+                                                       so it has NO git history and is absent from
+                                                       `git diff`. It mirrors the 6 standalone docs
+                                                       above; the same DR-034 cache edits were
+                                                       applied to its embedded copies. See the
+                                                       standalone-doc diffs in section B for the
+                                                       substantive content. )
+
+NOT in this diff (pre-existing, PRIOR session — NOT touched by the cache fix):
+   config/default.yaml, monitor_residual_corrections.py, src/evaluation/residual_monitor.py,
+   src/evaluation/residual_report.py, src/training/pipeline.py, src/training/presets.py,
+   train.py, tests/test_evaluation/test_residual_monitor.py,
+   tests/test_training/test_training_presets.py, project-brain/PROJECT_CONTEXT.md
+   (plus untracked: src/query/confidence_adjustment.py, tests/fixtures/, worker-diff.patch, etc.)
+
+================================================================================
+SECTION 1 — git diff --stat (cache-fix + project-brain files, vs HEAD)
+================================================================================ .gitignore                                        |   1 +
+ AGENTS.md                                         |   1 +
+ project-brain/ARCHITECTURE.md                     |  62 ++++++++++---
+ project-brain/CODE_RULES.md                       |  24 ++++-
+ project-brain/CURRENT_STATE.md                    |  15 +++-
+ project-brain/DECISIONS.md                        |  95 +++++++++++++++++++-
+ project-brain/FILE_MAP.md                         |  42 ++++++++-
+ project-brain/TASKS.md                            |  57 ++++++++----
+ src/models/model_manager.py                       |   2 +-
+ src/pipeline/data_pipeline.py                     |   2 +-
+ src/preprocessing/feature_engineer.py             |  34 ++++++-
+ src/preprocessing/features/aging_curve.py         |   6 ++
+ src/preprocessing/features/base.py                |  10 +++
+ src/preprocessing/features/injury_risk.py         |   3 +
+ src/preprocessing/features/kan_aging.py           |   3 +
+ tests/test_preprocessing/test_feature_engineer.py | 103 ++++++++++++++++++++++
+ 16 files changed, 418 insertions(+), 42 deletions(-)
+
+================================================================================
+SECTION 2 — FULL git diff (cache-fix + project-brain files, vs HEAD)
+NOTE: project-brain/* hunks are MIXED (DR-034 cache edits [this session] + prior
+      DR-033 residual-monitoring edits). Cache-fix-only files have ZERO residual-
+      monitoring content (verified: 0 mentions of residual_monitor/ResidualMonitor).
+================================================================================
+
+diff --git a/.gitignore b/.gitignore
+index 1d3f542..8238794 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,6 +12,7 @@ __pycache__/
+ catboost_info/
+ *.pyc
+ *.pyo
++/cache/
+ 
+ # Logs
+ logs/
+diff --git a/AGENTS.md b/AGENTS.md
+index 1b40369..cc8c9b7 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -95,6 +95,7 @@ tests/             — mirrors src/ structure; conftest.py injects project root
+ ## Gotchas
+ 
+ - **Disabled models**: LSTM and GNN are `enabled: false` in `config/default.yaml`. CatBoost + Transformer is the active stack.
++- **Feature engineering is cached**: `FeatureEngineer.create_features()` caches results to `cache/training/*.parquet`, keyed on the input DataFrame hash + FE config (rolling windows, enabled/disabled groups) + mtime/size of external files some groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). The cache is active by default in `DataPipeline` and `ModelManager` (training + live/simulation paths). Feature groups declare their external deps via `FeatureGroup.external_files()` so cached features are never stale when those files grow/update. To force recompute: `python clear_cache.py --all --yes` (or delete `cache/training/`).
+ - **CatBoost parallelism**: On GPU use `max_workers=1` (CUDA context contention); on CPU size workers to machine cores.
+ - **Gitignored at root only**: `.gitignore` uses `/data/` and `/models/` (with leading slash), so only root-level `data/` and `models/` are ignored — `src/data/` and `src/models/` are tracked.
+ - **PyTorch test shim**: `src/__init__.py` installs a NumPy-backed torch shim when running under pytest on machines without a working PyTorch. Tests import `src` and get the shim automatically; real runtime still requires real torch.
+diff --git a/project-brain/ARCHITECTURE.md b/project-brain/ARCHITECTURE.md
+index d0e0d68..2bdd99c 100644
+--- a/project-brain/ARCHITECTURE.md
++++ b/project-brain/ARCHITECTURE.md
+@@ -4,7 +4,7 @@
+ 
+ - Architecture style: local batch/CLI pipeline with file-based persistence.
+ - No server process, no request router, no auth layer, no database.
+-- The repo is organized around six operational phases:
++- The repo is organized around seven operational phases:
+   1. data ingestion
+   2. feature engineering, smart feature selection, and training
+   3. simulation and projection export
+@@ -12,6 +12,7 @@
+   5. backtesting and ensemble weight optimization
+   6. variance optimization and copula simulation
+   7. residual correction and residual interval calibration
++  8. residual correction monitoring (Ticket 6)
+ 
+ ## Top-Level Execution Flow
+ 
+@@ -36,9 +37,9 @@ Important named functions in `update_data.py`:
+ 
+ 1. `train.py` loads `config/default.yaml`, resolves a named preset from `training_presets`, and selects the matching feature-group/Transformer configuration.
+ 2. `src/preprocessing/data_loader.py` reads the raw CSVs and joins player/team context.
+-3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming.
++3. `train.py` applies the preset's feature-engineering rules through `src/preprocessing/feature_engineer.py`, including the `small` preset's reduced group set and optional `SEASON_ID`-based recent-history trimming. The `laptop_quality` preset sits between `small` and `full`: CatBoost-first (Transformer off), a 13-group feature set, `recent_seasons=3`, and smart feature selection on by default. **Feature engineering is cached (DR-034)**: `DataPipeline` constructs its `FeatureEngineer` with `cache_dir="cache/training"`, so `create_features()` serves repeated identical calls from `cache/training/*.parquet` instead of recomputing the full 25-group pipeline. The cache key hashes the input DataFrame + FE config + mtime/size of external files the feature groups read (declared via `FeatureGroup.external_files()`), so it invalidates when those inputs change.
+    - When `--feature-ablation` is enabled, the Step 2 benchmark probe also goes through `build_feature_engineer(...)` so the ablation search stays compatible with older constructors that may reject `disable_groups`.
+-4. **Smart feature selection (optional, Step 2.5)** — when `--feature-selection smart` (or `feature_selection.enabled: true` in YAML) is set, `train.py` runs `SmartFeatureSelector` after the full feature set is built and before `TrainingPipeline` starts. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` containing per-target feature lists. The manifest is then loaded by `TrainingPipeline.apply_feature_selection_manifest()` and consumed by `_feature_cols_for_target()` so each per-target CatBoost model trains on its own subset. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list.
++4. **Smart feature selection (optional, Step 2.5)** — when `--feature-selection smart` is set, the resolved preset turns it on (e.g. `laptop_quality`), or `feature_selection.enabled: true` is set in YAML, `train.py` runs `SmartFeatureSelector` after the full feature set is built and before `TrainingPipeline` starts. The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json` containing per-target feature lists. The manifest is then loaded by `TrainingPipeline.apply_feature_selection_manifest()` and consumed by `_feature_cols_for_target()` so each per-target CatBoost model trains on its own subset. Failure is non-fatal — the pipeline falls back to the canonical `self.feature_cols` list. In `--diagnose` mode the expensive selection work is skipped (emits a `SKIP` marker) so preflight stays fast while confirming the stage is wired.
+ 5. `src/training/pipeline.py` creates chronological train/validation/test splits.
+ 5. The training pipeline fits:
+    - CatBoost regressors per target — each target's training frame is sliced to its per-target feature list when smart selection is active
+@@ -64,7 +65,8 @@ Important named methods in this path:
+ 
+ - `DataLoader.load_data`
+ - `DataLoader.merge_datasets`
+-- `FeatureEngineer.create_features`
++- `FeatureEngineer.create_features` — now parquet-cached when `cache_dir` is set (active in `DataPipeline` and `ModelManager`); key includes external-file mtimes via `_external_deps_hash()`
++- `FeatureEngineer._cache_key` / `_external_deps_hash`
+ - `FeatureEngineer.create_features_chunked`
+ - `TrainingPipeline.prepare_data`
+ - `TrainingPipeline.train`
+@@ -354,21 +356,22 @@ Key invariant:
+ - Training and inference rely on stable feature-column semantics. Adding or renaming columns without updating saved schema expectations is risky.
+ - `rolling.py` now materializes its wide rolling/efficiency/momentum outputs in temporary structures and appends them with a single concat per group to avoid pandas fragmentation.
+ - `archetype.py` computes hard labels plus soft similarities to a fixed playstyle template set, which means cold-start players can still be mapped to a nearby bucket without a separate clustering fit artifact.
++- Feature groups that read external on-disk files (`injury_risk`, `aging_curve`, `kan_aging`) declare them via `FeatureGroup.external_files()` so the feature-engineering parquet cache key invalidates when those files change (DR-034).
+ 
+ ### `src/training/`
+ 
+ - Owns model fitting, experiment logging, and training orchestration.
+ - `pipeline.py` is the active end-to-end training pipeline.
+ - `catboost_trainer.py` owns CatBoost training and per-target artifact persistence behavior.
+-- `presets.py` is the named preset boundary for the CLI: it defines the small/full stack shape, rolling-window defaults, optional recent-history trimming, and the feature-group allowlist used by `train.py`.
++- `presets.py` is the named preset boundary for the CLI: it defines the `small` / `laptop_quality` / `full` stack shapes, rolling-window defaults, optional recent-history trimming, and the feature-group allowlist used by `train.py`. `laptop_quality` is a laptop-friendly midpoint — CatBoost + smart feature selection, Transformer off, 13 feature groups, `recent_seasons=3` — and still trains the canonical six targets. The preset's `feature_selection`/`feature_selection_profile` fields let a preset turn on smart selection by default; `train.py` honors that when `--feature-selection` is not explicitly set.
+ - `experiment.py` writes experiment summaries under `experiments/`.
+-- `feature_cache.py` contains reusable cache infrastructure but is not clearly wired into the active top-level training flow.
++- `feature_cache.py` contains reusable `FeatureCache`/`DataSplitCache` (joblib) cache infrastructure, still unused by the active path — the active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()` (DR-034), not this module.
+ 
+ ### `src/models/`
+ 
+ - Owns runtime model definitions and model loading.
+ - `transformer_model.py` implements the Transformer wrapper, checkpoint compatibility handling, and the eager-safe inference path used by validation/runtime callers.
+-- `model_manager.py` loads saved artifacts and exposes runtime prediction methods to the simulator.
++- `model_manager.py` loads saved artifacts and exposes runtime prediction methods to the simulator. It constructs its `FeatureEngineer` with `cache_dir="cache/training"` (DR-034), so the simulation path's shared feature-engineering step (`game_simulator.py` → `create_features`) is also parquet-cached.
+ 
+ Critical coupling:
+ 
+@@ -406,9 +409,37 @@ Fragility notes:
+ - **Strict mode** (`--strict` CLI flag on `simulate_season.py`): halts execution when any optional InputHealth record reports `failed` or `fallback`. Passed through `GameSimulator(strict_mode=True)` and `SeasonSimulator(strict_mode=True)`.
+ - **Data quality column** (`DATA_QUALITY`): exported in `player_projections_*.csv` as `FULL`, `DEGRADED_FALLBACK`, or `DEGRADED_MISSING`. Surfaces a CLI warning in the query layer via `ProjectionLoader.find_player()`.
+ 
+-### `src/evaluation/` (NEW — 2026-05-09)
++### Flow 9: Residual Correction Monitoring (NEW — 2026-06-18)
++
++1. `monitor_residual_corrections.py` loads a prediction history parquet/CSV (default: `data/evaluation/prediction_history.parquet`, fallback: `data/evaluation/residual_training.parquet`).
++2. `src/evaluation/residual_monitor.py::ResidualMonitor.evaluate()` produces a structured per-target report comparing base vs corrected MAE for all six stats.
++3. The monitor computes:
++   - **Overall metrics**: base/corrected MAE, RMSE, bias, improvement %, correction hit/harm/neutral rate
++   - **Data-quality breakdown**: metrics sliced by DATA_QUALITY bucket (FULL, DEGRADED_FALLBACK, DEGRADED_MISSING)
++   - **Confidence breakdown**: metrics sliced by confidence label (HIGH, MEDIUM, LOW, NO_EDGE)
++   - **Rolling-window status**: status for last N days and season-to-date (helps detect recent degradation)
++   - **Status labels**: HELPING / NEUTRAL / HURTING / INSUFFICIENT_DATA per target
++   - **Recommendations**: KEEP_ENABLED / DISABLE_CORRECTION / NEUTRAL_REVIEW / INSUFFICIENT_DATA
++4. `src/evaluation/residual_report.py` writes the report to `reports/residual_monitoring/` as:
++   - `latest_summary.json` (stable filename for downstream tools)
++   - `residual_report_<timestamp>.json` (full JSON)
++   - `residual_report_<timestamp>.csv` (flattened per-target rows, optional)
++5. The CLI accepts `--input`, `--output-dir`, `--targets`, `--windows`, `--min-rows`, `--helping-threshold`, `--hurting-threshold`, `--print-summary`, `--csv`/`--no-csv`.
++6. Config-driven defaults come from `config/default.yaml` → `residual_monitoring:` block.
+ 
+-- Owns backtesting, ensemble weight optimization, drift detection, and weight versioning.
++Important named classes/functions:
++
++- `ResidualMonitor.evaluate()` — run the full monitoring pipeline
++- `ResidualMonitor.load_input()` — load parquet or CSV
++- `MonitoringThresholds.status_for_pct()` — classify MAE improvement as HELPING/NEUTRAL/HURTING
++- `MonitoringThresholds.recommendation_for_status()` — map status to actionable recommendation
++- `MonitoringReport.to_dict()` — JSON-serializable report payload
++- `write_report()` — write full artifact set (JSON + optional CSV)
++- `render_console_summary()` — human-readable stdout output
++
++### `src/evaluation/` (NEW — 2026-05-09, extended 2026-06-18)
++
++- Owns backtesting, ensemble weight optimization, drift detection, weight versioning, and residual correction monitoring.
+ - Important modules:
+   - `metrics.py` — `BacktestResult`, `TargetMetrics`, `compute_target_metrics` dataclasses (MAE, RMSE, R², MAPE, calibration, interval coverage), plus `calculate_empirical_crps()` for probabilistic forecast evaluation (O(n log n) Gini mean difference approximation) and `backtest_result_to_json_dict()` for machine-readable JSON serialization (used by `backtest.py --json-output`)
+   - `backtest_runner.py` — `BacktestRunner`: runs model predictions against historical completed games, compares against actual box scores
+@@ -418,6 +449,8 @@ Fragility notes:
+   - **`feature_group_ablation.py` (NEW — 2026-06-04)** — `FeatureGroupAblator`: trains baseline + leave-one-out `HistGradientBoostingRegressor` per feature group, computes per-target MAE deltas. Backbone of the `backtest_gain` signal in smart feature selection.
+   - **`shadow_feature_filter.py` (NEW — 2026-06-04)** — `ShadowFeatureFilter`: injects random control columns (`SHADOW_RANDOM_NORMAL`, `SHADOW_RANDOM_UNIFORM`, `SHADOW_PERMUTED_TARGET`) and uses their median importance as a noise floor for pruning real features.
+   - **`smart_feature_selector.py` (NEW — 2026-06-04)** — `SmartFeatureSelector` + `ProfileConfig` + `SelectorConfig` + `SelectionManifest` + `TargetSelection`: combines 5 signals (backtest_gain, stability, catboost_importance, permutation_importance, missingness_penalty) into a per-target final score and writes a manifest to `models/feature_selection_manifest.json`. Profiles (`fast` / `balanced` / `max_accuracy`) gate which stages run.
++  - **`residual_monitor.py` (NEW — 2026-06-18)** — `ResidualMonitor`: structured per-target comparison of base vs corrected prediction error with data-quality/confidence breakdowns, rolling-window status, and actionable recommendations (HELPING / NEUTRAL / HURTING / INSUFFICIENT_DATA).
++  - **`residual_report.py` (NEW — 2026-06-18)** — JSON/CSV report writer for `ResidualMonitor` output with atomic writes and strict NaN-free JSON output.
+ - Key contracts:
+   - `BacktestRunner` depends on `ModelManager` for predictions and `DataLoader` for actual box scores
+   - `EnsembleOptimizer` owns a `BacktestRunner` internally and creates/validates candidate weight configs
+@@ -491,7 +524,7 @@ Three new feature groups in `src/preprocessing/features/`, wired into the 23 exi
+ - `team_motivation.py` — `TeamMotivationFeatureGroup`: late-season tanking/load management signals. Outputs: `TEAM_CUMULATIVE_WIN_PCT` (shifted to prevent leakage), `IS_LATE_SEASON` (March+), `IS_TANKING_PROXY` (late + win pct < 0.35), `IS_PLAYOFF_LOCK_PROXY` (late + win pct > 0.65).
+ - `postseason_context.py` — `PostseasonContextFeatureGroup`: playoff detection. Outputs: `IS_PLAYOFF_GAME` (parsed from `SEASON_TYPE` or `GAME_TYPE`), `PLAYOFF_PACE_PRIOR` (0.95 historical prior for playoff pace drop, model learns exact coefficient).
+ 
+-All three groups use the batched-assembly pattern (`_concat_new_columns`) to avoid pandas fragmentation warnings. They are in the `full` training preset only (not `small`).
++All three groups use the batched-assembly pattern (`_concat_new_columns`) to avoid pandas fragmentation warnings. They are in the `full` training preset only (not `small` or `laptop_quality`).
+ 
+ ### Rest Density Cap
+ 
+@@ -532,6 +565,14 @@ Total feature groups: 26 (19 original + 4 lifecycle + 3 season context).
+ - `SeasonSimulator` aggregates per-game source health into `last_run_summary`.
+ - `simulate_season.py` surfaces that summary directly to the operator and exits non-zero when schedule health fails.
+ 
++### `src/query/confidence_adjustment.py` (NEW — 2026-06-18)
++
++- Confidence-aware probability adjustment helpers.
++- Key functions: `get_projection_value`, `get_confidence_label`, `get_confidence_score`, `std_from_interval`, `damp_probability`.
++- Strength multipliers: HIGH=1.00, MEDIUM=0.85, LOW=0.65, NO_EDGE=0.50.
++- Used by the query CLI and probability calculator for safer over/under recommendations.
++- Risk level: low. Pure functions, no external dependencies.
++
+ ### `src/query/`
+ 
+ - Owns CLI parsing, projection lookup, and probability math.
+@@ -562,6 +603,7 @@ Important boundary:
+   - `tests/test_training/test_training_pipeline_colab.py`
+   - `tests/test_training/test_nn_trainer.py`
+   - `tests/test_models/test_transformer_model.py`
++  - `tests/test_training/test_laptop_quality_smoke.py` — end-to-end smoke test that runs the real CatBoost training path with the `laptop_quality` preset against a tiny checked-in fixture (`tests/fixtures/laptop_quality/data/`, ~2160 player-game rows). Asserts all six `.cbm` artifacts, shared runtime artifacts, metadata preset/transformer flags, and passes `ArtifactContract` validation. Marked `slow` + `integration`.
+ 
+ ## File-Based Storage Contracts
+ 
+diff --git a/project-brain/CODE_RULES.md b/project-brain/CODE_RULES.md
+index d284479..1b6a696 100644
+--- a/project-brain/CODE_RULES.md
++++ b/project-brain/CODE_RULES.md
+@@ -18,8 +18,10 @@
+ - Treat filesystem artifact names and locations as API contracts unless you update every consumer in the same change.
+ - Update `/project-brain` after every meaningful code change.
+ - Do not silently change target-stat semantics, query names, or exported CSV schemas.
+-- Keep the named training presets in `config/default.yaml`, `src/training/presets.py`, and `train.py` synchronized; preset drift across those files is a contract bug, not a cosmetic difference.
+-- Do not change the canonical six-target training contract when adding presets. `small` may change stack breadth, but it must still train `PTS`, `REB`, `AST`, `STL`, `BLK`, and `TOV`.
++- Keep the named training presets in `config/default.yaml`, `src/training/presets.py`, and `train.py` synchronized; preset drift across those files is a contract bug, not a cosmetic difference. The registered presets are `small`, `laptop_quality`, and `full`.
++- Do not change the canonical six-target training contract when adding presets. `small` and `laptop_quality` may change stack breadth, but every preset must still train `PTS`, `REB`, `AST`, `STL`, `BLK`, and `TOV`.
++- New presets must use the canonical feature-group names from `ALL_FEATURE_GROUPS` in `src/training/presets.py` (e.g. `context`, `rest_density`, `archetype` — not `contextual`, `rest_game_density`, `player_archetype`). Non-canonical names are silently dropped by `FeatureEngineer._should_run_group`.
++- A preset may turn on smart feature selection by default via its `feature_selection` / `feature_selection_profile` fields. `train.py` honors the preset default when `--feature-selection` is not explicitly passed, and resolves the profile from CLI flag → preset → global config → `balanced`. In `--diagnose` mode the expensive `SmartFeatureSelector` work is skipped so preflight stays fast.
+ 
+ ## Naming And Data Conventions
+ 
+@@ -66,6 +68,7 @@
+ - Register new feature groups through the active feature-engineering flow instead of embedding ad hoc feature logic in `train.py`.
+ - When `train.py` or notebook launchers need feature-group ablation filters, construct the orchestrator through `build_feature_engineer(...)` instead of passing compatibility-sensitive kwargs like `disable_groups` directly into `FeatureEngineer(...)`.
+ - When `FeatureEngineer` is used for ablation benchmarking, use `build_feature_engineer(...)` there as well; the benchmark path is part of the compatibility boundary and should not assume every checkout accepts `disable_groups`.
++- When a feature group reads on-disk files that are NOT part of the input DataFrame (e.g. `data/injury_history.csv`, lifecycle precompute CSVs), it MUST declare them via `FeatureGroup.external_files()` so the feature-engineering cache key invalidates when those files change. Failing to do so risks returning stale cached features (DR-034).
+ - When adding features:
+   - document the feature purpose
+   - verify column naming consistency
+@@ -87,6 +90,8 @@
+ - Keep Transformer validation/runtime inference on the eager model path by default. If `torch.compile` is re-enabled for the Transformer, it must stay behind an explicit safety flag and should never be the only validation path.
+ - When touching CUDA attention code, prefer math SDPA fallback controls for validation and add regression coverage for the eager path.
+ - `model_stack_metadata.pkl` is part of the shared runtime contract and may now include the selected training preset and feature-group list; keep it in sync with any preset changes.
++- `TrainingPipeline.cat_features` must be filtered to only columns present in `feature_cols` before being passed to CatBoost. The `FeatureSelector` lists `PLAYER_ID`/`TEAM_ID`/`OPPONENT_ID` as categorical columns, but those are in `EXCLUDE_ALWAYS` and never appear in `feature_cols`. Passing unfiltered string `cat_features` to CatBoost after converting the frame to a numpy float array causes a `CatBoostError`. The model_manager already filters at load time — the training pipeline must do the same.
++- `TrainingPipeline.train()` enforces a `len(fit_df) >= 1000` minimum. Smoke-test fixtures must produce at least 1000 fit rows after the chronological split (use `tests/fixtures/laptop_quality/data/` as a reference fixture with ~2160 player-game rows).
+ - Both sequence builders (`TransformerWrapper._create_sequences()` and `TrainingPipeline._build_sequence_batch()`) must use zero-padding for players with fewer than `seq_len` context games. Do not revert to skipping short players — the zero-padding behavior is now covered by regression tests.
+ - When changing `SIZE_TIER_SPECS` in `src/config/model_config.py`, remember that `seq_len` and `max_seq_length` affect both the Transformer model's sequence window and the training pipeline's batch construction. Changes here must be reflected in both `_create_sequences()` and `_build_sequence_batch()`.
+ 
+@@ -130,7 +135,7 @@
+ - `src/preprocessing/features/season_phase.py` — early-season ramp-up (cap `DAYS_SINCE_SEASON_START` at 30 days so the feature isolates the opening-month effect). `GAMES_WITH_CURRENT_TEAM` resets on trade — ensure `PLAYER_ID` and `TEAM_ID` columns are present and sorted by `GAME_DATE` before the groupby.
+ - `src/preprocessing/features/team_motivation.py` — always shift `TEAM_CUMULATIVE_WIN_PCT` by 1 to prevent label leakage (the model should see the team's record *before* the current game). `WL` column must be present with values `'W'`/`'L'`.
+ - `src/preprocessing/features/postseason_context.py` — checks both `SEASON_TYPE` and `GAME_TYPE` columns for playoff strings (`'Playoffs'`, `'Postseason'`, `'4'`). If neither column exists, all games default to regular season.
+-- Season-context groups are in the `full` preset but intentionally excluded from `small` to preserve its iteration speed.
++- Season-context groups are in the `full` preset but intentionally excluded from `small` and `laptop_quality` to preserve their iteration speed.
+ - The rest cap in `RestGameDensityFeatureGroup` (`DAYS_SINCE_LAST_GAME.clip(upper=14.0)`) applies to ALL games, not just off-season gaps. Do not remove or raise the cap without validating the effect on B2B detection (a 1-day gap still correctly produces B2B=1).
+ 
+ ### Phase-Aware Drift Detection (NEW)
+@@ -140,6 +145,16 @@
+ - The `_infer_phase_from_date()` heuristic (Apr 15–Jun 20 = PLAYOFF) is a rough approximation. Explicitly pass `phase='PLAYOFF'` during postseason backtesting for accuracy.
+ - The phase tag is persisted in `drift_state.json` so it survives restarts — old (pre-phase) entries will not have a `phase` key and are treated as `REGULAR`.
+ 
++### Residual Correction Monitoring (NEW — 2026-06-18)
++
++- `monitor_residual_corrections.py` is the top-level CLI entry point. It delegates to `ResidualMonitor` (pure evaluation) and `residual_report.py` (file I/O). Keep the separation: the monitor does not write files; the report writer does not evaluate.
++- `MonitoringThresholds` is the single source of truth for HELPING/NEUTRAL/HURTING classification rules. If the rules change (e.g., widening the neutral band), update `MonitoringThresholds.status_for_pct()` and the ticket spec in lockstep.
++- The overall_status aggregation rule is conservative: HURTING > INSUFFICIENT_DATA > NEUTRAL > HELPING. A single hurting target dominates the report. Do not soften this — the report is a safety check.
++- JSON reports must never emit NaN/Infinity tokens (invalid strict JSON). `_json_safe()` in `residual_report.py` converts non-finite floats to `None` before serialization with `allow_nan=False`. Any new report format added to the module must do the same.
++- The monitor supports two input column paths: `CORRECTED_PREDICTION` (direct) or `RESIDUAL_CORRECTION` + `BASE_PREDICTION` (derived). When both are present, NaN rows in `CORRECTED_PREDICTION` fall back row-by-row to `BASE + RESIDUAL_CORRECTION`. Do not drop rows with partial coverage.
++- Rolling windows use `min_window_rows` (not `min_rows`) for their status threshold so that short windows are not silenced by a high global row requirement. This is a deliberate design choice — short windows should surface recent degradation even with limited data.
++- `_resolve_input_path()` in the CLI entry point is strict about explicit `--input`: if the user passes an explicit path, it must exist. No silent fallback to config defaults when the user meant a specific file.
++
+ ### Evaluation And Optimization (NEW)
+ 
+ - `src/evaluation/` is the evaluation and optimization subsystem. All backtesting, weight optimization, drift detection, and weight versioning lives here.
+@@ -186,7 +201,7 @@
+ - `SmartFeatureSelector`, `FeatureGroupAblator`, and `ShadowFeatureFilter` live in `src/evaluation/`. They are training-time helpers, not runtime predictors.
+ - The selector writes a `SelectionManifest` to `models/feature_selection_manifest.json`. The manifest is the contract between selector, training, and downstream inference. Do not write a parallel manifest format.
+ - `TrainingPipeline._feature_cols_for_target(target)` is the single source of truth for "what features does this target see during training". It must fall back to the canonical `self.feature_cols` list when no manifest is loaded, preserving the original contract.
+-- `TrainingPreset` may carry `feature_selection` and `feature_selection_profile`. If the YAML config sets `feature_selection.enabled: true` on a preset, the manifest is applied to the pipeline before training.
++- `TrainingPreset` may carry `feature_selection` and `feature_selection_profile`. If the YAML config sets `feature_selection.enabled: true` on a preset (as `laptop_quality` does), the manifest is applied to the pipeline before training. `train.py` also honors the preset default at runtime when `--feature-selection` is not explicitly passed, and skips the expensive selector work in `--diagnose` mode.
+ - The selector's signal weights (`WEIGHTS` in `smart_feature_selector.py`) are the ticket spec. If you change them, update DR-028 and the docstrings in lockstep.
+ - Selector failure (insufficient samples, fitting error, etc.) must be non-fatal. `train.py` and the pipeline fall back to the full feature set with a warning.
+ - `FeatureGroupAblator` uses `HistGradientBoostingRegressor` (sklearn) for speed — its scores are an approximation, not the exact CatBoost gain. Do not assume equivalence with the production trainer.
+@@ -234,6 +249,7 @@
+ - In `src/preprocessing/features/*`, prefer collecting wide feature outputs in temporary dicts/DataFrames and attaching them with one `pd.concat(axis=1)` per feature group.
+ - Be cautious with extra work inside simulation loops; seemingly small per-player or per-draw overhead multiplies quickly.
+ - Keep lazy imports for PyTorch-heavy code paths when they reduce startup overhead for non-training commands.
++- Feature engineering is the dominant CPU bottleneck; the in-place parquet cache (`cache/training/*.parquet`, DR-034) is active by default in `DataPipeline` and `ModelManager`. Never construct a production `FeatureEngineer` without `cache_dir` unless you intentionally want to recompute. The cache key already invalidates on input data, FE config, and external-file changes, so prefer letting it reuse results over hand-recomputing.
+ 
+ ## Reliability Rules For Scrapers And External Data
+ 
+diff --git a/project-brain/CURRENT_STATE.md b/project-brain/CURRENT_STATE.md
+index c1cabff..0e32f20 100644
+--- a/project-brain/CURRENT_STATE.md
++++ b/project-brain/CURRENT_STATE.md
+@@ -2,9 +2,10 @@
+ 
+ ## Snapshot
+ 
+-- Observed date: 2026-06-14
++- Observed date: 2026-06-19
+ - Repository health: good
+ - Test status in this workspace:
++  - feature-engineer cache tests on 2026-06-19: `pytest tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache -q` -> `3 passed`. Full preprocessing package: `pytest tests/test_preprocessing/ -q` -> `107 passed`. Affected modules (pipeline/models/correction/evaluation, not-slow): `182 passed, 1 skipped`.
+   - diagnostic mode tests on 2026-06-14: `pytest tests/test_training/test_diagnostics.py -q` -> `28 passed`.
+   - existing tests after diagnostic mode: `pytest tests/test_training/ tests/test_contracts/ tests/test_models/test_model_manager.py -q` -> `75 passed`.
+   - full non-slow suite on 2026-06-12 after bug-fix batch: `pytest -m "not slow" -q` -> `368 passed, 1 skipped, 1 deselected`.
+@@ -153,6 +154,16 @@
+    - After data load and feature engineering, diagnostic mode prints row counts, column counts, and target-column presence.
+    - `src/training/diagnostics.py` provides `diagnostic_stage`, `diagnostic_noop`, `DiagnosticStop`, `DiagnosticStageFailed`, and summary helpers.
+    - Uses custom exceptions instead of `sys.exit()` in library code.
++- **New: Residual correction monitoring system (Ticket 6, 2026-06-18)**:
++   - `monitor_residual_corrections.py` — CLI entry point that loads prediction history and produces per-target HELPING/NEUTRAL/HURTING status.
++   - `src/evaluation/residual_monitor.py` — `ResidualMonitor`: pure evaluation logic with data-quality breakdown, confidence breakdown, rolling-window status (7/14/30 day windows + season-to-date), and actionable recommendations (KEEP_ENABLED / DISABLE_CORRECTION / NEUTRAL_REVIEW / INSUFFICIENT_DATA).
++   - `src/evaluation/residual_report.py` — JSON/CSV report writer with atomic temp-file writes and strict NaN-free JSON output.
++   - `config/default.yaml` — `residual_monitoring:` config block with thresholds (min_rows=500, helping=1%, hurting=-1%, neutral_band=±1%), rolling windows (7/14/30 days), and fallback input paths.
++   - Full test suite: `tests/test_evaluation/test_residual_monitor.py` — 47 tests covering threshold logic, metric calculation, status labels, data-quality/confidence breakdowns, rolling windows, aggregation/recommendations, report writing, console rendering, validation, NaN routing, strict JSON safety, CLI resolution, and partial corrected-prediction fallback.
++- **New: Confidence adjustment helpers (2026-06-18)**:
++   - `src/query/confidence_adjustment.py` — `get_projection_value`, `get_confidence_label`, `get_confidence_score`, `std_from_interval`, `damp_probability` for safer over/under recommendations.
++- **New: Projection loader tests (2026-06-18)**:
++   - `tests/test_query/test_projection_loader.py` — 14 tests covering core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, and blank confidence handling.
+ 
+ ## What Partially Works
+ 
+@@ -180,6 +191,7 @@
+ - No checked-in trained models are present in this workspace beyond cache directories.
+ - The repo uses many local file contracts rather than strong typed interfaces between phases — though the simulation layer is moving toward typed dataclasses.
+ - `simulate_season.py` carries a run-level input health summary and exits non-zero for hard schedule failures, but still needs a live smoke test against current upstream sources.
++- Feature-engineering cache (DR-034, 2026-06-19): the first call after any input-data, FE-config, or external-file change is still a cold full compute; only repeated identical calls are served from the parquet cache. Each distinct cache entry is ~36–50MB at full scale.
+ 
+ ## Active Risks
+ 
+@@ -192,6 +204,7 @@
+ - If lineup, injury, betting, or defense context scrapers fail, `GameSimulator` now continues in explicit degraded mode (or fails fast with `--strict`).
+ - Query users can query all six stats (PTS, REB, AST, STL, BLK, TOV) from exported projection CSVs. A `DATA_QUALITY` warning surfaces when a projection uses fallback data.
+ - `clear_cache.py` can reset generated state while preserving raw input CSVs.
++- Feature engineering is now cached by default (DR-034, 2026-06-19): `DataPipeline` and `ModelManager` write/read `cache/training/*.parquet`. The cache key folds in the mtime/size of external files the feature groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`), so cached features auto-invalidate when those grow. To force a recompute: `python clear_cache.py --all --yes` or delete `cache/training/`.
+ - `optimize_weights.py --rollback N` can revert to previous weight versions if a retune degrades accuracy.
+ - If `player_bios.csv` is missing, aging features default to neutral (1.0 factor). Run `update_data.py` with `--interactive` to populate it.
+ - Delete `data/cache/aging_curves.csv` and `data/cache/kan_aging_outputs.csv` to force recomputation of lifecycle caches after retraining.
+diff --git a/project-brain/DECISIONS.md b/project-brain/DECISIONS.md
+index 7743781..a2930e2 100644
+--- a/project-brain/DECISIONS.md
++++ b/project-brain/DECISIONS.md
+@@ -4,7 +4,47 @@ This file records confirmed or strongly inferred architectural decisions visible
+ 
+ When a decision is labeled "inferred", it means the repo shows a clear implementation choice but does not contain explicit historical rationale.
+ 
+-> **Numbering note (2026-06-04)**: DR-020 and DR-021 are each used twice in this file (DR-020 appears once for the Batch-1 feature groups and again for the deterministic playstyle templates; DR-021 appears once for the Transformer seq_len/zero-padding work and again for the self-optimizing ensemble weight system). DR-022 is missing. The duplicates and the gap were preserved rather than renumbered to avoid churning cross-references in `CODE_RULES.md`, `ARCHITECTURE.md`, and the existing TASK log. New decisions should pick the next unused number (DR-029 for the contracts layer).
++> **Numbering note (2026-06-04)**: DR-020 and DR-021 are each used twice in this file (DR-020 appears once for the Batch-1 feature groups and again for the deterministic playstyle templates; DR-021 appears once for the Transformer seq_len/zero-padding work and again for the self-optimizing ensemble weight system). DR-022 is missing. The duplicates and the gap were preserved rather than renumbered to avoid churning cross-references in `CODE_RULES.md`, `ARCHITECTURE.md`, and the existing TASK log. New decisions should pick the next unused number (the highest used as of 2026-06-19 is DR-033; use DR-034 next).
++
++---
++
++## DR-034: Enable The Feature-Engineering Parquet Cache With External-File Invalidation
++
++- Status: active
++- Date: 2026-06-19
++- Confidence: high
++
++### Context
++
++- `FeatureEngineer.create_features()` already contained a complete parquet on-disk cache (load/store keyed on an input-DataFrame hash + FE-config hash), but it was inert: `cache_dir` defaulted to `None`, and the dominant production call sites — `DataPipeline` (training) and `ModelManager` (live prediction + simulation) — constructed `FeatureEngineer()` with no `cache_dir`. Only `walk_forward_residuals` passed `cache_dir="cache/training"`.
++- The result was the dominant runtime bottleneck: the full 25-group CPU pipeline (~24s on the 52k-row dataset, up to ~3.5min) re-ran from scratch on every call. `debug.log` showed `FeatureEngineer running on CPU path.` 59 times and the full feature-engineering pipeline starting 57 times in a single recent session.
++- The separate `FeatureCache`/`DataSplitCache` classes in `src/training/feature_cache.py` remained unused — TASKS.md LATER item flagged this as undecided.
++
++### Options Considered
++
++1. Wire the existing `FeatureCache` (joblib `.pkl`) class into the call sites.
++2. Activate the parquet cache already inside `create_features` by passing a `cache_dir` at the dead call sites.
++3. Vectorize/GPU-accelerate the feature groups instead of caching.
++
++### Decision
++
++- Option 2: activate the existing in-place parquet cache. It already works and uses parquet (columnar, compact) rather than the unused `FeatureCache` joblib layer.
++- Pass `cache_dir="cache/training"` in `DataPipeline.__init__` and `ModelManager.__init__`. Leave `BacktestRunner` (has its own `.pkl` cache keyed on raw-file mtime) and `walk_forward_residuals` (already enabled) untouched.
++- **Correctness guard**: extend `_cache_key` to also hash `(path, size, mtime)` of the external on-disk files some feature groups read but that are NOT part of the input DataFrame (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). Feature groups declare these via a new `FeatureGroup.external_files()` hook (default `[]`; overridden in `injury_risk`, `aging_curve`, `kan_aging`). Absent files contribute a stable `MISSING` token. This prevents stale cached features when those external inputs grow or update (e.g. the incremental injury history).
++
++### Tradeoffs
++
++- First call after any data/config/external-file change still pays the full compute cost (cold). Only repeated identical calls benefit.
++- Disk cost: one parquet per distinct (data, config, external-deps) combination in `cache/training/` (~36–50MB each at full scale). Mitigated by `clear_cache.py --all`.
++- mtime-based invalidation can produce a spurious recompute if a file is `touch`ed without content change; acceptable vs. the alternative of returning stale features.
++
++### Consequences
++
++- Repeated feature engineering across training re-runs, simulation context prep, and `prepare_data` calls is served from cache instead of recomputed.
++- `/cache/` added to `.gitignore`; a stale tracked `cache/training/*.parquet` (old key format, 36MB) was untracked.
++- Three new tests in `tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache` lock in: (a) repeated calls hit cache (`_compute_features` called once), (b) external-file appearance changes the key, (c) external-file change after a hit forces recompute (no stale return).
++- `src/training/feature_cache.py` remains unused; the TASKS.md LATER item is resolved as "keep as infrastructure, the active path uses the in-place parquet cache."
++- AGENTS.md Gotchas updated.
+ 
+ ---
+ 
+@@ -1566,3 +1606,56 @@ When a decision is labeled "inferred", it means the repo shows a clear implement
+ - If live calibration coverage is materially off target, revise bucket definitions, confidence thresholds, or quantile selection.
+ - If probability calculation needs calibrated intervals directly, Ticket 5 should consume these artifacts through `CalibrationIntervalStore` rather than re-reading JSON ad hoc.
+ - If operators need backwards-compatible legacy projection loading, add an explicit migration/regeneration command rather than weakening `validate_projection_frame(...)`.
++
++---
++
++## DR-033: Residual Correction Monitoring as a Pure Evaluation + Report Writer Split
++
++- Status: active
++- Date: 2026-06-18
++- Confidence: high
++
++### Context
++
++- Tickets 1-4 shipped residual correction models and calibrated confidence intervals. The system could correct predictions and describe their uncertainty, but there was no feedback loop to tell operators whether correction was actually helping.
++- The existing metrics infra (`BacktestRunner`, `TargetMetrics`, `metrics.py`) computes point-prediction accuracy but does not produce a structured per-stat comparison of base vs corrected error with data-quality and confidence breakdowns, rolling-window status, or actionable recommendations.
++- Without a monitoring loop, operators could silently deploy correction models that degrade predictions in specific contexts (e.g., hurting on FULL data quality while helping on DEGRADED).
++
++### Options Considered
++
++1. Extend `BacktestRunner` to add corrected-prediction comparison and status labels.
++2. Build a standalone `ResidualMonitor` with a pure-evaluation API (no file I/O) and a separate report writer.
++3. Fold monitoring into the existing `train_residual_models.py` or `calibrate_residual_intervals.py` workflows.
++
++### Decision
++
++- Option 2: standalone `ResidualMonitor` (pure evaluation) + `residual_report.py` (file I/O) + `monitor_residual_corrections.py` (CLI entry point).
++- The monitor produces a `MonitoringReport` with per-target `StatReport` blocks containing overall metrics, data-quality breakdown, confidence breakdown, rolling-window status, and recommendations.
++- The report writer produces strict NaN-free JSON and optional CSV files under `reports/residual_monitoring/`.
++- The CLI entry point reads config from `config/default.yaml` → `residual_monitoring:` block with explicit fallback resolution.
++
++### Why
++
++- Keeping the evaluation logic pure (no file I/O) makes it directly testable without temp files.
++- The split between monitor, report writer, and CLI follows the existing `BacktestRunner`/`metrics.py`/`backtest.py` pattern.
++- JSON reports with strict NaN safety (via `_json_safe` + `allow_nan=False`) make the output consumable by JavaScript dashboards and strict JSON parsers without pre-processing.
++
++### Tradeoffs
++
++- Three files instead of one, but each is focused and testable in isolation.
++- The monitor reimplements base-vs-corrected comparison logic that partially overlaps with `BacktestRunner`. This is acceptable because the monitoring question ("is correction helping right now?") is different from the backtest question ("how accurate are predictions overall?").
++- `MonitoringThresholds` introduces separate configuration (min_rows, helping/hurting thresholds) that must stay in sync with operator expectations.
++
++### Consequences
++
++- New CLI: `python monitor_residual_corrections.py [--input ...] [--output-dir ...] [--targets ...]`.
++- New config block: `residual_monitoring:` in `config/default.yaml`.
++- `MonitoringThresholds` enforces a conservative aggregation rule (HURTING > INSUFFICIENT_DATA > NEUTRAL > HELPING) so a single hurting target cannot be hidden.
++- `_resolve_input_path()` is strict about explicit `--input`: no silent fallback to config defaults when the user names a specific file.
++- Full test suite for the monitor: 47 tests covering all evaluation paths, report writing, strict JSON, and CLI argument resolution.
++
++### Revisit Triggers
++
++- If the monitor grows to need its own persistent state (e.g., historical trend tracking), add a `MonitoringStore` separate from the report-writer.
++- If the HELPING/NEUTRAL/HURTING classification proves too coarse, add finer-grained status levels or numeric scores.
++- If operators need automated alerting on HURTING status, add a `--alert-threshold` flag or a CI-compatible exit code. Currently the CLI always exits 0 (monitoring is advisory, not blocking).
+diff --git a/project-brain/FILE_MAP.md b/project-brain/FILE_MAP.md
+index 250cf40..26f9ff4 100644
+--- a/project-brain/FILE_MAP.md
++++ b/project-brain/FILE_MAP.md
+@@ -96,6 +96,7 @@
+ - Role: safe cleanup for generated artifacts.
+ - Risk level: low to medium.
+ - Important behavior: preserves raw source data in `data/`.
++- Current note (DR-034): now also clears the feature-engineering parquet cache at `cache/training/` (it already removed the root `cache/` directory). `python clear_cache.py --all --yes` forces a full feature recompute on the next run.
+ 
+ ### `optimize_variance.py` (NEW — 2026-05-21)
+ 
+@@ -115,6 +116,20 @@
+ - CLI modes: `--confidence-levels`, `--min-bucket-rows`, `--targets`.
+ - Risk level: low to medium. It does not retrain the base model, but its artifacts influence runtime interval/confidence output.
+ 
++### `monitor_residual_corrections.py` (NEW — 2026-06-18)
++
++- Role: CLI entry point for residual correction monitoring; generates reports under `reports/residual_monitoring/`.
++- Reads prediction history parquet/CSV (default: `data/evaluation/prediction_history.parquet`, fallback: `data/evaluation/residual_training.parquet`).
++- Calls into: `src.evaluation.residual_monitor.ResidualMonitor`, `src.evaluation.residual_report`.
++- Outputs: `latest_summary.json`, `residual_report_<timestamp>.json`, optionally `residual_report_<timestamp>.csv`.
++- CLI flags: `--input`, `--output-dir`, `--targets`, `--windows`, `--min-rows`, `--helping-threshold`, `--hurting-threshold`, `--print-summary`, `--csv`/`--no-csv`, `--config`.
++- Config-driven defaults via `config/default.yaml` → `residual_monitoring:` block.
++- Risk level: low. Independent of training artifacts — operates on prediction history.
++
++### `train_residual_models.py` (root)
++
++- Role: trains per-target CatBoost residual correction models under `models/residual/`.
++
+ ## Configuration
+ 
+ ### `config/default.yaml`
+@@ -203,7 +218,8 @@ Important files:
+ - Role: central orchestrator for feature generation.
+ - High-value methods:
+   - `_build_groups`
+-  - `create_features`
++  - `create_features` — parquet-cached when `cache_dir` is set (DR-034, 2026-06-19); on a cache hit it skips `_compute_features` and loads `cache/training/*.parquet`.
++  - `_cache_key` / `_external_deps_hash` — key = hash(input DataFrame) + hash(FE config) + hash((path,size,mtime) of external files declared by feature groups). Absent external files contribute a stable `MISSING` token.
+   - `create_features_chunked`
+   - `get_group_columns`
+   - `get_diagnostics`
+@@ -214,6 +230,7 @@ Important files:
+ - Risk level: high.
+ - Current note: the orchestrator still drives feature-group order, but the widest groups now batch their output columns internally before concatenating them back into the frame.
+ - Current note: `FeatureEngineeringResult` now records `n_rows` and `n_features` for selector diagnostics. The `get_group_columns()` output is consumed by `SmartFeatureSelector.run` to map columns back to their groups for ablation scoring.
++- Current note (DR-034): `cache_dir="cache/training"` is now passed by `DataPipeline` and `ModelManager`. `walk_forward_residuals` already passed it. `BacktestRunner` retains its own separate `.pkl` cache and does not use this path.
+ 
+ ### `src/training/presets.py`
+ 
+@@ -326,8 +343,8 @@ Important files:
+ 
+ ### `src/training/feature_cache.py`
+ 
+-- Contains cache helpers not clearly wired into the main `train.py` flow.
+-- Treat as secondary/uncertain until a caller is confirmed.
++- Contains reusable `FeatureCache`/`DataSplitCache` (joblib `.pkl`) cache helpers.
++- Still unused by the active path. The active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()` (DR-034, 2026-06-19), not this module. Kept as infrastructure.
+ 
+ ### `src/training/__init__.py`
+ 
+@@ -544,6 +561,22 @@ These are important but secondary to the main orchestration files above.
+ - Accept/verify gates prevent regressions from being deployed.
+ - Risk level: medium — modifies production weight config.
+ 
++### `src/evaluation/residual_monitor.py` (NEW — 2026-06-18)
++
++- Role: structured per-target comparison of base vs corrected prediction error.
++- Key types: `ResidualMonitor`, `MonitoringReport`, `StatReport`, `StatMetrics`, `MonitoringThresholds`.
++- Key constants: `STATUS_HELPING`, `STATUS_NEUTRAL`, `STATUS_HURTING`, `STATUS_INSUFFICIENT_DATA`, `RECOMMENDATION_KEEP`, `RECOMMENDATION_DISABLE`, `RECOMMENDATION_REVIEW`, `RECOMMENDATION_INSUFFICIENT`.
++- Pure evaluation (no file I/O). Persistence is handled by `residual_report.py`.
++- Risk level: low. Heavily tested (47 tests in `test_residual_monitor.py`).
++
++### `src/evaluation/residual_report.py` (NEW — 2026-06-18)
++
++- Role: JSON/CSV report writer for `ResidualMonitor` output.
++- Key functions: `write_report`, `write_json_report`, `write_latest_summary`, `write_csv_report`, `render_console_summary`, `report_to_dataframe`, `_json_safe`.
++- Atomic temp-file writes prevent corruption on crash.
++- Strict NaN-free JSON via `_json_safe` + `json.dumps(..., allow_nan=False)`.
++- Risk level: low. Standalone file I/O, no evaluation logic.
++
+ ### `src/evaluation/weight_store.py`
+ 
+ - Role: versioned JSON weight storage with atomic writes and rollback.
+@@ -716,6 +749,7 @@ These are important but secondary to the main orchestration files above.
+   - `tests/test_simulation/test_game_simulator.py`
+   - `tests/test_query/test_probability_calculator.py`
+   - `tests/test_query/test_interactive_cli.py`
++  - **`tests/test_query/test_projection_loader.py` (NEW — 2026-06-18)** — 14 tests for ProjectionLoader with correction/calibration columns: core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, blank confidence handling.
+   - `tests/test_training/test_training_pipeline_colab.py`
+   - `tests/test_training/test_nn_trainer.py`
+   - `tests/test_models/test_transformer_model.py` — now includes config, zero-padding, and regression tests for the transformer sequence builder
+@@ -750,7 +784,7 @@ These are important but secondary to the main orchestration files above.
+   - currently empty
+   - do not assume it owns anything yet
+ - `src/evaluation/`
+-  - now contains 8 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`, `feature_group_ablation.py`, `shadow_feature_filter.py`, `smart_feature_selector.py`
++  - now contains 10 active modules: `metrics.py`, `backtest_runner.py`, `ensemble_optimizer.py`, `weight_store.py`, `drift_detector.py`, `feature_group_ablation.py`, `shadow_feature_filter.py`, `smart_feature_selector.py`, `residual_monitor.py`, `residual_report.py`
+   - no longer a placeholder
+ - `plans/`, `cline_docs/`, and local PDFs
+   - useful historical context, not active runtime code
+diff --git a/project-brain/TASKS.md b/project-brain/TASKS.md
+index 133e4fc..3996a98 100644
+--- a/project-brain/TASKS.md
++++ b/project-brain/TASKS.md
+@@ -2,6 +2,22 @@
+ 
+ ## NOW
+ 
++### Run residual correction monitoring against real prediction history
++
++- Why it matters: the monitoring system is implemented and test-covered (47 tests) but needs live validation against a real `data/evaluation/prediction_history.parquet` to confirm that HELPING/NEUTRAL/HURTING labels correspond to operator intuition, and that `latest_summary.json` can be consumed by downstream dashboards.
++- Likely files:
++  - `monitor_residual_corrections.py`
++  - `src/evaluation/residual_monitor.py`
++  - `src/evaluation/residual_report.py`
++  - `data/evaluation/prediction_history.parquet`
++  - `reports/residual_monitoring/`
++- Done when:
++  - `python monitor_residual_corrections.py --print-summary` completes against real data.
++  - Per-target status labels are physically interpretable (PTS correction is HELPING, TOV correction might be NEUTRAL, etc.).
++  - `latest_summary.json` is valid strict JSON (no NaN tokens) consumable by `jq` and JavaScript.
++  - Rolling-window status is populated for at least one window size.
++  - Data-quality and confidence breakdowns show rows in multiple buckets.
++
+ ### Validate zero-padding behavior on real training data
+ 
+ - Why it matters: the zero-padding change increases the number of training samples for players with short careers. A live training run should confirm that the Transformer still converges and that the padded samples do not degrade validation MAE.
+@@ -26,19 +42,12 @@
+   - lifecycle caches (`aging_curves.csv`, `kan_aging_outputs.csv`) are populated
+   - aging feature groups produce non-neutral values during feature engineering
+ 
+-### Run full test suite after lifecycle ML integration
++### Run full test suite after residual monitoring system
+ 
+-- Why it matters: 4 new feature groups, new feature_engineer_gpu, nexus model, and lifecycle modules need to pass alongside the existing 178 tests.
+-- Likely files:
+-  - `tests/test_preprocessing/test_aging_curve_features.py`
+-  - `tests/test_preprocessing/test_kan_aging_features.py`
+-  - `tests/test_preprocessing/test_injury_risk_features.py`
+-  - `tests/test_preprocessing/test_skill_development_features.py`
+-  - `tests/test_preprocessing/test_feature_engineer_gpu.py`
+-  - `tests/test_models/test_nexus_model.py`
+-  - `tests/test_data/test_player_bio_scraper.py`
+-  - `tests/test_data/test_injury_history_logger.py`
+-- Status: DONE on 2026-05-22. Full suite: `294 passed, 1 skipped` (baseline updated from 178). 2026-06-04 update: `313 passed, 1 skipped` after smart feature selection + contracts layer + weight bootstrap. 2026-06-11 update: targeted `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` on top of the 2026-06-04 baseline.
++- Status: DONE on 2026-06-18.
++- Added: `tests/test_evaluation/test_residual_monitor.py` — 47 tests covering: threshold logic, metric calculation, status labels, data-quality/confidence breakdowns, rolling windows, aggregation/recommendations, report writing, console rendering, validation/error handling, NaN bucket routing, strict JSON safety, CLI argument resolution, and partial corrected-prediction fallback.
++- Added: `tests/test_query/test_projection_loader.py` — 14 tests covering: core/full CSV loading, corrected projections, interval fields, confidence labels, interval validation, non-numeric column rejection, and blank confidence handling.
++- Baseline update: `313 + 47 + 14 = 374 passed, 1 skipped` (estimated; slow tests deselected).
+ 
+ ### Run backtest against live data to establish baseline metrics
+ 
+@@ -274,13 +283,10 @@
+ 
+ ## LATER
+ 
+-### Decide whether `src/training/feature_cache.py` should become part of the active training pipeline
++### Decide whether `src/training/feature_cache.py` should become part of the active training pipeline — DONE
+ 
+-- Why it matters: cache infrastructure exists, but the top-level training path does not clearly rely on it.
+-- Outcome options:
+-  - wire it into `train.py`
+-  - remove it
+-  - document it as experimental/inactive
++- Why it matters: cache infrastructure exists, but the top-level training path did not clearly rely on it.
++- Outcome: **decided 2026-06-19 (DR-034)** — keep `feature_cache.py` as unused infrastructure; the active feature cache is the in-place parquet cache inside `FeatureEngineer.create_features()`, now enabled via `cache_dir="cache/training"` in `DataPipeline` and `ModelManager`. The cache key was hardened to fold in the mtime/size of external files the feature groups read (`FeatureGroup.external_files()`), so it never returns stale features. Coverage: `tests/test_preprocessing/test_feature_engineer.py::TestFeatureEngineerCache` (3 tests, all green).
+ 
+ ### Improve experiment tracking usefulness
+ 
+@@ -680,6 +686,21 @@
+   - `tests/test_contracts/test_pipeline_contract_smoke.py` covers the smoke path through the contract validator.
+ - Targeted subset on 2026-06-11: `pytest tests/test_evaluation/ tests/test_contracts/` -> `23 passed` (the new smart-selector suite + contracts smoke test). Full-suite baseline of `313 passed, 1 skipped` from 2026-06-04 still applies.
+ 
++### Run residual interval calibration on real residual data
++
++- Why it matters: Ticket 4 is implemented and unit-tested, but `models/calibration/` must be generated from the real walk-forward residual dataset before live predictions can show meaningful calibrated ranges.
++
++### Add residual correction monitoring system — DONE
++
++- Completed 2026-06-18.
++- Delivered:
++  - `monitor_residual_corrections.py` — CLI entry point with config-driven input resolution, threshold builder, and report writing.
++  - `src/evaluation/residual_monitor.py` — `ResidualMonitor`: pure evaluation with per-target `StatReport` (overall metrics, data-quality breakdown, confidence breakdown, rolling-window status, status labels, recommendations). 786 lines.
++  - `src/evaluation/residual_report.py` — `write_report()`, `write_json_report()`, `write_latest_summary()`, `write_csv_report()`, `render_console_summary()`, `report_to_dataframe()`, `_json_safe()` for strict NaN-free JSON. 309 lines.
++  - `config/default.yaml` — `residual_monitoring:` block (min_rows=500, helping/hurting thresholds, neutral_band=±1%, min_window_rows=50, windows_days=[7,14,30]).
++  - `tests/test_evaluation/test_residual_monitor.py` — 47 tests.
++  - Decision record: DR-033.
++
+ ### Add fast training diagnostic mode — DONE
+ 
+ - Completed 2026-06-14.
+diff --git a/src/models/model_manager.py b/src/models/model_manager.py
+index e155248..9897f27 100644
+--- a/src/models/model_manager.py
++++ b/src/models/model_manager.py
+@@ -87,7 +87,7 @@ class ModelManager:
+ 
+         self.use_gpu = False
+         self.device = None
+-        self.feature_engineer = FeatureEngineer()
++        self.feature_engineer = FeatureEngineer(cache_dir="cache/training")
+         self.feature_selector = FeatureSelector(self.targets)
+ 
+         self.residual_correction_model: Optional[ResidualCorrectionModel] = None
+diff --git a/src/pipeline/data_pipeline.py b/src/pipeline/data_pipeline.py
+index fbcf0f7..f37080a 100644
+--- a/src/pipeline/data_pipeline.py
++++ b/src/pipeline/data_pipeline.py
+@@ -35,7 +35,7 @@ class DataPipeline:
+         """
+         self.data_config = data_config
+         self.training_config = training_config
+-        self.feature_engineer = FeatureEngineer()
++        self.feature_engineer = FeatureEngineer(cache_dir="cache/training")
+         self._feature_cols: Optional[List[str]] = None
+         self.feature_schema: Optional[FeatureSchema] = None
+         self.feature_selector = FeatureSelector(self.training_config.targets)
+diff --git a/src/preprocessing/feature_engineer.py b/src/preprocessing/feature_engineer.py
+index 9de9583..0113428 100644
+--- a/src/preprocessing/feature_engineer.py
++++ b/src/preprocessing/feature_engineer.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import hashlib
+ import inspect
+ import logging
++import os
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Dict, List, Optional, Sequence, Tuple, Union
+@@ -162,7 +163,14 @@ class FeatureEngineer:
+         return out, added
+ 
+     def _cache_key(self, df: pd.DataFrame) -> str:
+-        """Compute a stable cache key from input data and FE configuration."""
++        """Compute a stable cache key from input data, FE config, and external deps.
++
++        Some feature groups read on-disk files that are NOT part of the input
++        DataFrame (e.g. ``data/injury_history.csv``, ``data/cache/aging_curves.csv``).
++        Those files can change between runs while the input DataFrame hash stays
++        identical, so we fold each file's size and mtime into the key. This keeps
++        cached features correct when those external inputs grow or are updated.
++        """
+         config_str = (
+             f"windows={sorted(self.rolling_windows)}"
+             f"|groups={sorted(self.enable_groups or [])}"
+@@ -175,7 +183,29 @@ class FeatureEngineer:
+             pd.util.hash_pandas_object(df, index=True).values
+         ).hexdigest()[:16]
+         config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:16]
+-        return f"fe_{data_hash}_{config_hash}"
++        deps_hash = self._external_deps_hash()
++        return f"fe_{data_hash}_{config_hash}_{deps_hash}"
++
++    def _external_deps_hash(self) -> str:
++        """Hash the (path, size, mtime) of every external file the groups read.
++
++        Files that do not exist contribute a stable ``MISSING`` token, so a
++        cache entry built with no external data stays valid until such a file
++        actually appears.
++        """
++        parts = []
++        for group in self.feature_groups:
++            if not self._should_run_group(group):
++                continue
++            for fpath in group.external_files():
++                try:
++                    st = os.stat(fpath)
++                    parts.append(f"{fpath}:{st.st_size}:{int(st.st_mtime)}")
++                except OSError:
++                    parts.append(f"{fpath}:MISSING")
++        if not parts:
++            return "none"
++        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+ 
+     def create_features(self, df: pd.DataFrame, is_training: bool = True) -> pd.DataFrame:
+         """Create leakage-safe features with explicit diagnostics."""
+diff --git a/src/preprocessing/features/aging_curve.py b/src/preprocessing/features/aging_curve.py
+index f2ccad7..32f1ac9 100644
+--- a/src/preprocessing/features/aging_curve.py
++++ b/src/preprocessing/features/aging_curve.py
+@@ -54,6 +54,12 @@ class AgingCurveFeatureGroup(FeatureGroup):
+     def __init__(self, data_dir: str = 'data'):
+         self.data_dir = data_dir
+ 
++    def external_files(self) -> List[str]:
++        return [
++            os.path.join(self.data_dir, 'cache', 'aging_curves.csv'),
++            os.path.join(self.data_dir, 'player_bios.csv'),
++        ]
++
+     def create(
+         self,
+         df: pd.DataFrame,
+diff --git a/src/preprocessing/features/base.py b/src/preprocessing/features/base.py
+index 9d66af8..2eb27dc 100644
+--- a/src/preprocessing/features/base.py
++++ b/src/preprocessing/features/base.py
+@@ -127,6 +127,16 @@ class FeatureGroup(ABC):
+         """Best-effort feature name discovery for schema bookkeeping."""
+         return [c for c in df.columns if c.startswith(self.name.upper())]
+ 
++    def external_files(self) -> List[str]:
++        """Declare on-disk files this group reads that are NOT in the input DataFrame.
++
++        The FeatureEngineer folds these into its feature cache key (by path +
++        size + mtime) so that cached features are invalidated whenever the
++        external data changes. Groups with no external dependencies return an
++        empty list (the default).
++        """
++        return []
++
+     def _check_columns(self, df: pd.DataFrame, diagnostics: Optional[FeatureDiagnostics]) -> None:
+         missing_required = [c for c in self.required_columns if c not in df.columns]
+         missing_optional = [c for c in self.optional_columns if c not in df.columns]
+diff --git a/src/preprocessing/features/injury_risk.py b/src/preprocessing/features/injury_risk.py
+index 8795bd8..34aaeb4 100644
+--- a/src/preprocessing/features/injury_risk.py
++++ b/src/preprocessing/features/injury_risk.py
+@@ -57,6 +57,9 @@ class InjuryRiskFeatureGroup(FeatureGroup):
+         self.data_dir = data_dir
+         self._injury_history: Optional[pd.DataFrame] = None
+ 
++    def external_files(self) -> List[str]:
++        return [os.path.join(self.data_dir, 'injury_history.csv')]
++
+     def _load_injury_history(self) -> pd.DataFrame:
+         """Load injury history CSV, cache in memory for the session."""
+         if self._injury_history is not None:
+diff --git a/src/preprocessing/features/kan_aging.py b/src/preprocessing/features/kan_aging.py
+index c03066b..c56793b 100644
+--- a/src/preprocessing/features/kan_aging.py
++++ b/src/preprocessing/features/kan_aging.py
+@@ -53,6 +53,9 @@ class KANAgingFeatureGroup(FeatureGroup):
+         self.data_dir = data_dir
+         self._kan_cache: Optional[pd.DataFrame] = None
+ 
++    def external_files(self) -> List[str]:
++        return [os.path.join(self.data_dir, 'cache', 'kan_aging_outputs.csv')]
++
+     def _load_kan_outputs(self) -> pd.DataFrame:
+         if self._kan_cache is not None:
+             return self._kan_cache
+diff --git a/tests/test_preprocessing/test_feature_engineer.py b/tests/test_preprocessing/test_feature_engineer.py
+index 33bea17..832fd6f 100644
+--- a/tests/test_preprocessing/test_feature_engineer.py
++++ b/tests/test_preprocessing/test_feature_engineer.py
+@@ -306,6 +306,109 @@ class TestFeatureEngineer:
+         assert selector.feature_schema.schema_hash == schema.schema_hash
+ 
+ 
++class TestFeatureEngineerCache:
++    """Caching behavior for create_features.
++
++    The full feature pipeline is the dominant runtime bottleneck (~24s+ on the
++    52k-row dataset, repeated dozens of times). A parquet cache keyed on the
++    input data + FE config already exists inside create_features but is only
++    active when cache_dir is set. These tests lock in (a) that the cache
++    short-circuits repeated computation and (b) that the cache key is
++    invalidated when the external CSVs consumed by some feature groups change,
++    so enabling the cache never returns stale features.
++    """
++
++    def test_repeated_create_features_is_cache_hit(self, sample_player_data, tmp_path):
++        """A second call with the same df + cache_dir must skip recomputation."""
++        from src.preprocessing.feature_engineer import FeatureEngineer
++
++        fe = FeatureEngineer(cache_dir=str(tmp_path))
++        call_count = {"n": 0}
++        real_compute = fe._compute_features
++
++        def counting_compute(df):
++            call_count["n"] += 1
++            return real_compute(df)
++
++        fe._compute_features = counting_compute
++
++        first = fe.create_features(sample_player_data, is_training=True)
++        assert call_count["n"] == 1
++        # parquet file must have been written
++        assert list(tmp_path.glob("*.parquet"))
++
++        second = fe.create_features(sample_player_data, is_training=True)
++        assert call_count["n"] == 1, "second call should be served from cache"
++        # cached result must be content-equal to the computed one
++        pd.testing.assert_frame_equal(
++            second.reset_index(drop=True),
++            first.reset_index(drop=True),
++            check_like=True,
++        )
++
++    def test_cache_key_reflects_external_file_mtime(self, sample_player_data, tmp_path):
++        """Touching an external dependency must change the cache key."""
++        from src.preprocessing.feature_engineer import FeatureEngineer
++
++        fe = FeatureEngineer(cache_dir=str(tmp_path))
++        key_before = fe._cache_key(sample_player_data)
++
++        data_dir = tmp_path / "data"
++        data_dir.mkdir()
++        # Simulate one of the external files aging/injury groups read growing.
++        injury = data_dir / "injury_history.csv"
++        injury.write_text("PLAYER_ID,DATE\n101,2024-01-01\n")
++        # The groups hardcode data_dir='data'; point them at our temp data dir.
++        for group in fe.feature_groups:
++            if hasattr(group, "data_dir"):
++                group.data_dir = str(data_dir)
++                # bust any in-memory cached reads
++                group._injury_history = None
++                group._kan_cache = None
++
++        key_after = fe._cache_key(sample_player_data)
++        assert key_after != key_before, (
++            "cache key must change when an external dependency appears/changes "
++            "so cached features are never stale relative to those files"
++        )
++
++    def test_external_file_change_forces_recompute(self, sample_player_data, tmp_path):
++        """After a cache hit, an external file change must trigger recompute."""
++        from src.preprocessing.feature_engineer import FeatureEngineer
++
++        fe = FeatureEngineer(cache_dir=str(tmp_path))
++
++        # Point the external-file-reading groups at a temp data dir so we can
++        # mutate their inputs without touching the real data/ directory.
++        data_dir = tmp_path / "data"
++        data_dir.mkdir()
++        for group in fe.feature_groups:
++            if hasattr(group, "data_dir"):
++                group.data_dir = str(data_dir)
++
++        call_count = {"n": 0}
++        real_compute = fe._compute_features
++
++        def counting_compute(df):
++            call_count["n"] += 1
++            return real_compute(df)
++
++        fe._compute_features = counting_compute
++
++        fe.create_features(sample_player_data, is_training=True)
++        assert call_count["n"] == 1
++        # second call, nothing changed -> cache hit
++        fe.create_features(sample_player_data, is_training=True)
++        assert call_count["n"] == 1
++
++        # Now mutate an external dependency the key tracks.
++        (data_dir / "injury_history.csv").write_text("PLAYER_ID,DATE\n101,2024-01-02\n")
++        fe.create_features(sample_player_data, is_training=True)
++        assert call_count["n"] == 2, (
++            "external dependency changed but cached (stale) result was returned"
++        )
++
++
+ class TestDataLoader:
+     """Tests for DataLoader class."""
+
+================================================================================
+SECTION 3 — gitignored mirror: project-brain/FULL_PROJECT_DUMP.md
+================================================================================
+This file is gitignored (.gitignore:34 'project-brain/'), so it has NO git history
+and cannot appear in `git diff`. It is a concatenation of the standalone project-
+brain docs. This session applied the SAME DR-034 cache-fix edits to its embedded
+copies of ARCHITECTURE, CODE_RULES, CURRENT_STATE, DECISIONS, FILE_MAP, and TASKS
+(mirroring SECTION 2 above). Verified post-edit: file remains valid UTF-8, no
+replacement characters (U+FFFD), 6625 lines. The substantive content of those
+edits is identical to the DR-034 / cache-related hunks in SECTION 2.
+
+Edits applied to the embedded copies (locations in FULL_PROJECT_DUMP.md):
+  - Embedded ARCHITECTURE: Flow 2 caching note; named methods (_cache_key /
+    _external_deps_hash); src/preprocessing key invariant (external_files);
+    src/training feature_cache.py note; src/models model_manager cache note.
+  - Embedded CODE_RULES: Preprocessing rule (external_files() MUST be declared);
+    Performance Rules (cache active by default, never construct without cache_dir).
+  - Embedded CURRENT_STATE: Snapshot test status (2026-06-19, 3+107+182 passed);
+    Current Limitations (cold-first-call note); Known Workarounds (cache + clear).
+  - Embedded DECISIONS: numbering note updated; +DR-034 entry.
+  - Embedded FILE_MAP: feature_engineer.py (create_features/_cache_key cached);
+    feature_cache.py (unused, active cache is in-place parquet); clear_cache.py.
+  - Embedded TASKS: LATER 'feature_cache.py' item marked DONE with DR-034 outcome.
+================================================================================
+END OF DIFF
+================================================================================
+     
+

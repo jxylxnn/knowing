@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from src.contracts.errors import ProjectionSchemaContractError
 from src.contracts.projections import validate_projection_frame
+from src.reasoning.sidecar import load_reasoning_sidecar, sidecar_path
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime
@@ -60,6 +61,63 @@ class PlayerProjection:
     
     play_probability: float = 1.0
     game_id: Optional[str] = None
+
+    # Optional post-blend correction/calibration fields.  They are defaults so
+    # older projection CSVs remain loadable.
+    pts_corrected: Optional[float] = None
+    pts_base: Optional[float] = None
+    pts_residual_correction: Optional[float] = None
+    pts_interval_80_low: Optional[float] = None
+    pts_interval_80_high: Optional[float] = None
+    pts_interval_90_low: Optional[float] = None
+    pts_interval_90_high: Optional[float] = None
+    pts_confidence: str = ""
+    pts_confidence_score: Optional[float] = None
+    reb_corrected: Optional[float] = None
+    reb_base: Optional[float] = None
+    reb_residual_correction: Optional[float] = None
+    reb_interval_80_low: Optional[float] = None
+    reb_interval_80_high: Optional[float] = None
+    reb_interval_90_low: Optional[float] = None
+    reb_interval_90_high: Optional[float] = None
+    reb_confidence: str = ""
+    reb_confidence_score: Optional[float] = None
+    ast_corrected: Optional[float] = None
+    ast_base: Optional[float] = None
+    ast_residual_correction: Optional[float] = None
+    ast_interval_80_low: Optional[float] = None
+    ast_interval_80_high: Optional[float] = None
+    ast_interval_90_low: Optional[float] = None
+    ast_interval_90_high: Optional[float] = None
+    ast_confidence: str = ""
+    ast_confidence_score: Optional[float] = None
+    stl_corrected: Optional[float] = None
+    stl_base: Optional[float] = None
+    stl_residual_correction: Optional[float] = None
+    stl_interval_80_low: Optional[float] = None
+    stl_interval_80_high: Optional[float] = None
+    stl_interval_90_low: Optional[float] = None
+    stl_interval_90_high: Optional[float] = None
+    stl_confidence: str = ""
+    stl_confidence_score: Optional[float] = None
+    blk_corrected: Optional[float] = None
+    blk_base: Optional[float] = None
+    blk_residual_correction: Optional[float] = None
+    blk_interval_80_low: Optional[float] = None
+    blk_interval_80_high: Optional[float] = None
+    blk_interval_90_low: Optional[float] = None
+    blk_interval_90_high: Optional[float] = None
+    blk_confidence: str = ""
+    blk_confidence_score: Optional[float] = None
+    tov_corrected: Optional[float] = None
+    tov_base: Optional[float] = None
+    tov_residual_correction: Optional[float] = None
+    tov_interval_80_low: Optional[float] = None
+    tov_interval_80_high: Optional[float] = None
+    tov_interval_90_low: Optional[float] = None
+    tov_interval_90_high: Optional[float] = None
+    tov_confidence: str = ""
+    tov_confidence_score: Optional[float] = None
     
     def get_stat_mean(self, stat: str) -> float:
         stat = stat.lower()
@@ -75,6 +133,22 @@ class PlayerProjection:
             getattr(self, f'{stat}_ci_low', 0.0),
             getattr(self, f'{stat}_ci_high', 0.0)
         )
+
+    def get_stat_corrected(self, stat: str) -> Optional[float]:
+        return getattr(self, f"{stat.lower()}_corrected", None)
+
+    def get_stat_confidence(self, stat: str) -> str:
+        value = getattr(self, f"{stat.lower()}_confidence", "")
+        return "" if value is None or str(value).lower() == "nan" else str(value)
+
+    def get_stat_interval(self, stat: str, confidence: float = 0.9) -> Optional[Tuple[float, float]]:
+        stat = stat.lower()
+        level = 90 if float(confidence) >= 0.85 else 80
+        low = getattr(self, f"{stat}_interval_{level}_low", None)
+        high = getattr(self, f"{stat}_interval_{level}_high", None)
+        if low is None or high is None:
+            return None
+        return (float(low), float(high))
 
 
 class ProjectionLoader:
@@ -150,6 +224,7 @@ class ProjectionLoader:
         self._context_cache: Dict[str, Dict[str, Any]] = {}
         self._player_games_cache: Dict[str, pd.DataFrame] = {}
         self._defense_scraper = None
+        self._reasoning_cache: Dict[str, Dict[str, Any]] = {}
     
     def _find_latest_projection_file(self) -> Optional[Path]:
         if not self.data_dir.exists():
@@ -191,6 +266,7 @@ class ProjectionLoader:
             self._cache_file = str(projection_file)
             self._last_load_time = datetime.now()
             self._build_player_index()
+            self._load_reasoning_for_projection(projection_file)
             
             logger.info(f"Loaded {len(self._projections_cache)} projections from {projection_file.name}")
             return self._projections_cache
@@ -200,6 +276,33 @@ class ProjectionLoader:
         except Exception as e:
             logger.error(f"Failed to load projections: {e}")
             return pd.DataFrame()
+
+    def _load_reasoning_for_projection(self, projection_file: Path) -> None:
+        """Best-effort load of the optional projection reasoning sidecar."""
+        self._reasoning_cache = {}
+        candidate = sidecar_path(projection_file)
+        if candidate.exists():
+            try:
+                self._reasoning_cache = load_reasoning_sidecar(candidate)
+            except Exception as exc:
+                logger.warning("Failed to load reasoning sidecar %s: %s", candidate, exc)
+
+    def get_reasoning(
+        self,
+        player_name: str,
+        stat: Optional[str] = None,
+        opponent: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a cached reasoning report, optionally narrowed to a stat."""
+        payload = self._reasoning_cache.get(str(player_name).strip().lower())
+        if payload is None:
+            return None
+        if opponent and str(payload.get("opponent", "")).upper() != str(opponent).upper():
+            return None
+        if stat:
+            item = payload.get("stats", {}).get(str(stat).upper())
+            return item
+        return payload
     
     def _build_player_index(self):
         self._player_index = {}
@@ -314,11 +417,33 @@ class ProjectionLoader:
         def get_required_stat_columns(stat: str) -> Dict[str, float]:
             """Get all columns for a stat using STAT_COLUMNS mapping."""
             cols = self.STAT_COLUMNS.get(stat, {})
+            upper = stat.upper()
+
+            def first_float(candidates, default=0.0):
+                for candidate in candidates:
+                    if candidate in row.index:
+                        value = safe_float(row.get(candidate), default=None)
+                        if value is not None:
+                            return value
+                return default
+
+            mean = first_float(
+                [cols.get('mean', f'PROJ_{upper}_MEAN'), upper, f'{upper}_P50'],
+                0.0,
+            )
             return {
-                'mean': get_required_float(cols.get('mean', f'PROJ_{stat.upper()}_MEAN')),
-                'mode': get_required_float(cols.get('mode', f'PROJ_{stat.upper()}_MODE')),
-                'ci_low': get_required_float(cols.get('ci_low', f'{stat.upper()}_CI_LOW')),
-                'ci_high': get_required_float(cols.get('ci_high', f'{stat.upper()}_CI_HIGH')),
+                'mean': mean,
+                'mode': first_float(
+                    [cols.get('mode', f'PROJ_{upper}_MODE'), f'{upper}_P50', upper], mean
+                ),
+                'ci_low': first_float(
+                    [cols.get('ci_low', f'{upper}_CI_LOW'), f'{upper}_INTERVAL_90_LOW', f'{upper}_P10'],
+                    0.0,
+                ),
+                'ci_high': first_float(
+                    [cols.get('ci_high', f'{upper}_CI_HIGH'), f'{upper}_INTERVAL_90_HIGH', f'{upper}_P90'],
+                    0.0,
+                ),
             }
         
         def estimate_std(mean: float, ci_low: float, ci_high: float) -> float:
@@ -334,7 +459,7 @@ class ProjectionLoader:
         blk_data = get_required_stat_columns('blk')
         tov_data = get_required_stat_columns('tov')
         
-        return PlayerProjection(
+        projection = PlayerProjection(
             player_name=str(row.get('PLAYER_NAME', 'Unknown')),
             team=str(row.get('TEAM', '')),
             opponent=str(row.get('OPPONENT', '')),
@@ -380,6 +505,24 @@ class ProjectionLoader:
             play_probability=safe_float(row.get('PLAY_PROBABILITY', 1.0)),
             game_id=str(row.get('GAME_ID', ''))
         )
+
+        def optional_float(column: str) -> Optional[float]:
+            if column not in row.index or pd.isna(row.get(column)):
+                return None
+            return safe_float(row.get(column), default=None)
+
+        for stat in self.STAT_COLUMNS:
+            upper = stat.upper()
+            setattr(projection, f"{stat}_corrected", optional_float(f"{upper}_CORRECTED"))
+            setattr(projection, f"{stat}_base", optional_float(f"{upper}_BASE"))
+            setattr(projection, f"{stat}_residual_correction", optional_float(f"{upper}_RESIDUAL_CORRECTION"))
+            for level in (80, 90):
+                setattr(projection, f"{stat}_interval_{level}_low", optional_float(f"{upper}_INTERVAL_{level}_LOW"))
+                setattr(projection, f"{stat}_interval_{level}_high", optional_float(f"{upper}_INTERVAL_{level}_HIGH"))
+            confidence = row.get(f"{upper}_CONFIDENCE", "")
+            setattr(projection, f"{stat}_confidence", "" if pd.isna(confidence) else str(confidence))
+            setattr(projection, f"{stat}_confidence_score", optional_float(f"{upper}_CONFIDENCE_SCORE"))
+        return projection
     
     def get_available_players(self) -> List[str]:
         df = self.load_projections()

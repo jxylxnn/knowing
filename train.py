@@ -207,13 +207,18 @@ Examples:
     )
     parser.add_argument(
         '--preset', type=str, default='full',
-        choices=['small', 'full'],
-        help='Training preset controlling feature groups, Transformer use, and recent-history trimming (default: full)'
+        choices=['small', 'laptop_quality', 'full'],
+        help='Training preset controlling feature groups, Transformer use, and recent-history trimming (default: full). '
+             'laptop_quality sits between small and full: CatBoost-first, smart feature selection, no Transformer.'
     )
     parser.add_argument(
         '--mode', type=str, default=None,
         choices=['quick', 'standard', 'full'],
         help='Training mode override; defaults come from the selected preset'
+    )
+    parser.add_argument(
+        '--test-split-date', type=str, default=None,
+        help='Override the chronological test split date (YYYY-MM-DD).',
     )
     parser.add_argument(
         '--model-size', type=normalize_model_size, default=None,
@@ -436,9 +441,10 @@ Examples:
                         len(trimmed_df),
                     )
                     merged_df = trimmed_df
-                elif 'SEASON_ID' not in merged_df.columns:
+                elif not {'SEASON_ID', 'SEASON_YEAR'} & set(merged_df.columns):
                     logger.warning(
-                        "Preset %s requested a recent-history window, but SEASON_ID is unavailable; training on full history.",
+                        "Preset %s requested a recent-history window, but neither "
+                        "SEASON_ID nor SEASON_YEAR is available; training on full history.",
                         preset.name,
                     )
 
@@ -509,94 +515,143 @@ Examples:
         config_profile = (
             getattr(runtime_config, 'feature_selection_profiles', {}) or {}
         )
+        preset_selection_cfg = (
+            preset.feature_selection if preset.feature_selection else {}
+        )
+        # Smart selection is enabled when:
+        #   - explicitly requested via --feature-selection smart, OR
+        #   - not explicitly disabled and either the global config or the
+        #     resolved preset turns it on (e.g. laptop_quality defaults on).
         fs_enabled = (
             cli_selection == 'smart'
-            or (cli_selection is None and bool(config_selection_cfg.get('enabled', False)))
+            or (
+                cli_selection is None
+                and (
+                    bool(config_selection_cfg.get('enabled', False))
+                    or bool(preset_selection_cfg.get('enabled', False))
+                )
+            )
         )
         if fs_enabled:
-            with diagnostic_stage("feature_selection", diag_config):
-                current_stage = "smart feature selection"
-                logger.info("Step 2.5/5: %s", current_stage.title())
-                if console and RICH_AVAILABLE:
-                    console.print(
-                        "\n[bold cyan]Step 2.5: Smart per-target feature selection...[/bold cyan]"
-                    )
-                else:
-                    print("\nStep 2.5: Smart per-target feature selection...")
-
-                try:
-                    from src.evaluation import (
-                        ProfileConfig,
-                        SelectorConfig,
-                        SmartFeatureSelector,
-                    )
-
-                    # CLI overrides YAML config when explicitly set.
-                    fs_cfg = dict(config_selection_cfg or {})
-                    if cli_selection == 'smart':
-                        fs_cfg['enabled'] = True
-                        fs_cfg['mode'] = 'smart'
-                    else:
-                        fs_cfg.setdefault('enabled', True)
-                    if args.selection_profile and args.selection_profile != 'balanced':
-                        fs_cfg['profile'] = args.selection_profile
-                    fs_cfg.setdefault(
-                        'output_path', 'models/feature_selection_manifest.json'
-                    )
-                    fs_cfg.setdefault('random_state', 42)
-
-                    selector_config = SelectorConfig.from_config(fs_cfg)
-                    profile_config = ProfileConfig.resolve(
-                        selector_config.profile, config_profile
-                    )
-
-                    selector = SmartFeatureSelector(
-                        config=selector_config, profile=profile_config
-                    )
-                    master_feature_cols = [
-                        c for c in full_df.columns
-                        if c not in selector.targets
-                        and c not in FeatureSelector.EXCLUDE_ALWAYS
-                        and c
-                    ]
-                    # Use the engineer's group_columns mapping (set on
-                    # last_result.group_columns) so the ablator knows which
-                    # columns belong to which group.
-                    group_columns = feature_engineer.get_group_columns()
-                    if not group_columns:
-                        logger.warning(
-                            "Smart feature selection: no group_columns recorded; "
-                            "falling back to a single all-features group"
-                        )
-                        group_columns = {"all": list(master_feature_cols)}
-
-                    manifest = selector.run(
-                        full_df=full_df,
-                        feature_cols=master_feature_cols,
-                        group_columns=group_columns,
-                        targets=preset.targets,
-                    )
-                    feature_selection_manifest_payload = manifest.to_dict()
-                    logger.info(
-                        "Smart feature selection complete: profile=%s targets=%d global=%d",
-                        manifest.profile,
-                        len(manifest.targets),
-                        len(manifest.selected_features_global),
-                    )
+            # In diagnose mode, smart selection is expensive (group ablation +
+            # shadow filtering train per-target models). Skip the heavy work and
+            # emit a noop marker so diagnose stays a fast preflight while still
+            # confirming the stage is wired for real training.
+            if diag_config.enabled:
+                diagnostic_noop(
+                    "feature_selection", diag_config,
+                    reason="skipped in diagnose mode (preset would run smart selection)",
+                )
+                feature_selection_manifest_payload = None
+            else:
+                with diagnostic_stage("feature_selection", diag_config):
+                    current_stage = "smart feature selection"
+                    logger.info("Step 2.5/5: %s", current_stage.title())
                     if console and RICH_AVAILABLE:
                         console.print(
-                            f"  [green]✓[/green] Selected "
-                            f"{len(manifest.selected_features_global)} global features, "
-                            f"{len(manifest.selected_features_by_target)} per-target lists"
+                            "\n[bold cyan]Step 2.5: Smart per-target feature selection...[/bold cyan]"
                         )
-                except Exception as exc:
-                    logger.warning(
-                        "Smart feature selection failed (%s); continuing with the "
-                        "full feature set", exc,
-                    )
-                    if diag_config.enabled:
-                        print(f"{DIAG_PREFIX} WARN feature_selection fallback_to_full_features ({exc})", flush=True)
-                    feature_selection_manifest_payload = None
+                    else:
+                        print("\nStep 2.5: Smart per-target feature selection...")
+
+                    try:
+                        from src.evaluation import (
+                            ProfileConfig,
+                            SelectorConfig,
+                            SmartFeatureSelector,
+                        )
+
+                        # CLI overrides YAML config when explicitly set.
+                        fs_cfg = dict(config_selection_cfg or {})
+                        if cli_selection == 'smart':
+                            fs_cfg['enabled'] = True
+                            fs_cfg['mode'] = 'smart'
+                        else:
+                            fs_cfg.setdefault('enabled', True)
+                        # Resolve the selection profile: explicit CLI flag wins,
+                        # then the preset's profile, then the global config, then
+                        # the argparse default ('balanced').
+                        if args.selection_profile and args.selection_profile != 'balanced':
+                            fs_cfg['profile'] = args.selection_profile
+                        elif preset.feature_selection_profile:
+                            fs_cfg.setdefault('profile', preset.feature_selection_profile)
+                        elif preset_selection_cfg.get('profile'):
+                            fs_cfg.setdefault('profile', preset_selection_cfg['profile'])
+                        fs_cfg.setdefault(
+                            'output_path', 'models/feature_selection_manifest.json'
+                        )
+                        fs_cfg.setdefault('random_state', 42)
+
+                        selector_config = SelectorConfig.from_config(fs_cfg)
+                        profile_config = ProfileConfig.resolve(
+                            selector_config.profile, config_profile
+                        )
+
+                        selector = SmartFeatureSelector(
+                            config=selector_config, profile=profile_config
+                        )
+                        master_feature_cols = [
+                            c for c in full_df.columns
+                            if c not in preset.targets
+                            and c not in FeatureSelector.EXCLUDE_ALWAYS
+                            and c not in FeatureSelector.CURRENT_GAME_TEAM_OUTCOMES
+                            and c
+                        ]
+                        # Use the engineer's group_columns mapping (set on
+                        # last_result.group_columns) so the ablator knows which
+                        # columns belong to which group.
+                        group_columns = feature_engineer.get_group_columns()
+                        if not group_columns:
+                            logger.warning(
+                                "Smart feature selection: no group_columns recorded; "
+                                "falling back to a single all-features group"
+                            )
+                            group_columns = {"all": list(master_feature_cols)}
+
+                        # Feature selection may inspect the training history
+                        # and inner validation rows, but never the outer test
+                        # window. The pipeline later records that cutoff in
+                        # the model bundle metadata.
+                        selection_cutoff = args.test_split_date or getattr(
+                            getattr(runtime_config, "training", None),
+                            "test_split_date",
+                            "2025-01-01",
+                        )
+                        selection_df = full_df[
+                            pd.to_datetime(full_df["GAME_DATE"], errors="coerce")
+                            < pd.Timestamp(selection_cutoff)
+                        ].copy()
+                        if selection_df.empty:
+                            raise ValueError(
+                                "Smart feature selection has no rows before the outer test cutoff"
+                            )
+                        manifest = selector.run(
+                            full_df=selection_df,
+                            feature_cols=master_feature_cols,
+                            group_columns=group_columns,
+                            targets=preset.targets,
+                        )
+                        feature_selection_manifest_payload = manifest.to_dict()
+                        logger.info(
+                            "Smart feature selection complete: profile=%s targets=%d global=%d",
+                            manifest.profile,
+                            len(manifest.targets),
+                            len(manifest.selected_features_global),
+                        )
+                        if console and RICH_AVAILABLE:
+                            console.print(
+                                f"  [green]✓[/green] Selected "
+                                f"{len(manifest.selected_features_global)} global features, "
+                                f"{len(manifest.selected_features_by_target)} per-target lists"
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Smart feature selection failed (%s); continuing with the "
+                            "full feature set", exc,
+                        )
+                        if diag_config.enabled:
+                            print(f"{DIAG_PREFIX} WARN feature_selection fallback_to_full_features ({exc})", flush=True)
+                        feature_selection_manifest_payload = None
         else:
             diagnostic_noop("feature_selection", diag_config, reason="disabled")
 
@@ -631,6 +686,8 @@ Examples:
             pipeline.model_config.setdefault("metadata", {})
             pipeline.model_config["metadata"]["training_preset"] = preset.name
             pipeline.model_config["metadata"]["recent_seasons"] = preset.recent_seasons
+            if args.test_split_date:
+                pipeline.model_config.setdefault("training", {})["test_split_date"] = args.test_split_date
 
             # Apply the smart feature selection manifest (if any) so the
             # per-target CatBoost models use the selected feature subsets.
@@ -676,7 +733,7 @@ Examples:
         else:
             print(f"\nStep 5: Training models (this may take a while)...")
 
-        results = pipeline.train(fit_df, val_df)
+        results = pipeline.train(fit_df, val_df, test_df)
         validate_runtime_artifacts(
             ArtifactContract(
                 models_dir=Path(models_dir),

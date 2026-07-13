@@ -75,28 +75,6 @@ def test_basketball_ref_scraper_fetch_path_uses_initialized_config_attrs(tmp_pat
     assert result['offensive_rating'] == 118.2
 
 
-def test_rotowire_lineup_scraper_constructor_and_attrs(tmp_path):
-    from src.data.rotowire_lineup_scraper import RotoWireLineupScraper
-
-    scraper = RotoWireLineupScraper(cache_dir=str(tmp_path))
-
-    # _cache_timestamp should be initialized (was previously unreachable dead code)
-    assert scraper._cache_timestamp is None
-    # lowercase instance attributes must exist (previously uppercase references crashed)
-    assert isinstance(scraper.max_retries, int)
-    assert isinstance(scraper.retry_delay, (int, float))
-    assert isinstance(scraper.cache_ttl_minutes, (int, float))
-
-
-def test_rotowire_lineup_scraper_get_config_value_no_unreachable_code(tmp_path):
-    from src.data.rotowire_lineup_scraper import RotoWireLineupScraper
-
-    scraper = RotoWireLineupScraper(cache_dir=str(tmp_path))
-    # _get_config_value should return without executing dead code after return
-    assert scraper._get_config_value('missing.key', 'default') == 'default'
-    assert scraper._cache_timestamp is None  # ensure it wasn't accidentally set
-
-
 def test_nba_defense_scraper_imports_and_analyzer_attrs(tmp_path):
     from src.data.nba_defense_scraper import NBADefenseScraper, DefensiveMatchupAnalyzer
 

@@ -13,7 +13,30 @@ import pandas as pd
 
 
 CANONICAL_TARGETS: Tuple[str, ...] = ("PTS", "REB", "AST", "STL", "BLK", "TOV")
-ALL_FEATURE_GROUPS: Tuple[str, ...] = (
+
+
+def _registry_group_names() -> Tuple[str, ...]:
+    """Return the registry-derived canonical group-name set.
+
+    Imported lazily to avoid a circular import (the registry's builtin factory
+    imports the feature-group classes via ``features/__init__``, which does not
+    import presets, so this is safe at call time). Falls back to a static list
+    only if the registry is unavailable during very early bootstrap.
+    """
+    try:
+        from src.preprocessing.features.registry import all_feature_groups
+
+        names = all_feature_groups()
+        if names:
+            return names
+    except Exception:  # pragma: no cover - defensive bootstrap path
+        pass
+    return _FALLBACK_FEATURE_GROUPS
+
+
+# Static fallback kept in sync with the built-in groups so preset resolution
+# still works if the registry cannot be imported for any reason.
+_FALLBACK_FEATURE_GROUPS: Tuple[str, ...] = (
     "rolling",
     "efficiency",
     "momentum",
@@ -33,10 +56,20 @@ ALL_FEATURE_GROUPS: Tuple[str, ...] = (
     "defense_position",
     "target_encoding",
     "league_rank",
+    "injury_risk",
+    "aging_curve",
+    "kan_aging",
+    "skill_development",
     "season_phase",
     "team_motivation",
     "postseason_context",
 )
+
+# Public alias: the canonical set of feature-group names. Derived from the
+# registry so it can never drift out of sync with the groups that are
+# actually registered (the original hardcoded tuple was missing four
+# lifecycle groups that config/default.yaml enabled).
+ALL_FEATURE_GROUPS: Tuple[str, ...] = _registry_group_names()
 
 
 @dataclass(frozen=True)
@@ -112,6 +145,36 @@ BUILTIN_TRAINING_PRESETS: Dict[str, TrainingPreset] = {
             "archetype",
         ),
     ),
+    "laptop_quality": TrainingPreset(
+        name="laptop_quality",
+        description=(
+            "Laptop-friendly quality preset between small and full training: "
+            "CatBoost-first with smart feature selection, no Transformer, and a "
+            "mid-size feature-group set."
+        ),
+        default_mode="standard",
+        default_model_size="S",
+        transformer_enabled=False,
+        recent_seasons=3,
+        rolling_windows=(3, 5, 10, 20),
+        enable_groups=(
+            "rolling",
+            "efficiency",
+            "momentum",
+            "context",
+            "fatigue",
+            "minutes_confidence",
+            "rest_density",
+            "matchup",
+            "opponent_strength",
+            "pace",
+            "team_role",
+            "recency_form",
+            "archetype",
+        ),
+        feature_selection={"enabled": True, "profile": "balanced"},
+        feature_selection_profile="balanced",
+    ),
 }
 
 
@@ -125,6 +188,23 @@ def _coerce_sequence(values: Optional[Iterable[Any]], *, item_type: type) -> Tup
         else:
             coerced.append(str(value))
     return tuple(coerced)
+
+
+def _resolve_enable_groups(values: Optional[Iterable[Any]]) -> Tuple[str, ...]:
+    """Resolve an enable_groups list, expanding the ``"all"`` sentinel.
+
+    ``enable_groups: ["all"]`` resolves to the registry's canonical set of
+    every available feature-group name (built-ins + enabled extensions), so a
+    preset never has to hand-maintain the full list and cannot drift out of
+    sync as new groups are registered.
+    """
+    if values is None:
+        return ()
+    items = [str(v) for v in values]
+    if "all" in items:
+        # Registry truth: every group including extensions.
+        return _registry_group_names()
+    return tuple(items)
 
 
 def _merge_preset_definition(
@@ -157,9 +237,8 @@ def _merge_preset_definition(
             feature_engineer.get("rolling_windows", base.rolling_windows),
             item_type=int,
         ),
-        enable_groups=_coerce_sequence(
+        enable_groups=_resolve_enable_groups(
             feature_engineer.get("enable_groups", base.enable_groups),
-            item_type=str,
         ),
         disable_groups=_coerce_sequence(
             feature_engineer.get("disable_groups", base.disable_groups),
@@ -201,28 +280,34 @@ def apply_recent_history_window(
 ) -> pd.DataFrame:
     """Keep only the most recent ``recent_seasons`` seasons when possible.
 
-    The training data already carries ``SEASON_ID`` in the current loader path.
-    If that field is missing, this helper returns the input unchanged rather than
-    inventing a brittle date-based heuristic.
+    ``SEASON_ID`` is the canonical internal name, while NBA exports commonly
+    provide the equivalent ``SEASON_YEAR`` (for example, ``"2024-25"``).
+    Accept either representation so preset history limits remain effective
+    across both data formats. If neither is available, return the input
+    unchanged rather than inventing a brittle date-based heuristic.
     """
     if df is None or df.empty or recent_seasons is None:
         return df
     if recent_seasons <= 0:
         raise ValueError("recent_seasons must be positive when provided")
-    if season_column not in df.columns:
-        return df.copy()
+    resolved_season_column = season_column
+    if resolved_season_column not in df.columns:
+        if season_column == "SEASON_ID" and "SEASON_YEAR" in df.columns:
+            resolved_season_column = "SEASON_YEAR"
+        else:
+            return df.copy()
 
     ordered = df
     if date_column in df.columns:
         ordered = df.sort_values(date_column, kind="mergesort")
 
-    season_series = ordered[season_column].astype(str)
+    season_series = ordered[resolved_season_column].astype(str)
     unique_seasons = list(dict.fromkeys(season_series.tolist()))
     if len(unique_seasons) <= recent_seasons:
         return df.copy()
 
     keep = set(unique_seasons[-recent_seasons:])
-    filtered = df[df[season_column].astype(str).isin(keep)].copy()
+    filtered = df[df[resolved_season_column].astype(str).isin(keep)].copy()
     if date_column in filtered.columns:
         filtered = filtered.sort_values(date_column, kind="mergesort")
     return filtered

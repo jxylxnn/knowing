@@ -86,13 +86,6 @@ class NeuralNetConfig:
 
 
 @dataclass
-class LSTMConfig(NeuralNetConfig):
-    """LSTM-specific configuration."""
-    sequence_length: int = 5
-    bidirectional: bool = True
-
-
-@dataclass
 class TransformerConfig(NeuralNetConfig):
     """Transformer-specific configuration."""
     d_model: int = 128
@@ -100,15 +93,6 @@ class TransformerConfig(NeuralNetConfig):
     num_encoder_layers: int = 3
     dim_feedforward: int = 512
     max_seq_length: int = 10
-
-
-@dataclass
-class GNNConfig(NeuralNetConfig):
-    """GNN-specific configuration."""
-    num_node_features: int = 64
-    num_edge_features: int = 16
-    num_graph_layers: int = 3
-    use_attention: bool = True
 
 
 @dataclass
@@ -423,14 +407,21 @@ class Config:
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     league_averages: LeagueAveragesConfig = field(default_factory=LeagueAveragesConfig)
     catboost: CatBoostConfig = field(default_factory=CatBoostConfig)
-    lstm: LSTMConfig = field(default_factory=LSTMConfig)
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
-    gnn: GNNConfig = field(default_factory=GNNConfig)
     ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
     self_optimization: SelfOptimizationConfig = field(default_factory=SelfOptimizationConfig)
     lifecycle: Dict[str, Any] = field(default_factory=dict)
     feature_selection: Dict[str, Any] = field(default_factory=dict)
     feature_selection_profiles: Dict[str, Any] = field(default_factory=dict)
+    reasoning: Dict[str, Any] = field(default_factory=dict)
+    continual_learning: Dict[str, Any] = field(default_factory=dict)
+    # Explicit training sample-weight policy. Kept as a mapping so policy
+    # evolution does not require a breaking root-config dataclass change.
+    weighting: Dict[str, Any] = field(default_factory=dict)
+    # Pluggable data-source extensions. Maps {scraper_name: {"enabled": bool, ...}}.
+    # See src/data/base_scraper.py and the run_extension_scrapers hook in
+    # update_data.py. Empty by default so existing behaviour is unchanged.
+    data_sources: Dict[str, Any] = field(default_factory=dict)
     
     @classmethod
     def from_yaml(cls, path: Path) -> "Config":
@@ -482,12 +473,8 @@ class Config:
             config.league_averages = LeagueAveragesConfig(**data['league_averages'])
         if 'catboost' in data:
             config.catboost = CatBoostConfig(**data['catboost'])
-        if 'lstm' in data:
-            config.lstm = LSTMConfig(**data['lstm'])
         if 'transformer' in data:
             config.transformer = TransformerConfig(**data['transformer'])
-        if 'gnn' in data:
-            config.gnn = GNNConfig(**data['gnn'])
         if 'ensemble' in data:
             config.ensemble = EnsembleConfig(**data['ensemble'])
         if 'self_optimization' in data:
@@ -498,6 +485,14 @@ class Config:
             config.feature_selection = data['feature_selection']
         if 'feature_selection_profiles' in data:
             config.feature_selection_profiles = data['feature_selection_profiles']
+        if 'reasoning' in data:
+            config.reasoning = data['reasoning']
+        if 'continual_learning' in data:
+            config.continual_learning = data['continual_learning']
+        if 'weighting' in data:
+            config.weighting = data['weighting']
+        if 'data_sources' in data:
+            config.data_sources = data['data_sources']
 
         return config
     
@@ -535,9 +530,7 @@ class Config:
         """Get configuration for a specific model."""
         config_map = {
             'catboost': self.catboost,
-            'lstm': self.lstm,
             'transformer': self.transformer,
-            'gnn': self.gnn,
         }
         return config_map.get(model_name.lower())
 

@@ -21,6 +21,13 @@ from src.evaluation.smart_feature_selector import (
     TargetSelection,
     load_manifest,
 )
+from src.evaluation.continual_learning import (
+    PromotionDecision,
+    PromotionPolicy,
+    evaluate_promotion,
+    paired_bootstrap_improvement,
+)
+from src.evaluation.prediction_ledger import PredictionLedger
 
 __all__ = [
     # Backtest
@@ -40,4 +47,9 @@ __all__ = [
     "SmartFeatureSelector",
     "TargetSelection",
     "load_manifest",
+    "PromotionDecision",
+    "PromotionPolicy",
+    "evaluate_promotion",
+    "paired_bootstrap_improvement",
+    "PredictionLedger",
 ]

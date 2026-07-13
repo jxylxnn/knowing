@@ -98,7 +98,7 @@ class ModelMetadata:
         
         Args:
             name: Model name
-            model_type: Type of model (e.g., 'catboost', 'lstm')
+            model_type: Type of model (for example, 'catboost' or 'transformer')
             version: Semantic version string
             created_at: ISO format timestamp
             training_params: Hyperparameters used for training

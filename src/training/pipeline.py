@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import joblib
+import json
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
@@ -48,6 +49,8 @@ from src.training.catboost_trainer import (
 )
 from src.training.experiment import ExperimentTracker
 from src.training.trainer import TrainResult
+from src.training.weighting import TrainingWeightPolicy
+from src.models.versioning import ModelBundleManifest
 from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
@@ -122,8 +125,15 @@ class TrainingPipeline:
         self.data_dir = Path(data_dir)
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        if (self.models_dir / ModelBundleManifest.FILE_NAME).exists():
+            raise RuntimeError(
+                "Model directory already contains an immutable bundle manifest; "
+                "train into a new versioned candidate directory"
+            )
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.weight_policy = TrainingWeightPolicy.from_config(self.config)
+        self.weight_policy_evaluation = None
 
         if mode not in self.TRAINING_MODES:
             raise ValueError(
@@ -268,7 +278,9 @@ class TrainingPipeline:
 
         self.feature_schema = self.feature_selector.fit(fit_df)
         self.feature_cols = self.feature_schema.feature_cols
-        self.cat_features = list(self.feature_schema.categorical_cols)
+        self.cat_features = [
+            c for c in self.feature_schema.categorical_cols if c in self.feature_cols
+        ]
 
         if not self.feature_cols:
             raise ValueError(
@@ -393,7 +405,9 @@ class TrainingPipeline:
             if self.feature_schema is None:
                 self.feature_schema = self.feature_selector.fit(fit_df)
             self.feature_cols = self.feature_schema.feature_cols
-            self.cat_features = list(self.feature_schema.categorical_cols)
+            self.cat_features = [
+                c for c in self.feature_schema.categorical_cols if c in self.feature_cols
+            ]
             if not self.feature_cols:
                 raise ValueError(
                     "No feature columns available for CatBoost training. "
@@ -401,6 +415,7 @@ class TrainingPipeline:
                 )
 
         filtered_frames: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        sample_weights: Dict[str, np.ndarray] = {}
         results: Dict[str, TrainResult] = {}
         for target in self.TARGETS:
             # Guard against targets whose column is entirely missing from the data.
@@ -487,6 +502,7 @@ class TrainingPipeline:
                 )
                 continue
             filtered_frames[target] = (fit_target, val_target)
+            sample_weights[target] = self.weight_policy.calculate(fit_target)
 
         if self.parallel and len(self.TARGETS) > 1:
             results_list = Parallel(n_jobs=max_workers, prefer="threads")(
@@ -498,7 +514,7 @@ class TrainingPipeline:
                     y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
-                    sample_weight=None,
+                    sample_weight=sample_weights.get(target),
                     use_gpu=self.use_gpu,
                 )
                 for target in self.TARGETS
@@ -521,7 +537,7 @@ class TrainingPipeline:
                     y_val=filtered_frames[target][1][target],
                     config=cat_config,
                     cat_features=self.cat_features,
-                    sample_weight=None,
+                    sample_weight=sample_weights.get(target),
                     use_gpu=self.use_gpu,
                 )
                 results[target] = result
@@ -1017,6 +1033,40 @@ class TrainingPipeline:
             except Exception as exc:
                 logger.debug("WeightStore save skipped: %s", exc)
 
+    def _save_weight_policy_evaluation(
+        self,
+        fit_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        results: Dict[str, TrainResult],
+    ) -> None:
+        """Persist the policy identity and its validation scorecard.
+
+        The scorecard is deliberately separate from model metadata so a
+        backtest or promotion process can compare policy versions without
+        deserializing model artifacts.
+        """
+        validation_metrics = {
+            target: result.metrics
+            for target, result in results.items()
+            if result is not None
+        }
+        evaluation = self.weight_policy.evaluate(
+            validation_metrics,
+            train_frame=fit_df,
+        )
+        self.weight_policy_evaluation = evaluation
+        path = self.models_dir / "weight_policy_evaluation.json"
+        path.write_text(
+            json.dumps(evaluation.to_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        logger.info(
+            "Scored training weight policy %s (%s) on %d validation rows",
+            self.weight_policy.policy_id,
+            self.weight_policy.policy_hash,
+            len(val_df),
+        )
+
     def _save_model_stack_metadata(self) -> None:
         transformer_enabled = bool(self.model_config["transformer"]["enabled"])
         metadata = {
@@ -1031,6 +1081,12 @@ class TrainingPipeline:
             metadata["feature_groups"] = list(feature_groups)
         blend_method = self.blend_weights.get("_method", "inverse_mae")
         metadata["blend_method"] = blend_method
+        metadata["weight_policy"] = self.weight_policy.to_dict()
+        metadata["weight_policy_evaluation"] = "weight_policy_evaluation.json"
+        if getattr(self, "_training_data_cutoff", None) is not None:
+            metadata["training_data_cutoff"] = self._training_data_cutoff
+        if getattr(self, "outer_test_scorecard", None) is not None:
+            metadata["outer_test_scorecard"] = "outer_test_scorecard.json"
 
         # Smart feature selection contract — when a manifest is loaded we
         # record both the per-target selected feature lists and the
@@ -1056,6 +1112,21 @@ class TrainingPipeline:
             metadata["feature_selection_enabled"] = False
 
         joblib.dump(metadata, self.models_dir / "model_stack_metadata.pkl")
+        try:
+            bundle = ModelBundleManifest.from_directory(
+                self.models_dir,
+                data_cutoff=getattr(self, "_training_data_cutoff", None),
+                config=self.model_config,
+                metrics={
+                    "validation": getattr(self, "training_metrics", {}),
+                    "outer_test": getattr(self, "outer_test_scorecard", {}),
+                },
+                weighting_policy=self.weight_policy.to_dict(),
+            )
+            bundle.write(self.models_dir)
+            logger.info("Saved immutable model bundle manifest %s", bundle.bundle_id)
+        except Exception as exc:
+            logger.warning("Could not save model bundle manifest: %s", exc)
         logger.info(
             "Saved model stack metadata (transformer=%s, model_count=%s, preset=%s, "
             "smart_selection=%s)",
@@ -1065,12 +1136,59 @@ class TrainingPipeline:
             metadata.get("feature_selection_enabled", False),
         )
 
+    def evaluate_test_window(self, test_df: pd.DataFrame) -> Dict[str, Any]:
+        """Score the untouched outer test window after model fitting."""
+        if test_df is None or test_df.empty:
+            raise ValueError("Outer test window is empty")
+        from src.evaluation.metrics import compute_target_metrics
+
+        clean = self._clean_data(test_df.copy())
+        per_target: Dict[str, Any] = {}
+        for target in self.TARGETS:
+            if target not in clean.columns or target not in self.models:
+                continue
+            labeled = clean[clean[target].notna()].copy()
+            if labeled.empty:
+                continue
+            feature_cols = self._feature_cols_for_target(target)
+            model = self.models[target]
+            try:
+                predictions = np.asarray(
+                    model.predict(labeled[feature_cols]), dtype=float
+                ).reshape(-1)
+                actuals = pd.to_numeric(labeled[target], errors="coerce").to_numpy()
+                metrics = compute_target_metrics(target, actuals, predictions)
+                per_target[target] = metrics.to_dict()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Outer test evaluation failed for target {target}"
+                ) from exc
+
+        scorecard = {
+            "evaluation_status": "final_outer_test_scored",
+            "window_start": pd.to_datetime(test_df["GAME_DATE"]).min().date().isoformat(),
+            "window_end": pd.to_datetime(test_df["GAME_DATE"]).max().date().isoformat(),
+            "num_rows": int(len(test_df)),
+            "per_target": per_target,
+        }
+        self.outer_test_scorecard = scorecard
+        (self.models_dir / "outer_test_scorecard.json").write_text(
+            json.dumps(scorecard, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        logger.info(
+            "Scored untouched outer test window %s → %s (%d rows)",
+            scorecard["window_start"], scorecard["window_end"], len(test_df),
+        )
+        return scorecard
+
     def train(
         self,
         fit_df: pd.DataFrame,
         val_df: pd.DataFrame,
+        test_df: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
-        """Train all active models."""
+        """Train all active models and optionally score the outer test window."""
         if fit_df is None or fit_df.empty:
             raise ValueError("Training DataFrame is None or empty")
         if len(fit_df) < 1000:
@@ -1092,7 +1210,9 @@ class TrainingPipeline:
             else:
                 self.feature_schema = self.feature_selector.fit(fit_df)
             self.feature_cols = self.feature_schema.feature_cols
-            self.cat_features = list(self.feature_schema.categorical_cols)
+            self.cat_features = [
+                c for c in self.feature_schema.categorical_cols if c in self.feature_cols
+            ]
 
         required_cols = ["PLAYER_ID", "GAME_DATE"] + self.TARGETS
         missing_cols = [c for c in required_cols if c not in fit_df.columns]
@@ -1147,7 +1267,20 @@ class TrainingPipeline:
                 catboost_results, transformer_result
             )
 
+        self.training_metrics = {
+            target: result.metrics
+            for target, result in catboost_results.items()
+            if result is not None
+        }
+        if "GAME_DATE" in fit_df.columns:
+            self._training_data_cutoff = pd.to_datetime(
+                fit_df["GAME_DATE"], errors="coerce"
+            ).max().date().isoformat()
+
         self._save_blend_weights()
+        self._save_weight_policy_evaluation(fit_df, val_df, catboost_results)
+        if test_df is not None:
+            self.evaluate_test_window(test_df)
         self._save_feature_cols()
         self._save_model_stack_metadata()
         self._validate_runtime_artifact_contract(
@@ -1187,7 +1320,9 @@ class TrainingPipeline:
         if schema is not None:
             self.feature_schema = schema
             self.feature_cols = schema.feature_cols
-            self.cat_features = list(schema.categorical_cols)
+            self.cat_features = [
+                c for c in schema.categorical_cols if c in self.feature_cols
+            ]
             logger.info("Loaded %s feature columns", len(self.feature_cols))
 
         self.models = {}

@@ -175,9 +175,12 @@ def compute_target_metrics(
     ss_tot = float(np.sum((actuals - np.mean(actuals)) ** 2))
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
-    # MAPE (with epsilon guard)
+    # NBA box-score stats commonly contain zeroes. Conventional MAPE is
+    # undefined at zero and an epsilon denominator turns ordinary misses into
+    # meaningless multi-million-percent errors. Floor the denominator at one
+    # stat unit, matching the trainer's reporting convention.
     eps = 1e-8
-    mape = float(np.mean(abs_residuals / (np.abs(actuals) + eps)))
+    mape = float(np.mean(abs_residuals / np.maximum(np.abs(actuals), 1.0)))
 
     # Bias
     mean_error = float(np.mean(residuals))

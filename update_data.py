@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 from nba_api.stats.endpoints import playergamelogs, teamgamelogs
@@ -607,6 +607,59 @@ def log_injury_snapshot(data_dir: str) -> None:
         logger.warning(f"Injury history logging failed (non-fatal): {e}")
 
 
+def run_extension_scrapers(data_dir: str, config: Optional[Dict[str, object]] = None) -> None:
+    """Run any pluggable data-source extensions enabled in config.
+
+    Extensions are discovered via :class:`ScraperRegistry` (modules under
+    ``src/data/extensions/``). Each enabled scraper's ``fetch`` result is
+    written to ``data_dir``; per-scraper failures are isolated so one broken
+    extension never aborts the core data update. Scrapers are opt-in: with no
+    ``data_sources`` config block, nothing runs and behaviour is unchanged.
+
+    Args:
+        data_dir: Root data directory (e.g. ``data``).
+        config: Parsed ``data_sources`` config block. ``None`` disables all
+            extensions (safe default).
+    """
+    try:
+        from src.data.base_scraper import get_scraper_registry, CORE_PROTECTED_FILES
+
+        registry = get_scraper_registry()
+        enabled = registry.build_enabled(config)
+    except Exception as e:
+        logger.warning(f"Extension scraper registry unavailable (non-fatal): {e}")
+        return
+
+    if not enabled:
+        return
+
+    logger.info(f"Running {len(enabled)} data-source extension(s)...")
+    for name, scraper in enabled:
+        try:
+            ok, collisions = registry.validate_outputs(scraper)
+            if not ok:
+                logger.error(
+                    "Extension scraper %s declared protected core outputs %s; skipping.",
+                    name, collisions,
+                )
+                continue
+            outputs = scraper.fetch(config)
+            if not outputs:
+                logger.info(f"Extension {name}: no data to write this run.")
+                continue
+            for rel_path, df in outputs.items():
+                rel_path = os.path.basename(rel_path)
+                if rel_path in CORE_PROTECTED_FILES:
+                    logger.error(f"Extension {name}: refusing to overwrite core file {rel_path}")
+                    continue
+                out_path = os.path.join(data_dir, rel_path)
+                os.makedirs(os.path.dirname(out_path) or data_dir, exist_ok=True)
+                df.to_csv(out_path, index=False)
+                logger.info(f"Extension {name}: wrote {len(df)} rows -> {out_path}")
+        except Exception as e:
+            logger.warning(f"Extension scraper {name} failed (non-fatal): {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Update NBA data from NBA.com',
@@ -724,6 +777,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             # Log current injuries to persistent history
             log_injury_snapshot(data_dir)
+            # Run any pluggable data-source extensions enabled in config.
+            _run_configured_extensions(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Incremental update complete!")
             logger.info(f"New player records added: {new_players}")
@@ -749,6 +804,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             # Log current injuries to persistent history
             log_injury_snapshot(data_dir)
+            # Run any pluggable data-source extensions enabled in config.
+            _run_configured_extensions(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Data update complete!")
             logger.info(f"Total player records: {len(existing_players)}")
@@ -757,6 +814,16 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
         else:
             logger.error("No data was fetched. Please check your connection.")
             sys.exit(1)
+
+
+def _run_configured_extensions(data_dir: str) -> None:
+    """Load the data_sources config block and run enabled extension scrapers."""
+    try:
+        from src.config.config import get_config
+        config = get_config()
+        run_extension_scrapers(data_dir, getattr(config, "data_sources", None))
+    except Exception as e:
+        logger.warning(f"Extension scrapers skipped (non-fatal): {e}")
 
 
 if __name__ == "__main__":

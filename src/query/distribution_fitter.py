@@ -2,7 +2,7 @@
 
 Moves from point-estimates (Mean) to full distribution parameters
 (Mean, Std, Skew, Zero-Prob) using already-trained quantile models,
-without needing the Nexus model or its Copula Head.
+without relying on an additional joint distribution model.
 """
 
 from __future__ import annotations

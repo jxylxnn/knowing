@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import logging
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -99,6 +99,21 @@ class FeatureDiagnostics:
 
 class FeatureGroup(ABC):
     """Base class for a single-purpose feature group."""
+
+    # Leak-safe column prefixes / keywords this group emits. Built-in groups
+    # are mapped in ``registry.BUILTIN_SAFE_PREFIXES``; extension groups
+    # declare theirs here so the FeatureSelector never silently drops their
+    # features. An empty tuple (the default) means the group relies on the
+    # shared keyword set or safe-exact match.
+    feature_prefixes: Tuple[str, ...] = ()
+    feature_keywords: Tuple[str, ...] = ()
+
+    # Whether this group's ``create`` is safe to run on the GPU (cuDF) path.
+    # Built-in groups are handled explicitly by FeatureEngineerGPU; extension
+    # groups default to ``False`` and are always run on the CPU pandas path,
+    # which is the safest default for arbitrary new feature logic. An
+    # extension that is cuDF-compatible may opt in by setting this True.
+    gpu_compatible: bool = False
 
     @property
     @abstractmethod

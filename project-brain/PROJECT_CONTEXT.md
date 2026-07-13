@@ -18,6 +18,7 @@
   - `clear_cache.py`
   - `check_contracts.py` (NEW — 2026-06-04) — standalone artifact-contract validator; also wired into `train.py` and `simulate_season.py` startup
   - `train.py --feature-selection smart --selection-profile {fast,balanced,max_accuracy}` (NEW — per-target feature selection)
+  - `monitor_residual_corrections.py` (NEW — 2026-06-18) — CLI for residual correction monitoring; produces HELPING/NEUTRAL/HURTING status per stat under `reports/residual_monitoring/`
 
 ## What The Project Is
 
@@ -168,7 +169,24 @@ Not supported by repo evidence:
 - Supports `--dry-run` to preview current multipliers without optimizing.
 - Risk level: low. Independent of training artifacts, operates on raw CSVs.
 
-### 9. Run Smart Per-Target Feature Selection (NEW)
+### 9.5 Monitor Residual Correction Health (NEW — 2026-06-18)
+
+- Run `python monitor_residual_corrections.py` (or with `--input`, `--output-dir`, `--targets`).
+- The CLI loads prediction history (default: `data/evaluation/prediction_history.parquet`, fallback: `data/evaluation/residual_training.parquet`) and produces a per-stat report under `reports/residual_monitoring/`.
+- For each of the 6 target stats, the report includes:
+  - Base vs corrected MAE, RMSE, bias
+  - MAE improvement percentage and hit/harm/neutral rates
+  - Data-quality breakdown (FULL, DEGRADED_FALLBACK, DEGRADED_MISSING)
+  - Confidence breakdown (HIGH, MEDIUM, LOW, NO_EDGE)
+  - Rolling-window status (last 7/14/30 days + season-to-date)
+  - Status label: HELPING / NEUTRAL / HURTING / INSUFFICIENT_DATA
+  - Recommendation: KEEP_ENABLED / DISABLE_CORRECTION / NEUTRAL_REVIEW
+- The report is written to `reports/residual_monitoring/latest_summary.json` (stable filename) plus timestamped JSON and optional CSV.
+- Use `--print-summary` to see a human-readable console version.
+- Thresholds are configurable via `config/default.yaml` → `residual_monitoring:` block (min_rows=500, helping_threshold_pct=1.0, hurting_threshold_pct=-1.0, neutral_band_pct=1.0).
+- Risk level: low. Independent of training — operates on prediction history parquets.
+
+### 10. Run Smart Per-Target Feature Selection (NEW)
 
 - Run `python train.py --feature-selection smart --selection-profile balanced` (or `fast` / `max_accuracy`).
 - Runs `SmartFeatureSelector` between Step 2 (feature engineering) and Step 3 (training).

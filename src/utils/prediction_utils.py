@@ -7,6 +7,7 @@ to reduce code duplication and improve maintainability.
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -252,7 +253,6 @@ class FeatureSelector:
         'TREND',
         'BAYESIAN',
         'PACE',
-        '_TE',
         '_SHARE',
         'ROLE_INDEX',
         'MISSING_',
@@ -291,6 +291,16 @@ class FeatureSelector:
         'GAME_ID', 'GAME_DATE', 'MATCHUP', 'OPPONENT_ID', 'OPPONENT_ABBR',
         'WL', 'SEASON_ID', 'VIDEO_AVAILABLE', 'REST_BUCKET',
     }
+    # DataLoader historically appends same-game team totals with the
+    # ``*_TEAM`` suffix. They are outcomes, not pregame context, and must
+    # never be admitted by a broad prefix/keyword rule.
+    CURRENT_GAME_TEAM_OUTCOMES = frozenset(
+        f"{stat}_TEAM"
+        for stat in (
+            'PTS', 'REB', 'AST', 'FGA', 'FTA', 'OREB', 'DREB', 'TOV',
+            'FGM', 'FTM', 'FG3A', 'FG3M', 'MIN', 'STL', 'BLK',
+        )
+    )
     RAW_BOX_SCORE = {
         'PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'MIN', 'FGA', 'FGM', 'FTA',
         'FTM', 'FG3A', 'FG3M', 'OREB', 'DREB',
@@ -299,13 +309,53 @@ class FeatureSelector:
     def __init__(self, targets: Optional[List[str]] = None):
         self.targets = targets or ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV']
         self.feature_schema: Optional[FeatureSchema] = None
+        # Fold in leak-safe prefixes/keywords declared by feature groups via
+        # the registry (built-ins + any extension groups). This keeps the
+        # historical SAFE_PREFIXES/SAFE_KEYWORDS behaviour while ensuring a
+        # new extension group's features are never silently dropped just
+        # because their column names weren't in the hardcoded lists.
+        self._extend_safe_sets()
+
+    def _extend_safe_sets(self) -> None:
+        """Merge registry-declared prefixes/keywords into the safe sets.
+
+        Done once at construction. Falls back silently if the registry cannot
+        be imported (e.g. during early bootstrap) so the selector stays
+        usable in isolation.
+        """
+        try:
+            from src.preprocessing.features.registry import get_registry
+
+            registry = get_registry()
+            extra_prefixes = registry.safe_prefixes()
+            extra_keywords = registry.safe_keywords()
+        except Exception:  # pragma: no cover - defensive bootstrap path
+            return
+
+        merged_prefixes = tuple(self.SAFE_PREFIXES) + tuple(
+            p for p in extra_prefixes if p not in self.SAFE_PREFIXES
+        )
+        merged_keywords = tuple(self.SAFE_KEYWORDS) + tuple(
+            k for k in extra_keywords if k not in self.SAFE_KEYWORDS
+        )
+        self.SAFE_PREFIXES = merged_prefixes  # type: ignore[assignment]
+        self.SAFE_KEYWORDS = merged_keywords  # type: ignore[assignment]
 
     def _is_numeric(self, series: pd.Series) -> bool:
         return pd.api.types.is_numeric_dtype(series)
 
     def _is_safe_feature(self, col: str) -> bool:
-        if col in self.EXCLUDE_ALWAYS or col in self.targets or col in self.RAW_BOX_SCORE:
+        if (
+            col in self.EXCLUDE_ALWAYS
+            or col in self.CURRENT_GAME_TEAM_OUTCOMES
+            or col in self.targets
+            or col in self.RAW_BOX_SCORE
+        ):
             return False
+        # Target encodings are allowed only for their declared output shape;
+        # a substring such as ``_TE`` must not make arbitrary raw columns safe.
+        if re.fullmatch(r"[A-Z0-9]+_(PLAYER|TEAM)_TE", col):
+            return True
         if col in self.SAFE_EXACT:
             return True
         if col.startswith(self.SAFE_PREFIXES):
@@ -351,6 +401,7 @@ class FeatureSelector:
                 c for c in allowed_features
                 if c in df.columns
                 and c not in self.EXCLUDE_ALWAYS
+                and c not in self.CURRENT_GAME_TEAM_OUTCOMES
                 and c != target
                 and c not in self.targets
                 and self._is_numeric(df[c])
@@ -387,6 +438,21 @@ class FeatureSelector:
         ]
 
         safe_features = [c for c in candidate_cols if self._is_safe_feature(c)]
+
+        # Visibility for the historical silent-drop trap: surface any numeric
+        # engineered column that was discarded because it matched no safe
+        # prefix/keyword/exact rule. This is especially important for newly
+        # added extension feature groups whose authors forgot to declare
+        # ``feature_prefixes``/``feature_keywords``.
+        dropped = [c for c in candidate_cols if c not in safe_features and c not in self.RAW_BOX_SCORE]
+        if dropped:
+            logger.warning(
+                "FeatureSelector dropped %s numeric columns as not leakage-safe "
+                "(first 15: %s). If these belong to a new feature group, declare "
+                "feature_prefixes/feature_keywords on the group so they are kept.",
+                len(dropped),
+                dropped[:15],
+            )
 
         if group_columns:
             ordered: List[str] = []

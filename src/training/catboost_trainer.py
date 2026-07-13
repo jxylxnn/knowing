@@ -114,6 +114,40 @@ class CatBoostProgressCallback:
         self.best_val_loss = float('inf')
         self.best_iteration = 0
         self.training_logger = get_training_logger()
+
+    @staticmethod
+    def _latest_metric(
+        metrics: Any,
+        split: str,
+        fallback: Optional[Any] = None,
+    ) -> float:
+        """Return the latest metric reported by CatBoost for one split.
+
+        Current CatBoost callbacks expose metrics as nested dictionaries under
+        ``info.metrics`` (for example ``learn -> RMSE -> [values]``), while
+        some older versions exposed ``learn_error`` / ``test_error``. Support
+        both shapes so progress output reflects real training loss instead of
+        misleading zeroes.
+        """
+        if isinstance(metrics, dict):
+            split_metrics = metrics.get(split)
+            if split_metrics is None and split == "validation":
+                split_metrics = metrics.get("test")
+            if isinstance(split_metrics, dict):
+                for values in split_metrics.values():
+                    if values is None:
+                        continue
+                    try:
+                        return float(values[-1])
+                    except (IndexError, KeyError, TypeError, ValueError):
+                        continue
+
+        if fallback is not None:
+            try:
+                return float(fallback[-1])
+            except (IndexError, KeyError, TypeError, ValueError):
+                pass
+        return 0.0
         
     def after_iteration(self, info):
         """Called after each iteration."""
@@ -130,13 +164,13 @@ class CatBoostProgressCallback:
             time_per_iter = 0
             eta_seconds = 0
         
-        # Get metrics from info - use getattr for defensive access
-        # CatBoost info object attributes vary by version and context
+        # CatBoost info object attributes vary by version and context.
+        metrics_map = getattr(info, 'metrics', None)
         learn_error = getattr(info, 'learn_error', None)
         test_error = getattr(info, 'test_error', None)
-        
-        train_loss = learn_error[-1] if learn_error and len(learn_error) > 0 else 0
-        val_loss = test_error[-1] if test_error and len(test_error) > 0 else 0
+
+        train_loss = self._latest_metric(metrics_map, 'learn', learn_error)
+        val_loss = self._latest_metric(metrics_map, 'validation', test_error)
         
         # Track best
         if val_loss < self.best_val_loss:

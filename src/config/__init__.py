@@ -12,9 +12,7 @@ from .config import (
     SimulationConfig,
     LoggingConfig,
     CatBoostConfig,
-    LSTMConfig,
     TransformerConfig,
-    GNNConfig,
     EnsembleConfig,
 )
 
@@ -41,9 +39,7 @@ __all__ = [
     'SimulationConfig',
     'LoggingConfig',
     'CatBoostConfig',
-    'LSTMConfig',
     'TransformerConfig',
-    'GNNConfig',
     'EnsembleConfig',
     # Auto-sizing model config
     'detect_hardware',

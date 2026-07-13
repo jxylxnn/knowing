@@ -6,6 +6,7 @@ from datetime import datetime
 from src.query.probability_calculator import ProbabilityCalculator, ProbabilityResult
 from src.query.projection_loader import ProjectionLoader, PlayerProjection
 from src.query.query_parser import QueryParser, ParsedQuery, QueryType
+from src.reasoning import ReasoningEngine
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class InteractiveCLI:
 ║    • Jokic under 12.5 rebounds tonight?                          ║
 ║    • What's Curry's projection?                                  ║
 ║                                                                  ║
-║  Commands: help, players, teams, reload, clear, exit             ║
+║  Commands: help, players, teams, why, reload, clear, exit        ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -53,6 +54,10 @@ QUERY FORMATS
       • compare LeBron and Curry points
       • compare Jokic and Embiid rebounds
 
+  Explain a Projection:
+    why <player> [stat] [vs <opponent>]
+    explain <player> [stat] [vs <opponent>]
+
   Change Settings:
     sims <number> - Change number of simulations (default: 100)
     
@@ -78,6 +83,7 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnov
         self.num_sims = num_sims
         self._simulator = None
         self._running = True
+        self.reasoning_engine = ReasoningEngine()
     
     def run(self):
         self._print_banner()
@@ -119,6 +125,9 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnov
         print(self.BANNER)
     
     def _handle_input(self, user_input: str):
+        if user_input.lower().startswith(("why ", "explain ")):
+            self._handle_reasoning_command(user_input)
+            return
         parsed = self.parser.parse(user_input)
         
         if parsed.query_type == QueryType.EXIT:
@@ -179,6 +188,96 @@ STATS: pts/points, reb/rebounds, ast/assists, stl/steals, blk/blocks, tov/turnov
         if parsed.query_type == QueryType.UNKNOWN:
             print("\n❓ I didn't understand that query.")
             print("  Type 'help' for usage examples.\n")
+
+    def _handle_reasoning_command(self, user_input: str) -> None:
+        """Handle ``why``/``explain`` without changing the query grammar."""
+        words = user_input.split()
+        if len(words) < 2:
+            print("Usage: why <player> [stat] [vs <opponent>]")
+            return
+        body = words[1:]
+        opponent = None
+        lowered = [word.lower() for word in body]
+        if "vs" in lowered:
+            index = lowered.index("vs")
+            if index + 1 < len(body):
+                opponent = body[index + 1]
+            body = body[:index]
+        aliases = {
+            "pts": "pts", "points": "pts", "reb": "reb", "rebounds": "reb",
+            "ast": "ast", "assists": "ast", "stl": "stl", "steals": "stl",
+            "blk": "blk", "blocks": "blk", "tov": "tov", "turnovers": "tov",
+        }
+        stat = aliases.get(body[-1].lower(), None) if body else None
+        if stat:
+            body = body[:-1]
+        player_name = " ".join(body).strip()
+        if not player_name:
+            print("Usage: why <player> [stat] [vs <opponent>]")
+            return
+        report = self.get_projection_reasoning(player_name, stat or "pts", opponent)
+        if report is None:
+            print(f"No cached projection found for {player_name}.")
+            return
+        if isinstance(report, dict):
+            print(self._format_cached_reasoning(report, stat))
+        else:
+            print(self.reasoning_engine.format_concise(report, stat))
+
+    def get_projection_reasoning(
+        self,
+        player_name: str,
+        stat: str = "pts",
+        opponent: Optional[str] = None,
+    ):
+        """Return a sidecar report or a transparent cache-derived report."""
+        projection = self.loader.find_player(player_name=player_name, opponent=opponent)
+        if projection is None:
+            return None
+        cached = self.loader.get_reasoning(projection.player_name, stat=stat, opponent=opponent)
+        if cached is not None:
+            return cached
+        context = self.loader.get_player_context(
+            player_name=projection.player_name,
+            opponent=projection.opponent,
+            stat=stat,
+        )
+        return self.reasoning_engine.build_projection_report(
+            projection.__dict__,
+            context,
+            player_name=projection.player_name,
+            team=projection.team,
+            opponent=projection.opponent,
+            model_version="projection-cache",
+        )
+
+    @staticmethod
+    def _format_cached_reasoning(payload: dict, stat: Optional[str]) -> str:
+        stats = payload.get("stats", {})
+        selected = [str(stat).upper()] if stat else list(stats)
+        lines = [
+            f"Reasoning for {payload.get('player_name', 'player')} ({payload.get('model_version', 'unknown')})"
+        ]
+        for target in selected:
+            item = stats.get(target)
+            if not item:
+                continue
+            lines.append(f"\n{item.get('summary', target)}")
+            supporting = item.get("supporting_evidence", [])
+            opposing = item.get("opposing_evidence", [])
+            if supporting:
+                lines.append("  Supports: " + "; ".join(
+                    f"{x.get('label', 'evidence')} ({float(x.get('contribution', 0)):+.2f})"
+                    for x in supporting
+                ))
+            if opposing:
+                lines.append("  Risks: " + "; ".join(
+                    f"{x.get('label', 'evidence')} ({float(x.get('contribution', 0)):+.2f})"
+                    for x in opposing
+                ))
+            for conflict in item.get("conflicts", []):
+                lines.append(f"  Note: {conflict}")
+        return "\n".join(lines)
     
     def _handle_over_under(self, parsed: ParsedQuery):
         player_name = parsed.player_name

@@ -343,8 +343,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
     tier = _tier_from_score(score)
     spec = SIZE_TIER_SPECS[tier]
 
-    # Keep the legacy shape of the config object, but make the active path
-    # explicit: CatBoost + Transformer.
+    # The active model path is CatBoost + Transformer.
     transformer_cfg = {
         'enabled': True,
         'd_model': spec['transformer']['d_model'],
@@ -367,55 +366,7 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
     }
 
     config = {
-        'lstm': {
-            'enabled': False,
-            'hidden_dim': 64 if tier == 'S' else 128,
-            'num_layers': 1 if tier == 'S' else 2,
-            'bidirectional': tier != 'S',
-            'dropout': 0.2,
-            'batch_size': 128,
-            'epochs': 10,
-            'lr': 1e-3,
-            'warmup_ratio': 0.1,
-            'seq_len': spec['transformer']['seq_len'],
-            'grad_checkpoint': False,
-            'use_compile': False,
-        },
         'transformer': transformer_cfg,
-        'temporal': {
-            'hidden_dim': transformer_cfg['d_model'],
-            'num_heads': transformer_cfg['nhead'],
-            'dropout': transformer_cfg['dropout'],
-            'batch_size': transformer_cfg['batch_size'],
-            'epochs': transformer_cfg['epochs'],
-            'lr': transformer_cfg['lr'],
-            'warmup_ratio': transformer_cfg['warmup_ratio'],
-            'seq_len': transformer_cfg['seq_len'],
-            'use_compile': transformer_cfg['use_compile'],
-        },
-        'nn': {
-            'enabled': False,
-            'hidden_dim': 128,
-            'num_blocks': 2,
-            'dropout': 0.2,
-            'batch_size': 256,
-            'epochs': 20,
-            'lr': 1e-3,
-            'warmup_ratio': 0.05,
-            'label_smoothing': 0.0,
-            'use_compile': False,
-        },
-        'gnn': {
-            'enabled': False,
-            'hidden_dim': 64,
-            'num_layers': 2,
-            'dropout': 0.2,
-            'batch_size': 64,
-            'epochs': 20,
-            'lr': 1e-3,
-            'use_attention': False,
-            'use_compile': False,
-        },
         'catboost': {
             'enabled': True,
             'iterations': spec['catboost']['iterations'],
@@ -442,41 +393,6 @@ def generate_model_config(score: float, vram: float = 0.0) -> Dict[str, Any]:
             'quantile_alpha_high': 0.9,
             'n_temporal_folds': 3 if tier in {'S', 'M'} else 5,
             'use_per_target_tuning': True,
-        },
-        'xgboost': {
-            'enabled': False,
-            'n_estimators': 500,
-            'max_depth': 4,
-            'learning_rate': 0.03,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'colsample_bylevel': 0.8,
-            'reg_alpha': 0.1,
-            'reg_lambda': 1.0,
-            'min_child_weight': 1,
-            'gamma': 0.0,
-            'early_stopping_rounds': 50,
-            'random_state': 42,
-            'n_jobs': -1,
-            'use_gpu': False,
-        },
-        'lightgbm': {
-            'enabled': False,
-            'n_estimators': 500,
-            'max_depth': -1,
-            'learning_rate': 0.05,
-            'num_leaves': 31,
-            'feature_fraction': 0.8,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 1,
-            'min_child_samples': 20,
-            'reg_alpha': 0.1,
-            'reg_lambda': 0.1,
-            'early_stopping_rounds': 50,
-            'random_state': 42,
-            'n_jobs': -1,
-            'use_gpu': False,
-            'verbose': -1,
         },
         'training': {
             'test_split_date': '2025-01-01',
@@ -522,37 +438,23 @@ def _validate_memory(config: Dict[str, Any], vram_gb: float) -> Dict[str, Any]:
     
     Estimates memory usage and scales down hidden dims if needed.
     """
-    # Estimate parameters
-    lstm_h = config['lstm']['hidden_dim']
-    lstm_l = config['lstm']['num_layers']
-    lstm_bi = 2 if config['lstm']['bidirectional'] else 1
-    
+    # Estimate Transformer parameters and activations.
     tx_d = config['transformer']['d_model']
     tx_l = config['transformer']['num_layers']
     tx_ff = config['transformer']['dim_feedforward']
-    
-    nn_h = config['nn']['hidden_dim']
-    nn_b = config['nn']['num_blocks']
-    
-    # Rough parameter counts (params * 4 bytes for float32)
-    # LSTM: 4 * (input*hidden + hidden*hidden + bias) * layers * direction
-    lstm_params = 4 * (lstm_h * lstm_h + lstm_h) * lstm_l * lstm_bi
-    
-    # Transformer: embedding + attention + ff per layer
+
+    # Transformer: embedding + attention + feed-forward layers.
     # Attention: 4 * d^2 per layer (Q,K,V,O projections)
     # FF: 2 * d * ff_dim per layer
     tx_params = tx_l * (4 * tx_d * tx_d + 2 * tx_d * tx_ff)
     
-    # NN: hidden * hidden per block * 2 (fc layers) + some overhead
-    nn_params = nn_b * (nn_h * nn_h * 2 + nn_h * 4)  # rough estimate
-    
     # Total model memory (params * 4 bytes * 2 for gradients + activations overhead)
-    model_mem_gb = (lstm_params + tx_params + nn_params) * 4 * 3 / (1024 ** 3)
-    
+    model_mem_gb = tx_params * 4 * 3 / (1024 ** 3)
+
     # Batch memory (activations)
-    batch_size = config['nn']['batch_size']
-    batch_mem_gb = batch_size * nn_h * 4 / (1024 ** 3)  # rough estimate
-    
+    batch_size = config['transformer']['batch_size']
+    batch_mem_gb = batch_size * tx_d * 4 / (1024 ** 3)
+
     total_estimated = model_mem_gb + batch_mem_gb
     budget = vram_gb * 0.7  # 70% safety margin
     
@@ -563,9 +465,7 @@ def _validate_memory(config: Dict[str, Any], vram_gb: float) -> Dict[str, Any]:
             f"scaling hidden dims by {scale_down:.2f}"
         )
         
-        # Scale down hidden dimensions.
-        config['lstm']['hidden_dim'] = max(32, int(config['lstm']['hidden_dim'] * scale_down))
-
+        # Scale down Transformer dimensions while retaining a valid head size.
         _scaled_d_model = max(32, int(config['transformer']['d_model'] * scale_down))
         nhead = max(1, int(config['transformer']['nhead']))
         config['transformer']['d_model'] = max(nhead, (_scaled_d_model // nhead) * nhead)
@@ -574,16 +474,8 @@ def _validate_memory(config: Dict[str, Any], vram_gb: float) -> Dict[str, Any]:
         config['transformer']['nhead'] = nhead
         config['transformer']['num_encoder_layers'] = config['transformer']['num_layers']
 
-        # Keep the legacy temporal alias synchronized with the transformer.
-        config['temporal']['hidden_dim'] = config['transformer']['d_model']
-        config['temporal']['num_heads'] = nhead
-        
-        # Scale batch sizes
-        config['lstm']['batch_size'] = int(config['lstm']['batch_size'] * scale_down)
+        # Scale the active model batch size.
         config['transformer']['batch_size'] = int(config['transformer']['batch_size'] * scale_down)
-        config['nn']['batch_size'] = int(config['nn']['batch_size'] * scale_down)
-        config['gnn']['batch_size'] = int(config['gnn']['batch_size'] * scale_down)
-        config['temporal']['batch_size'] = int(config['temporal']['batch_size'] * scale_down)
         
         # Add flag that we scaled
         config['metadata']['memory_scaled'] = True
@@ -740,18 +632,9 @@ def print_config_summary(config: Dict[str, Any], hw_info: Dict[str, Any]) -> Non
     lines.extend([
         "",
         f"Generated Config (scale={scale:.2f}):",
-        f"  LSTM:",
-        f"    hidden={config['lstm']['hidden_dim']}, layers={config['lstm']['num_layers']}, "
-        f"bidirectional={config['lstm']['bidirectional']}",
         f"  Transformer:",
         f"    d_model={config['transformer']['d_model']}, heads={config['transformer']['nhead']}, "
         f"layers={config['transformer']['num_layers']}",
-        f"  MultiOutputNN:",
-        f"    hidden={config['nn']['hidden_dim']}, blocks={config['nn']['num_blocks']}",
-        f"  GNN:",
-        f"    hidden={config['gnn']['hidden_dim']}, layers={config['gnn']['num_layers']}",
-        f"  TemporalAttention:",
-        f"    hidden={config['temporal']['hidden_dim']}, heads={config['temporal']['num_heads']}",
         f"  CatBoost:",
         f"    iterations={config['catboost']['iterations']}, depth={config['catboost']['depth']}, "
         f"grow={config['catboost']['grow_policy']}, multi_loss={config['catboost']['use_multi_loss']}, "

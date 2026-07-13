@@ -94,37 +94,56 @@ class FeatureEngineer:
             logger.info("FeatureEngineer running on CPU path.")
 
     def _build_groups(self) -> List[FeatureGroup]:
-        groups: List[FeatureGroup] = [
-            RollingFeatureGroup(windows=self.rolling_windows, target_cols=self.target_cols),
-            EfficiencyFeatureGroup(windows=[5, 10, 20]),
-            MomentumFeatureGroup(target_cols=self.target_cols),
-            ContextualFeatureGroup(),
-            FatigueFeatureGroup(),
-            MinutesConfidenceFeatureGroup(target_cols=self.target_cols),
-            RestGameDensityFeatureGroup(),
-            MatchupFeatureGroup(target_cols=self.target_cols, recent_window=5),
-            OpponentStrengthFeatureGroup(target_cols=self.target_cols),
-            PaceFeatureGroup(),
-            TeamRoleFeatureGroup(),
-            LineupStabilityFeatureGroup(),
-            InjuryAdjustedOpportunityFeatureGroup(),
-            TeammateUsageFeatureGroup(),
-            RecencyFormFeatureGroup(target_cols=self.target_cols),
-            PlayerArchetypeFeatureGroup(),
-            DefensePositionFeatureGroup(),
-            TargetEncodingFeatureGroup(target_cols=self.target_cols, smoothing=20),
-            LeagueRankingFeatureGroup(target_cols=self.target_cols, window=2000, min_periods=500),
-            # Player lifecycle & bio-mechanical feature groups
-            InjuryRiskFeatureGroup(),
-            AgingCurveFeatureGroup(),
-            KANAgingFeatureGroup(),
-            SkillDevelopmentFeatureGroup(),
-            # Season context feature groups
-            SeasonPhaseFeatureGroup(),
-            TeamMotivationFeatureGroup(),
-            PostseasonContextFeatureGroup(),
-        ]
-        return groups
+        # Built-in groups are constructed via the registry factory (which
+        # mirrors the historical list/order so existing feature-column
+        # contracts stay stable) and any discovered extension groups are
+        # appended after. The rolling windows / target cols used by the
+        # built-in factory are kept in sync with this instance below.
+        from src.preprocessing.features.registry import get_registry
+
+        groups = get_registry().build_groups(include_extensions=True)
+
+        # Keep built-in groups that accept rolling windows / target cols in
+        # sync with this FeatureEngineer's configured values. Extension
+        # groups own their own configuration and are left untouched.
+        rolling_groups = {
+            "rolling": lambda g: RollingFeatureGroup(
+                windows=self.rolling_windows, target_cols=self.target_cols
+            ),
+        }
+        windowed_groups = {
+            "efficiency": lambda g: EfficiencyFeatureGroup(windows=[5, 10, 20]),
+        }
+        target_groups = {
+            "momentum": lambda g: MomentumFeatureGroup(target_cols=self.target_cols),
+            "minutes_confidence": lambda g: MinutesConfidenceFeatureGroup(
+                target_cols=self.target_cols
+            ),
+            "matchup": lambda g: MatchupFeatureGroup(
+                target_cols=self.target_cols, recent_window=5
+            ),
+            "opponent_strength": lambda g: OpponentStrengthFeatureGroup(
+                target_cols=self.target_cols
+            ),
+            "recency_form": lambda g: RecencyFormFeatureGroup(target_cols=self.target_cols),
+            "target_encoding": lambda g: TargetEncodingFeatureGroup(
+                target_cols=self.target_cols, smoothing=20
+            ),
+            "league_rank": lambda g: LeagueRankingFeatureGroup(
+                target_cols=self.target_cols, window=2000, min_periods=500
+            ),
+        }
+        rebuilt: List[FeatureGroup] = []
+        for g in groups:
+            if g.name in rolling_groups:
+                rebuilt.append(rolling_groups[g.name](g))
+            elif g.name in windowed_groups:
+                rebuilt.append(windowed_groups[g.name](g))
+            elif g.name in target_groups:
+                rebuilt.append(target_groups[g.name](g))
+            else:
+                rebuilt.append(g)
+        return rebuilt
 
     def _should_run_group(self, group: FeatureGroup) -> bool:
         if self.enable_groups is not None and group.name not in self.enable_groups:

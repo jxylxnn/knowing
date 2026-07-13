@@ -73,9 +73,7 @@ Delivered:
 - Replaced 1800-line god class with modular components.
 - `src/training/pipeline.py` — main orchestrator (50KB).
 - `src/training/catboost_trainer.py` — per-target CatBoost with multi-loss + quantile regression.
-- `src/training/nn_trainer.py` — unified PyTorch trainer (Transformer, optional Nexus).
 - `src/training/presets.py` — preset resolution from config.
-- `src/training/feature_cache.py` — hash-keyed feature/split cache.
 - `src/training/experiment.py` — JSON-based experiment tracking.
 - Parallel training across targets (joblib).
 
@@ -86,7 +84,6 @@ Delivered:
 - `src/query/distribution_fitter.py` — derives distribution params from P10/P50/P90 quantiles.
 - Distribution zoo: empirical bootstrap, gamma, Poisson, NB, ZIP, Normal.
 - `src/query/empirical_covariance.py` — archetype-conditioned 6×6 correlation matrices.
-- `src/training/nexus_loss.py` — CRPS loss for distribution scoring.
 - `optimize_variance.py` — CRPS-driven variance reduction.
 
 ### Zero-Padding Fix (DR-021)
@@ -94,7 +91,6 @@ Not yet applicable — depends on the training pipeline. Deferred.
 
 ## NEXT
 
-- Wire LightGBM / XGBoost into active training pipeline (installed but not wired)
 - Cross-position models (guard/forward/center specific)
 - Player tracking data integration
 - REST API / web dashboard

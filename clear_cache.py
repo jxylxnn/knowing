@@ -20,7 +20,7 @@ def _resolve_path(value: str | None, default: Path) -> Path:
     return path if path.is_absolute() else (PROJECT_ROOT / path)
 
 
-def _collect_targets(root: Path) -> List[Path]:
+def _collect_targets(root: Path, include_models: bool = True) -> List[Path]:
     """Collect generated directories and Python cache folders to remove."""
     targets: Set[Path] = set()
     direct_dirs = [
@@ -28,16 +28,27 @@ def _collect_targets(root: Path) -> List[Path]:
         root / "data" / "cache",
         root / "data" / "sim_cache",
         root / "data" / "sim_results",
-        root / "models",
         root / "experiments",
+        root / "reports",
+        root / "logs",
         root / ".pytest_cache",
     ]
+    if include_models:
+        direct_dirs.append(root / "models")
 
     for path in direct_dirs:
         if path.exists():
             targets.add(path)
 
+    if (root / "debug.log").exists():
+        targets.add(root / "debug.log")
+
     for path in root.rglob("__pycache__"):
+        if _SKIP_DIR_NAMES.intersection(path.parts):
+            continue
+        targets.add(path)
+
+    for path in root.rglob(".DS_Store"):
         if _SKIP_DIR_NAMES.intersection(path.parts):
             continue
         targets.add(path)
@@ -100,6 +111,11 @@ def main() -> int:
         default="experiments",
         help="Override the experiments directory to clean (default: experiments).",
     )
+    parser.add_argument(
+        "--keep-models",
+        action="store_true",
+        help="Preserve trained model artifacts while removing other generated files.",
+    )
 
     args = parser.parse_args()
 
@@ -112,8 +128,17 @@ def main() -> int:
     cache_dir = _resolve_path(args.cache_dir, PROJECT_ROOT / "cache")
     experiments_dir = _resolve_path(args.experiments_dir, PROJECT_ROOT / "experiments")
 
-    targets = _collect_targets(PROJECT_ROOT)
-    for path in [data_dir / "cache", data_dir / "sim_cache", data_dir / "sim_results", models_dir, cache_dir, experiments_dir]:
+    targets = _collect_targets(PROJECT_ROOT, include_models=not args.keep_models)
+    additional_paths = [
+        data_dir / "cache",
+        data_dir / "sim_cache",
+        data_dir / "sim_results",
+        cache_dir,
+        experiments_dir,
+    ]
+    if not args.keep_models:
+        additional_paths.append(models_dir)
+    for path in additional_paths:
         if path.exists() and path not in targets:
             targets.append(path)
 

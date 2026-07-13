@@ -31,6 +31,7 @@ from src.models.error_calibration import ErrorCalibrator
 from src.models.gpu_utils import get_device
 from src.models.minutes_predictor import MinutesPredictor
 from src.models.model_manager import ModelManager
+from src.pipeline.forecast_service import ForecastService
 from src.preprocessing.data_loader import DataLoader
 from src.simulation.archetype import ArchetypeEngine
 from src.simulation.four_factors_engine import FourFactorsEngine
@@ -85,6 +86,7 @@ class GameSimulator(SimCacheMixin):
         self.strict_mode = strict_mode
         simulation_cfg = getattr(self._config, 'simulation', None)
         self.manager = manager
+        self.forecast_service = ForecastService(manager=manager)
         self.players_df = None
         self.games_df = None
 
@@ -310,6 +312,44 @@ class GameSimulator(SimCacheMixin):
     # ------------------------------------------------------------------
     # Roster & projection helpers
     # ------------------------------------------------------------------
+    def _build_scheduled_game_row(
+        self,
+        player_row: pd.Series,
+        *,
+        team: str,
+        opponent: str,
+        is_home: bool,
+        game_date: Optional[Any],
+        rest_info: Optional[Dict[str, Any]],
+    ) -> pd.DataFrame:
+        """Create a synthetic next-game row from completed history.
+
+        The previous implementation passed the latest completed row directly
+        into inference, leaving ``GAME_DATE``, ``GAME_ID``, matchup, and rest
+        fields anchored to an old game.  This row is context-only: actual box
+        score columns are cleared, while the completed rows remain available
+        separately through ``history_df``.
+        """
+        row = player_row.to_frame().T.copy()
+        if game_date is None:
+            scheduled_date = pd.Timestamp(self.all_merged_with_features["GAME_DATE"].max()) + pd.Timedelta(days=1)
+        else:
+            scheduled_date = pd.Timestamp(game_date)
+        scheduled_date = scheduled_date.normalize()
+        row["GAME_DATE"] = scheduled_date
+        row["GAME_ID"] = f"scheduled_{scheduled_date.strftime('%Y%m%d')}_{team}_{opponent}"
+        row["MATCHUP"] = f"{team} vs. {opponent}" if is_home else f"{team} @ {opponent}"
+        row["WL"] = np.nan
+        row["OPPONENT_ABBR"] = opponent
+        row["IS_HOME"] = int(is_home)
+        prior_rest = player_row.get("REST_DAYS", 2)
+        row["REST_DAYS"] = int((rest_info or {}).get("rest_days", prior_rest) or 2)
+        row["IS_B2B"] = int(bool((rest_info or {}).get("is_b2b", False)))
+        for target in self.STAT_NAMES + ["MIN", "FGA", "FGM", "FTA", "FTM", "FG3A", "FG3M", "OREB", "DREB"]:
+            if target in row.columns:
+                row[target] = np.nan
+        return row
+
     def _build_roster_context(self, team, opponent, is_home, injury_probs, lineup_data=None, game_date=None, rest_info=None):
         """Builds full roster context for batch prediction with caching."""
         lineup_key = tuple(sorted((lineup_data or {}).get('starters', []))) if lineup_data else ()
@@ -319,8 +359,12 @@ class GameSimulator(SimCacheMixin):
         if cached_result is not None:
             return cached_result
 
-        max_date = self.all_merged_with_features['GAME_DATE'].max()
-        recent_cutoff = max_date - pd.Timedelta(days=30)
+        scheduled_date = (
+            pd.Timestamp(game_date).normalize()
+            if game_date is not None
+            else pd.Timestamp(self.all_merged_with_features['GAME_DATE'].max()) + pd.Timedelta(days=1)
+        )
+        recent_cutoff = scheduled_date - pd.Timedelta(days=30)
 
         team_players = self.latest_player_stats[self.latest_player_stats['TEAM_ABBREVIATION'] == team]
         recent_players = team_players[(team_players['GAME_DATE'] >= recent_cutoff) & (team_players['MIN'] >= 5)].copy()
@@ -354,8 +398,14 @@ class GameSimulator(SimCacheMixin):
                 continue
 
             histories_map[pid] = history
-            context = player_row.to_frame().T.copy()
-            context['IS_HOME'] = 1 if is_home else 0
+            context = self._build_scheduled_game_row(
+                player_row,
+                team=team,
+                opponent=opponent,
+                is_home=is_home,
+                game_date=scheduled_date,
+                rest_info=rest_info,
+            )
             context['OPPONENT_ABBR'] = opponent
             opp_team_row = self.games_df[self.games_df['TEAM_ABBREVIATION'] == opponent].tail(1)
             context['OPPONENT_ID'] = opp_team_row['TEAM_ID'].values[0] if not opp_team_row.empty else -1
@@ -859,8 +909,8 @@ class GameSimulator(SimCacheMixin):
         def_adj_a = defense_result_a['data']
         def_adj_b = defense_result_b['data']
 
-        preds_a = self.manager.predict_player_stats_batch(ctx_a, hist_a, include_confidence=True)
-        preds_b = self.manager.predict_player_stats_batch(ctx_b, hist_b, include_confidence=True)
+        preds_a = self.forecast_service.predict_player_stats_batch(ctx_a, hist_a, include_confidence=True)
+        preds_b = self.forecast_service.predict_player_stats_batch(ctx_b, hist_b, include_confidence=True)
         if preds_a.empty or preds_b.empty:
             return {'error': 'Model predictions unavailable'}
 

@@ -9,6 +9,15 @@ data:
   use_parquet: false
   parquet_compression: "zstd"
 
+# Pluggable data-source extensions.
+# Each entry enables a scraper discovered under src/data/extensions/. A scraper
+# only runs when listed here with `enabled: true`. Unknown names are ignored.
+# Example (uncomment + drop a scraper module into src/data/extensions/ to use):
+#   advanced_tracking:
+#     enabled: true
+#     priority: 10
+data_sources: {}
+
 # Training configuration
 training:
   targets:
@@ -27,6 +36,17 @@ training:
   use_feature_selection: true
   min_samples_per_player: 10
 
+# Explicit, versioned training policy. The policy is passed to CatBoost,
+# recorded in the model metadata, and scored on the validation window.
+weighting:
+  policy_id: "recency_exp_v1"
+  version: 1
+  method: "exponential_decay"
+  enabled: true
+  lambda_decay: 0.023
+  min_weight: 0.1
+  reference_date: "max_training_date"
+
 training_presets:
   full:
     description: "Full CatBoost + Transformer stack with the complete feature set."
@@ -36,33 +56,11 @@ training_presets:
     recent_seasons: null
     rolling_windows: [3, 5, 10, 20, 50]
     feature_engineer:
+      # "all" resolves to every feature group discovered by the registry
+      # (built-ins + any enabled extensions), so this list can never drift
+      # out of sync with the groups that are actually registered.
       enable_groups:
-        - "rolling"
-        - "efficiency"
-        - "momentum"
-        - "context"
-        - "fatigue"
-        - "minutes_confidence"
-        - "rest_density"
-        - "matchup"
-        - "opponent_strength"
-        - "pace"
-        - "team_role"
-        - "lineup_stability"
-        - "injury_opportunity"
-        - "teammate_usage"
-        - "recency_form"
-        - "archetype"
-        - "defense_position"
-        - "target_encoding"
-        - "league_rank"
-        - "injury_risk"
-        - "aging_curve"
-        - "kan_aging"
-        - "skill_development"
-        - "season_phase"
-        - "team_motivation"
-        - "postseason_context"
+        - "all"
   small:
     description: "Fast CatBoost-first preset with a reduced feature set and no Transformer."
     default_mode: "quick"
@@ -77,6 +75,34 @@ training_presets:
         - "momentum"
         - "pace"
         - "opponent_strength"
+        - "archetype"
+  laptop_quality:
+    description: "Laptop-friendly quality preset between small and full training."
+    default_mode: "standard"
+    default_model_size: "S"
+    transformer_enabled: false
+    recent_seasons: 3
+    rolling_windows: [3, 5, 10, 20]
+    # Smart feature selection is on by default for this preset; the CLI can
+    # still override with --feature-selection smart --selection-profile <p>.
+    feature_selection:
+      enabled: true
+      profile: balanced
+    feature_selection_profile: balanced
+    feature_engineer:
+      enable_groups:
+        - "rolling"
+        - "efficiency"
+        - "momentum"
+        - "context"
+        - "fatigue"
+        - "minutes_confidence"
+        - "rest_density"
+        - "matchup"
+        - "opponent_strength"
+        - "pace"
+        - "team_role"
+        - "recency_form"
         - "archetype"
 
 # Feature engineering configuration
@@ -354,19 +380,6 @@ catboost:
   # heavier regularization suited to sparse count distributions
   use_per_target_tuning: true
 
-lstm:
-  enabled: false
-  hidden_size: 192
-  num_layers: 3
-  dropout: 0.15
-  learning_rate: 0.0008
-  batch_size: 512
-  epochs: 120
-  patience: 15
-  random_seed: 42
-  sequence_length: 12
-  bidirectional: true
-
 transformer:
   enabled: true
   d_model: 128
@@ -382,21 +395,6 @@ transformer:
   epochs: 60
   patience: 12
   random_seed: 42
-
-gnn:
-  enabled: false
-  num_node_features: 64
-  num_edge_features: 16
-  num_graph_layers: 3
-  hidden_size: 192
-  num_layers: 3
-  dropout: 0.15
-  learning_rate: 0.0008
-  batch_size: 512
-  epochs: 120
-  patience: 15
-  random_seed: 42
-  use_attention: true
 
 # Ensemble configuration
 ensemble:
@@ -487,3 +485,49 @@ residual_correction:
   model_dir: models/residual
   clip_min: 0.0
   include_metadata: false
+
+# Residual monitoring — watches whether the correction layer is helping
+# Generates reports under reports/residual_monitoring/.  See
+# src/evaluation/residual_monitor.py and monitor_residual_corrections.py.
+residual_monitoring:
+  enabled: true
+  min_rows: 500
+  helping_threshold_pct: 1.0
+  hurting_threshold_pct: -1.0
+  neutral_band_pct: 1.0
+  min_window_rows: 50
+  windows_days: [7, 14, 30]
+  targets: ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+  output_dir: reports/residual_monitoring
+  default_input: data/evaluation/prediction_history.parquet
+  fallback_input: data/evaluation/residual_training.parquet
+  write_csv: true
+
+# Evidence-based prediction reasoning. Reports are numerical and auditable;
+# no language model is required at runtime.
+reasoning:
+  enabled: true
+  top_k: 3
+  sidecar_enabled: true
+  sidecar_schema_version: 1
+  sensitivities:
+    minutes_delta: 3.0
+    pace_pct: 0.05
+    usage_pct: 0.10
+
+# Manual champion/challenger learning gates. See improve_models.py.
+continual_learning:
+  enabled: true
+  schedule: manual
+  holdout_days: 30
+  min_rows_per_target: 1000
+  min_weighted_improvement_pct: 1.0
+  max_target_regression_pct: 2.0
+  max_coverage_regression_pp: 2.0
+  bootstrap_samples: 2000
+  confidence: 0.95
+  random_seed: 42
+  versions_dir: models/versions
+  champion_manifest: models/champion.json
+  report_path: reports/continual_learning/latest.json
+  ledger_path: data/evaluation/prediction_history.parquet

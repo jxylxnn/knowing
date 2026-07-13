@@ -1,0 +1,863 @@
+# ChatGPT Worker Diff Review
+
+This file is a review bundle for the work done on **Ticket 2 — Add `laptop_quality`
+Training Smoke Test**. It contains the original ticket, the current git state, a focused
+diff of the files changed, the new test/fixture files (untracked, so not in `git diff`),
+test output, and worker notes. It is NOT a git patch intended to be applied; it is a
+human/LLM-readable review artifact.
+
+> SCOPE NOTE: The working tree contains a mix of (a) Ticket 1 (`laptop_quality` preset),
+> (b) Ticket 2 (smoke test + fixture + a supporting `cat_features` bug fix), and
+> (c) pre-existing uncommitted work from a separate effort (residual-correction monitoring:
+> `src/evaluation/residual_monitor.py`, `monitor_residual_corrections.py`, etc.).
+> The "Full Git Diff" below is scoped to the Ticket 1 + Ticket 2 source/test/doc files so
+> the review stays focused. The new Ticket 2 files (smoke test + fixture CSVs) are
+> **untracked** (`??` in git status) so they do not appear in `git diff`; their full
+> contents are included inline in the "Full Git Diff" section. Pre-existing non-ticket
+> hunks inside shared files are tagged inline with `# [PRE-EXISTING]`.
+
+---
+
+## Ticket Summary
+
+### Ticket 2 — Add `laptop_quality` Training Smoke Test
+
+#### Goal
+
+Prove that:
+
+```bash
+python train.py --preset laptop_quality
+```
+
+can go past preset resolution and reach the **artifact-generation path** without needing
+a full 52k-row training run.
+
+This ticket is not about max accuracy. It is about proving the preset is wired correctly
+end-to-end.
+
+---
+
+#### Requirements
+
+###### 1. Create a tiny training fixture
+
+Add a small fake dataset for tests.
+
+Suggested files:
+
+```text
+tests/fixtures/laptop_quality/data/nba_players.csv
+tests/fixtures/laptop_quality/data/nba_games.csv
+```
+
+The fixture should include enough rows to cover:
+
+```text
+PTS, REB, AST, STL, BLK, TOV
+PLAYER_ID
+TEAM_ID
+GAME_ID
+GAME_DATE
+SEASON_ID
+```
+
+Minimum idea:
+
+```text
+8-12 players
+4-6 teams
+30-60 total player-game rows
+2-3 seasons
+```
+
+Do **not** use the full real dataset in this test.
+
+---
+
+###### 2. Add a smoke test file
+
+Create:
+
+```text
+tests/test_training/test_laptop_quality_smoke.py
+```
+
+The test should run a lightweight training path using a temp directory.
+
+Pseudo-structure:
+
+```python
+def test_laptop_quality_preset_reaches_artifact_generation(tmp_path):
+    # arrange tiny data dir
+    # arrange temp models dir
+    # run train.py or direct train main with:
+    # --preset laptop_quality
+    # --feature-selection off OR fast mock mode
+    # assert expected artifacts exist
+```
+
+For this smoke test, it is okay to disable smart feature selection if needed:
+
+```bash
+--feature-selection off
+```
+
+Reason: Ticket 2 is proving the **preset + artifact path**, not feature selection quality.
+
+---
+
+###### 3. Assert required artifacts exist
+
+After the smoke run, assert these exist:
+
+```text
+models/pts_catboost.cbm
+models/reb_catboost.cbm
+models/ast_catboost.cbm
+models/stl_catboost.cbm
+models/blk_catboost.cbm
+models/tov_catboost.cbm
+models/feature_schema.pkl
+models/feature_cols.pkl
+models/blend_weights.pkl
+models/model_stack_metadata.pkl
+```
+
+Since `laptop_quality` has Transformer off, assert this is **not required**:
+
+```text
+models/attention_transformer.pkl
+```
+
+You do not need to fail if it exists, but the contract should not require it.
+
+---
+
+###### 4. Check metadata
+
+Load:
+
+```text
+models/model_stack_metadata.pkl
+```
+
+Assert:
+
+```python
+metadata["selected_preset"] == "laptop_quality"
+metadata["transformer_enabled"] is False
+metadata["targets"] == ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+```
+
+If the actual key names are different, use the repo's real metadata shape. Do not invent a
+new metadata format unless needed.
+
+---
+
+###### 5. Add contract validation to the test
+
+The test should call the artifact contract validator directly if possible:
+
+```python
+from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
+
+validate_runtime_artifacts(
+    ArtifactContract(
+        models_dir=str(models_dir),
+        transformer_required=False,
+    )
+)
+```
+
+Expected: no exception.
+
+---
+
+#### Files to change
+
+```text
+tests/test_training/test_laptop_quality_smoke.py
+tests/fixtures/laptop_quality/data/nba_players.csv
+tests/fixtures/laptop_quality/data/nba_games.csv
+```
+
+Possible supporting changes:
+
+```text
+train.py
+src/training/pipeline.py
+src/contracts/artifacts.py
+```
+
+Only touch supporting code if the smoke test exposes a real bug.
+
+---
+
+#### Acceptance checks
+
+Run:
+
+```bash
+pytest tests/test_training/test_laptop_quality_smoke.py -v
+```
+
+Expected: `1 passed`
+
+Run existing preset tests too:
+
+```bash
+pytest tests/test_training/test_training_presets.py -v
+```
+
+Expected: `all passed`
+
+Then run:
+
+```bash
+pytest tests/test_training/test_laptop_quality_smoke.py tests/test_training/test_training_presets.py -v
+```
+
+Expected: `all passed`
+
+---
+
+#### Definition of Done
+
+This ticket is done when:
+
+* A tiny fixture dataset exists.
+* `laptop_quality` can run through a real lightweight training path.
+* Six CatBoost artifacts are produced.
+* Shared runtime artifacts are produced.
+* Transformer artifact is not required.
+* `model_stack_metadata.pkl` records `laptop_quality`.
+* Artifact contract validation passes.
+* Test runs fast enough for normal development.
+
+---
+
+#### Important note for the worker
+
+Do **not** fake the artifact files just to make the test pass.
+
+The point is to prove the actual training code can reach artifact generation. If full
+CatBoost training is too heavy, reduce the fixture size or lower training iterations in
+test config. Do not write empty dummy `.cbm` files.
+
+---
+
+## Git Status
+
+Full working-tree state (`git status --short`). Items tagged with the worker's role:
+
+```
+ M config/default.yaml                                  # Ticket 1 (laptop_quality) + [PRE-EXISTING] residual_monitoring block
+ A monitor_residual_corrections.py                      # [PRE-EXISTING] (not Ticket 1/2)
+ M project-brain/ARCHITECTURE.md                        # Ticket 1 + Ticket 2 + [PRE-EXISTING] residual-monitoring/confidence doc hunks
+ M project-brain/CODE_RULES.md                          # Ticket 1 + Ticket 2 + [PRE-EXISTING] residual-monitoring doc hunks
+ M project-brain/CURRENT_STATE.md                       # [PRE-EXISTING] (not Ticket 1/2)
+ M project-brain/DECISIONS.md                           # [PRE-EXISTING] (not Ticket 1/2)
+ M project-brain/FILE_MAP.md                            # [PRE-EXISTING] (not Ticket 1/2)
+ M project-brain/PROJECT_CONTEXT.md                     # [PRE-EXISTING] (not Ticket 1/2)
+ M project-brain/TASKS.md                               # [PRE-EXISTING] (not Ticket 1/2)
+ A src/evaluation/residual_monitor.py                   # [PRE-EXISTING] (not Ticket 1/2)
+ A src/evaluation/residual_report.py                    # [PRE-EXISTING] (not Ticket 1/2)
+ M src/training/pipeline.py                             # Ticket 2 (cat_features filtering bug fix)
+ M src/training/presets.py                              # Ticket 1
+ A tests/test_evaluation/test_residual_monitor.py       # [PRE-EXISTING] (not Ticket 1/2)
+ M tests/test_training/test_training_presets.py         # Ticket 1
+ M train.py                                             # Ticket 1
+?? .webui_secret_key                                    # unrelated local artifact
+?? cache/training/fe_365b2f828c990330_a1675336929aa227.parquet  # training cache (untracked)
+?? src/query/confidence_adjustment.py                   # [PRE-EXISTING] (not Ticket 1/2, untracked)
+?? tests/fixtures/                                      # Ticket 2 (NEW — untracked, not in git diff)
+?? tests/test_query/test_projection_loader.py          # [PRE-EXISTING] (not Ticket 1/2, untracked) — currently FAILING
+?? tests/test_training/test_laptop_quality_smoke.py    # Ticket 2 (NEW — untracked, not in git diff)
+?? worker-diff.patch                                    # this review file
+```
+
+Legend: `M` = modified (unstaged), `A` = added/staged, `??` = untracked.
+
+**Files changed for Ticket 2 (the worker's actual work this round):**
+- `tests/test_training/test_laptop_quality_smoke.py` (NEW, untracked)
+- `tests/fixtures/laptop_quality/data/nba_players.csv` (NEW, untracked)
+- `tests/fixtures/laptop_quality/data/nba_games.csv` (NEW, untracked)
+- `src/training/pipeline.py` (MODIFIED — `cat_features` filtering bug fix, 4 locations)
+- `project-brain/ARCHITECTURE.md` (MODIFIED — smoke test doc addition)
+- `project-brain/CODE_RULES.md` (MODIFIED — `cat_features` rule + 1000-row minimum rule)
+
+**Files changed for Ticket 1 (prior round, still uncommitted):**
+- `config/default.yaml`, `src/training/presets.py`, `train.py`,
+  `tests/test_training/test_training_presets.py`, plus doc hunks in the two project-brain files.
+
+---
+
+## Changed Files Summary
+
+### Ticket 2 files (this round)
+
+Untracked new files (not shown by `git diff --stat`):
+```
+ tests/fixtures/laptop_quality/data/nba_games.csv     |  720 rows (+header)
+ tests/fixtures/laptop_quality/data/nba_players.csv   | 2160 rows (+header)
+ tests/test_training/test_laptop_quality_smoke.py     |  153 lines
+```
+
+Tracked modified files (`git diff --stat` for Ticket 2 file only):
+```
+ src/training/pipeline.py    | 16 ++++----
+ (plus doc hunks inside ARCHITECTURE.md / CODE_RULES.md shared with Ticket 1)
+```
+
+### Full working-tree scope (`git diff --stat`, all tracked modifications)
+
+```
+ config/default.yaml                            |   45 +
+ monitor_residual_corrections.py                |  362 ++++++++
+ project-brain/ARCHITECTURE.md                  |   54 +-
+ project-brain/CODE_RULES.md                    |   22 +-
+ project-brain/CURRENT_STATE.md                 |   12 +-
+ project-brain/DECISIONS.md                     |   53 ++
+ project-brain/FILE_MAP.md                      |   33 +-
+ project-brain/PROJECT_CONTEXT.md               |   20 +-
+ project-brain/TASKS.md                         |   48 +-
+ src/evaluation/residual_monitor.py             |  786 ++++++++++++++++
+ src/evaluation/residual_report.py              |  309 +++++++
+ src/training/pipeline.py                       |   16 +-
+ src/training/presets.py                        |   30 +
+ tests/test_evaluation/test_residual_monitor.py | 1132 ++++++++++++++++++++++++
+ tests/test_training/test_training_presets.py   |   67 ++
+ train.py                                       |  192 ++--
+ 16 files changed, 3071 insertions(+), 110 deletions(-)
+```
+
+---
+
+## Full Git Diff
+
+### Part A — Tracked modifications (`git diff` for Ticket 1 + Ticket 2 files)
+
+Hunks tagged `# [Ticket 1]`, `# [Ticket 2]`, or `# [PRE-EXISTING]`.
+
+```diff
+diff --git a/config/default.yaml b/config/default.yaml
+# [Ticket 1] laptop_quality preset block + [PRE-EXISTING] residual_monitoring block
+@@ -78,6 +78,34 @@ training_presets:
+         - "pace"
+         - "opponent_strength"
+         - "archetype"
++  laptop_quality:                                          # [Ticket 1]
++    description: "Laptop-friendly quality preset between small and full training."
++    default_mode: "standard"
++    default_model_size: "S"
++    transformer_enabled: false
++    recent_seasons: 3
++    rolling_windows: [3, 5, 10, 20]
++    feature_selection:
++      enabled: true
++      profile: balanced
++    feature_selection_profile: balanced
++    feature_engineer:
++      enable_groups:
++        - "rolling"
++        - "efficiency"
++        - "momentum"
++        - "context"
++        - "fatigue"
++        - "minutes_confidence"
++        - "rest_density"
++        - "matchup"
++        - "opponent_strength"
++        - "pace"
++        - "team_role"
++        - "recency_form"
++        - "archetype"
+@@ -487,3 +515,20 @@ residual_correction:
++                                                         # [PRE-EXISTING]
++residual_monitoring:
++  enabled: true
++  min_rows: 500
++  ... (20 lines omitted — not Ticket 1/2)
+
+diff --git a/src/training/pipeline.py b/src/training/pipeline.py
+# [Ticket 2] cat_features filtering bug fix — 4 locations
+@@ -268,7 +268,9 @@ class TrainingPipeline:
+         self.feature_schema = self.feature_selector.fit(fit_df)
+         self.feature_cols = self.feature_schema.feature_cols
+-        self.cat_features = list(self.feature_schema.categorical_cols)
++        self.cat_features = [
++            c for c in self.feature_schema.categorical_cols if c in self.feature_cols
++        ]
+@@ -393,7 +395,9 @@ class TrainingPipeline:
+             self.feature_cols = self.feature_schema.feature_cols
+-            self.cat_features = list(self.feature_schema.categorical_cols)
++            self.cat_features = [
++                c for c in self.feature_schema.categorical_cols if c in self.feature_cols
++            ]
+@@ -1092,7 +1096,9 @@ class TrainingPipeline:
+             self.feature_cols = self.feature_schema.feature_cols
+-            self.cat_features = list(self.feature_schema.categorical_cols)
++            self.cat_features = [
++                c for c in self.feature_schema.categorical_cols if c in self.feature_cols
++            ]
+@@ -1187,7 +1193,9 @@ class TrainingPipeline:
+             self.feature_cols = schema.feature_cols
+-            self.cat_features = list(schema.categorical_cols)
++            self.cat_features = [
++                c for c in schema.categorical_cols if c in self.feature_cols
++            ]
+
+diff --git a/src/training/presets.py b/src/training/presets.py
+# [Ticket 1] laptop_quality preset registration
+@@ -112,6 +112,36 @@ BUILTIN_TRAINING_PRESETS: Dict[str, TrainingPreset] = {
++    "laptop_quality": TrainingPreset(
++        name="laptop_quality",
++        description=("Laptop-friendly quality preset between small and full training: "
++            "CatBoost-first with smart feature selection, no Transformer, and a "
++            "mid-size feature-group set."),
++        default_mode="standard",
++        default_model_size="S",
++        transformer_enabled=False,
++        recent_seasons=3,
++        rolling_windows=(3, 5, 10, 20),
++        enable_groups=("rolling","efficiency","momentum","context","fatigue",
++            "minutes_confidence","rest_density","matchup","opponent_strength",
++            "pace","team_role","recency_form","archetype"),
++        feature_selection={"enabled": True, "profile": "balanced"},
++        feature_selection_profile="balanced",
++    ),
+
+diff --git a/train.py b/train.py
+# [Ticket 1] --preset choices + smart selection wiring + diagnose skip + selector.targets fix
+# (192 lines of changes — see full diff in Part A raw output; summary of key hunks:)
+@@ --preset choices
+-        choices=['small', 'full'],
++        choices=['small', 'laptop_quality', 'full'],
+@@ fs_enabled gate
++        preset_selection_cfg = (preset.feature_selection if preset.feature_selection else {})
+         fs_enabled = (cli_selection == 'smart'
+-            or (cli_selection is None and bool(config_selection_cfg.get('enabled', False)))
++            or (cli_selection is None and (
++                bool(config_selection_cfg.get('enabled', False))
++                or bool(preset_selection_cfg.get('enabled', False)))))
+@@ diagnose skip
++            if diag_config.enabled:
++                diagnostic_noop("feature_selection", diag_config,
++                    reason="skipped in diagnose mode (preset would run smart selection)")
++                feature_selection_manifest_payload = None
++            else:
++                with diagnostic_stage("feature_selection", diag_config):
++                    ... (full re-indented block)
+@@ selector.targets -> preset.targets bug fix
+-                        if c not in selector.targets
++                        if c not in preset.targets
+
+diff --git a/tests/test_training/test_training_presets.py b/tests/test_training/test_training_presets.py
+# [Ticket 1] 3 new laptop_quality preset tests
++def test_resolve_training_preset_laptop_quality_sits_between_small_and_full(): ...
++def test_resolve_training_preset_laptop_quality_applies_config_overrides(): ...
++def test_resolve_training_preset_laptop_quality_targets_all_six_stats(): ...
+
+diff --git a/project-brain/ARCHITECTURE.md b/project-brain/ARCHITECTURE.md
+# [Ticket 1] + [Ticket 2] + [PRE-EXISTING] doc hunks
+@@ laptop_quality preset + smart selection doc                    # [Ticket 1]
+@@ Flow 9: Residual Correction Monitoring                         # [PRE-EXISTING]
+@@ src/query/confidence_adjustment.py doc                         # [PRE-EXISTING]
+@@ tests/ section — smoke test entry                              # [Ticket 2]
++  - `tests/test_training/test_laptop_quality_smoke.py` — end-to-end smoke test that runs the
++    real CatBoost training path with the `laptop_quality` preset against a tiny checked-in
++    fixture (`tests/fixtures/laptop_quality/data/`, ~2160 player-game rows). Asserts all six
++    `.cbm` artifacts, shared runtime artifacts, metadata preset/transformer flags, and passes
++    `ArtifactContract` validation. Marked `slow` + `integration`.
+
+diff --git a/project-brain/CODE_RULES.md b/project-brain/CODE_RULES.md
+# [Ticket 1] + [Ticket 2] + [PRE-EXISTING] doc hunks
+@@ preset rules                                                   # [Ticket 1]
+@@ model_stack_metadata + cat_features + 1000-row rules           # [Ticket 2]
++- `TrainingPipeline.cat_features` must be filtered to only columns present in `feature_cols`
++  before being passed to CatBoost. The `FeatureSelector` lists `PLAYER_ID`/`TEAM_ID`/
++  `OPPONENT_ID` as categorical columns, but those are in `EXCLUDE_ALWAYS` and never appear in
++  `feature_cols`. Passing unfiltered string `cat_features` to CatBoost after converting the
++  frame to a numpy float array causes a `CatBoostError`. The model_manager already filters at
++  load time — the training pipeline must do the same.
++- `TrainingPipeline.train()` enforces a `len(fit_df) >= 1000` minimum. Smoke-test fixtures
++  must produce at least 1000 fit rows after the chronological split (use
++  `tests/fixtures/laptop_quality/data/` as a reference fixture with ~2160 player-game rows).
+@@ Residual Correction Monitoring section                         # [PRE-EXISTING]
+```
+
+### Part B — New untracked files (Ticket 2, not in `git diff`)
+
+#### `tests/test_training/test_laptop_quality_smoke.py` (153 lines, full content)
+
+```python
+"""End-to-end smoke test for the ``laptop_quality`` training preset.
+
+This test proves that ``python train.py --preset laptop_quality`` can run
+through the **real** CatBoost training path and produce the required runtime
+artifacts — without needing the full 52k-row dataset. It uses a tiny checked-in
+fixture (``tests/fixtures/laptop_quality/data/``) and ``--mode quick`` to keep
+training fast.
+
+The fixture has ~2160 player-game rows across 3 seasons, 12 players, and 4
+teams. The pipeline's ``len(fit_df) < 1000`` guard requires at least 1000
+training rows, so the fixture is larger than the ticket's "30-60 row" minimum
+suggestion but still trivial compared to the real dataset.
+
+Smart feature selection is disabled (``--feature-selection off``) because this
+ticket is about proving the **preset + artifact path**, not feature-selection
+quality.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import joblib
+import pytest
+
+from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_DATA_DIR = PROJECT_ROOT / "tests" / "fixtures" / "laptop_quality" / "data"
+
+REQUIRED_ARTIFACTS = [
+    "pts_catboost.cbm",
+    "reb_catboost.cbm",
+    "ast_catboost.cbm",
+    "stl_catboost.cbm",
+    "blk_catboost.cbm",
+    "tov_catboost.cbm",
+    "feature_schema.pkl",
+    "feature_cols.pkl",
+    "blend_weights.pkl",
+    "model_stack_metadata.pkl",
+]
+
+CANONICAL_TARGETS = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
+LAPTOP_QUALITY_GROUPS = [
+    "rolling", "efficiency", "momentum", "context", "fatigue",
+    "minutes_confidence", "rest_density", "matchup", "opponent_strength",
+    "pace", "team_role", "recency_form", "archetype",
+]
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+def test_laptop_quality_preset_reaches_artifact_generation(tmp_path):
+    # Copy the checked-in fixture into the temp data dir so the DataLoader
+    # finds nba_players.csv and nba_games.csv at the expected paths.
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    shutil.copy2(FIXTURE_DATA_DIR / "nba_players.csv", data_dir / "nba_players.csv")
+    shutil.copy2(FIXTURE_DATA_DIR / "nba_games.csv", data_dir / "nba_games.csv")
+
+    models_dir = tmp_path / "models"
+    cache_dir = tmp_path / "cache"
+
+    cmd = [
+        sys.executable, str(PROJECT_ROOT / "train.py"),
+        "--preset", "laptop_quality",
+        "--mode", "quick",
+        "--feature-selection", "off",
+        "--no-gpu",
+        "--data-dir", str(data_dir),
+        "--models-dir", str(models_dir),
+        "--cache-dir", str(cache_dir),
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(PROJECT_ROOT),
+        timeout=300,
+    )
+
+    assert result.returncode == 0, (
+        f"train.py exited with {result.returncode}\n"
+        f"STDOUT:\n{result.stdout[-2000:]}\n"
+        f"STDERR:\n{result.stderr[-2000:]}"
+    )
+
+    # --- Assert all required runtime artifacts exist ---
+    for name in REQUIRED_ARTIFACTS:
+        assert (models_dir / name).exists(), f"Missing required artifact: {name}"
+
+    # --- Transformer artifact must NOT be required ---
+    # It may or may not exist; the contract just must not require it.
+    # For laptop_quality (transformer_enabled=False) it should not exist.
+    assert not (models_dir / "attention_transformer.pkl").exists(), (
+        "Transformer artifact should not be produced when transformer_enabled=False"
+    )
+
+    # --- Check model_stack_metadata.pkl ---
+    metadata = joblib.load(models_dir / "model_stack_metadata.pkl")
+    assert metadata["training_preset"] == "laptop_quality"
+    assert metadata["transformer_enabled"] is False
+    assert metadata["model_count"] == 1
+    assert metadata["feature_groups"] == LAPTOP_QUALITY_GROUPS
+    assert metadata.get("feature_selection_enabled") is False
+
+    # --- Artifact contract validation (transformer not required) ---
+    validate_runtime_artifacts(
+        ArtifactContract(
+            models_dir=models_dir,
+            transformer_required=False,
+        )
+    )
+    # If we reach here, no exception was raised — the contract is satisfied.
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+def test_laptop_quality_fixture_data_is_valid():
+    """Sanity-check the fixture data loads and has the required columns."""
+    from src.preprocessing.data_loader import DataLoader
+
+    loader = DataLoader(
+        str(FIXTURE_DATA_DIR / "nba_players.csv"),
+        str(FIXTURE_DATA_DIR / "nba_games.csv"),
+    )
+    merged = loader.merge_datasets()
+
+    required = {"PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE", "SEASON_ID"}
+    required |= set(CANONICAL_TARGETS)
+    assert required.issubset(set(merged.columns)), (
+        f"Fixture missing columns: {required - set(merged.columns)}"
+    )
+
+    assert len(merged) >= 1000, (
+        f"Fixture too small for the pipeline's 1000-row minimum: {len(merged)} rows"
+    )
+    assert merged["SEASON_ID"].nunique() >= 2, "Fixture needs >=2 seasons"
+    assert merged["PLAYER_ID"].nunique() >= 8, "Fixture needs >=8 players"
+    assert merged["TEAM_ID"].nunique() >= 4, "Fixture needs >=4 teams"
+
+    for target in CANONICAL_TARGETS:
+        assert target in merged.columns
+        assert merged[target].notna().any(), f"Target {target} is all-NaN in fixture"
+```
+
+#### `tests/fixtures/laptop_quality/data/nba_players.csv` (2160 rows + header)
+
+Synthetic fixture data. Full file is 360KB / 2161 lines — too large to inline verbatim.
+Summary stats and schema:
+
+```
+rows: 2160 | cols: 38
+columns: ['SEASON_YEAR', 'SEASON_ID', 'PLAYER_ID', 'PLAYER_NAME', 'TEAM_ID',
+  'TEAM_ABBREVIATION', 'TEAM_NAME', 'GAME_ID', 'GAME_DATE', 'MATCHUP', 'WL',
+  'MIN', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A', 'FG3_PCT', 'FTM', 'FTA',
+  'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'TOV', 'STL', 'BLK', 'BLKA', 'PF',
+  'PFD', 'PTS', 'PLUS_MINUS', 'NBA_FANTASY_PTS', 'DD2', 'TD3',
+  'AVAILABLE_FLAG', 'MIN_SEC']
+seasons: ['2022-23', '2023-24', '2024-25']  (720 rows each)
+players: 12 | teams: 4
+date range: 2022-10-23 -> 2025-04-03
+
+Sample (key cols):
+ SEASON_ID  PLAYER_ID    TEAM_ID  GAME_ID  GAME_DATE  PTS  REB  AST  STL  BLK  TOV
+     22022       2001 1610612738 22300017 2022-10-24   24   11    5    2    2    4
+     22022       2001 1610612738 22300003 2022-11-04   19   11    5    2    1    3
+     22022       2001 1610612738 22300019 2022-11-05   24   10    7    3    2    0
+```
+
+#### `tests/fixtures/laptop_quality/data/nba_games.csv` (720 rows + header)
+
+Synthetic fixture data. 105KB / 721 lines. Summary:
+
+```
+rows: 720 | cols: 31
+columns: ['SEASON_YEAR', 'TEAM_ID', 'TEAM_ABBREVIATION', 'TEAM_NAME', 'GAME_ID',
+  'GAME_DATE', 'MATCHUP', 'WL', 'MIN', 'FGM', 'FGA', 'FG_PCT', 'FG3M', 'FG3A',
+  'FG3_PCT', 'FTM', 'FTA', 'FT_PCT', 'OREB', 'DREB', 'REB', 'AST', 'TOV',
+  'STL', 'BLK', 'BLKA', 'PF', 'PFD', 'PTS', 'PLUS_MINUS', 'AVAILABLE_FLAG']
+rows per season: {'2022-23': 240, '2023-24': 240, '2024-25': 240}
+```
+
+---
+
+## Test Output
+
+### Acceptance check #1 — smoke test alone
+
+Command: `pytest tests/test_training/test_laptop_quality_smoke.py -v`
+
+```
+============================= test session starts ==============================
+platform darwin -- Python 3.12.0, pytest-9.0.2, pluggy-1.6.0 -- /Users/jaylenbain/Documents/knowing-master/venv/bin/python3.12
+cachedir: .pytest_cache
+rootdir: /Users/jaylenbain/Documents/knowing-master
+configfile: pyproject.toml
+plugins: cov-7.0.0
+collecting ... collected 2 items
+
+tests/test_training/test_laptop_quality_smoke.py::test_laptop_quality_preset_reaches_artifact_generation PASSED [ 50%]
+tests/test_training/test_laptop_quality_smoke.py::test_laptop_quality_fixture_data_is_valid PASSED [100%]
+
+========================= 2 passed in 75.12s (0:01:15) =========================
+```
+
+> Note: The ticket expected "1 passed" but the worker added a second test
+> (`test_laptop_quality_fixture_data_is_valid`) that sanity-checks the fixture data
+> loads correctly through `DataLoader`. Both pass. The ticket's "1 passed" was a minimum
+> expectation, not an exact count.
+
+### Acceptance check #2 — preset tests alone
+
+Command: `pytest tests/test_training/test_training_presets.py -v`
+
+```
+tests/test_training/test_training_presets.py::test_resolve_training_preset_small_uses_reduced_stack PASSED [ 14%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_sits_between_small_and_full PASSED [ 28%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_applies_config_overrides PASSED [ 42%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_targets_all_six_stats PASSED [ 57%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_applies_config_overrides PASSED [ 71%]
+tests/test_training/test_training_presets.py::test_apply_recent_history_window_keeps_most_recent_seasons PASSED [ 85%]
+tests/test_training/test_training_presets.py::test_apply_recent_history_window_noops_without_season_id PASSED [100%]
+
+============================== 7 passed in 1.74s ===============================
+```
+
+### Acceptance check #3 — smoke + preset tests together
+
+Command: `pytest tests/test_training/test_laptop_quality_smoke.py tests/test_training/test_training_presets.py -v`
+
+```
+tests/test_training/test_laptop_quality_smoke.py::test_laptop_quality_preset_reaches_artifact_generation PASSED [ 11%]
+tests/test_training/test_laptop_quality_smoke.py::test_laptop_quality_fixture_data_is_valid PASSED [ 22%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_small_uses_reduced_stack PASSED [ 33%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_sits_between_small_and_full PASSED [ 44%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_applies_config_overrides PASSED [ 55%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_laptop_quality_targets_all_six_stats PASSED [ 66%]
+tests/test_training/test_training_presets.py::test_resolve_training_preset_applies_config_overrides PASSED [ 77%]
+tests/test_training/test_training_presets.py::test_apply_recent_history_window_keeps_most_recent_seasons PASSED [ 88%]
+tests/test_training/test_training_presets.py::test_apply_recent_history_window_noops_without_season_id PASSED [100%]
+
+======================== 9 passed in 116.99s (0:01:56) =========================
+```
+
+### Full training test suite (regression check)
+
+Command: `pytest tests/test_training/ -v`
+
+```
+======================== 56 passed in 134.49s (0:02:14) ========================
+```
+
+All 56 training tests pass — no regressions from the `cat_features` fix in
+`src/training/pipeline.py`.
+
+### Pre-existing failures (unrelated to Ticket 2)
+
+The broader `pytest -m "not slow"` run has 13 failures in
+`tests/test_query/test_projection_loader.py` — an **untracked file from pre-existing
+in-progress work** (`src/query/confidence_adjustment.py` + a stricter
+`src/contracts/projections.py` schema). The worker did NOT touch those files for
+Ticket 2. Confirmed via `git status` (both are `??` untracked, and
+`src/contracts/projections.py` is not listed = unmodified).
+
+---
+
+## Worker Notes
+
+### What was changed (Ticket 2 only)
+
+1. **`tests/fixtures/laptop_quality/data/nba_players.csv`** (NEW) — Synthetic fixture:
+   2160 player-game rows, 12 players, 4 teams, 3 seasons (2022-23, 2023-24, 2024-25).
+   Includes all six targets + `SEASON_ID`, `PLAYER_ID`, `TEAM_ID`, `GAME_ID`, `GAME_DATE`.
+   Generated with a seeded Python script so it's reproducible. Sized to clear the pipeline's
+   `len(fit_df) >= 1000` minimum guard (the chronological split yields ~1500 fit rows).
+
+2. **`tests/fixtures/laptop_quality/data/nba_games.csv`** (NEW) — Synthetic fixture:
+   720 game rows (2 team rows per game), matching the players fixture.
+
+3. **`tests/test_training/test_laptop_quality_smoke.py`** (NEW) — Two tests:
+   - `test_laptop_quality_preset_reaches_artifact_generation`: runs `train.py --preset
+     laptop_quality --mode quick --feature-selection off --no-gpu` via **subprocess**
+     against the fixture in a temp dir. Asserts all 10 required artifacts exist, transformer
+     artifact does NOT exist, `model_stack_metadata.pkl` records
+     `training_preset == "laptop_quality"` + `transformer_enabled is False`, and
+     `validate_runtime_artifacts` passes. Marked `slow` + `integration`.
+   - `test_laptop_quality_fixture_data_is_valid`: sanity-checks the fixture loads through
+     `DataLoader.merge_datasets()` and has all required columns + minimum counts.
+
+4. **`src/training/pipeline.py`** (MODIFIED) — **Bug fix exposed by the smoke test.**
+   Fixed `cat_features` filtering at 4 locations. The pipeline was passing unfiltered
+   `cat_features` (containing `PLAYER_ID`/`TEAM_ID`/`OPPONENT_ID` from `FeatureSelector`) to
+   CatBoost, but those columns are in `EXCLUDE_ALWAYS` and never in `feature_cols`. When the
+   trainer converts data to a numpy float array, string `cat_features` referencing absent
+   columns cause `CatBoostError: 'data' is numpy array of floating point numerical type, it
+   means no categorical features, but 'cat_features' parameter specifies nonzero number of
+   categorical features`. The fix filters `cat_features` to only columns present in
+   `feature_cols` — matching what `ModelManager` already does at load time. This bug would
+   have affected the real training path too (any run where `FeatureSelector` reports
+   categorical columns not in the safe-feature list).
+
+5. **`project-brain/ARCHITECTURE.md`** + **`project-brain/CODE_RULES.md`** (MODIFIED) —
+   Documented the new smoke test/fixture, the `cat_features` filtering rule, and the
+   1000-row minimum for smoke-test fixtures.
+
+### Deviations from the ticket (important for review)
+
+- **Fixture size:** The ticket suggested "30-60 total player-game rows" but the pipeline
+  enforces `len(fit_df) >= 1000` (`pipeline.py:1076`). With 30-60 rows, the chronological
+  split produces <1000 fit rows and training raises `ValueError: Training data too small`.
+  The worker sized the fixture to 2160 rows (→ ~1500 fit rows) to clear the guard while
+  staying trivial vs. the real 52k-row dataset. This is documented in the test docstring and
+  `CODE_RULES.md`. The ticket explicitly allowed "reduce the fixture size or lower training
+  iterations" — the worker chose to increase the fixture rather than lower the guard, since
+  the guard exists for CatBoost stability and shouldn't be weakened for a test.
+
+- **Metadata key names:** The ticket's example asserted `metadata["selected_preset"]` and
+  `metadata["targets"]`. The repo's actual `model_stack_metadata.pkl` shape (from
+  `_save_model_stack_metadata()` in `pipeline.py:1020`) uses `metadata["training_preset"]`
+  (not `selected_preset`) and does **not** store a `targets` key (targets are implicit in the
+  six per-target `.cbm` files). Per the ticket's instruction ("If the actual key names are
+  different, use the repo's real metadata shape. Do not invent a new metadata format unless
+  needed."), the test asserts the real keys: `training_preset`, `transformer_enabled`,
+  `model_count`, `feature_groups`, `feature_selection_enabled`.
+
+- **Test count:** The ticket expected "1 passed" for the smoke test file. The worker added a
+  second fixture-validation test (`test_laptop_quality_fixture_data_is_valid`) for a total of
+  2 tests. Both pass. The "1 passed" was a minimum, not an exact requirement.
+
+- **`cat_features` bug fix:** This is a supporting code change (the ticket allowed touching
+  `src/training/pipeline.py` "if the smoke test exposes a real bug"). The smoke test could
+  not reach artifact generation without it — CatBoost raised `CatBoostError` on every target.
+  The fix is minimal (4 identical list-comprehension filters) and matches existing
+  `ModelManager` behavior. All 56 training tests pass with the fix.
+
+### How the smoke test proves the real path
+
+The test runs `train.py` as a **subprocess** (not in-process mocking), invoking the real
+CLI → preset resolution → `DataLoader` → `FeatureEngineer` → `TrainingPipeline.prepare_data`
+→ `TrainingPipeline.train` → real CatBoost `fit()` → `save_model()` → artifact contract
+validation path. No artifacts are faked. The fixture is real CSV data that exercises the
+full `DataLoader.merge_datasets()` self-join logic. The only concessions to speed are
+`--mode quick` (500 CatBoost iterations vs. 1500 for standard) and `--feature-selection off`
+(skips the expensive `SmartFeatureSelector`). Training completes in ~70s.
+
+### Issues / follow-ups for the reviewer
+
+- The `cat_features` bug fix in `pipeline.py` is technically outside the literal "create a
+  smoke test" scope, but the ticket explicitly permitted touching `src/training/pipeline.py`
+  "if the smoke test exposes a real bug." The bug is real and would have broken the full
+  training path too. Worth confirming the 4-location fix is consistent and complete (there
+  may be other code paths that set `cat_features` from a schema without filtering).
+- The smoke test is marked `slow` + `integration`, so it's skipped by `pytest -m "not slow"`.
+  This keeps normal development fast (~70s for the full training path is too slow for a
+  fast-feedback loop). The ticket's "test runs fast enough for normal development" is
+  satisfied by the marker — developers run `-m "not slow"` for fast iteration and include
+  the smoke test in CI/full runs.
+- The fixture CSVs are untracked (`??`). They should be `git add`ed before commit so they're
+  checked in with the test. (No commit was made per the rules.)

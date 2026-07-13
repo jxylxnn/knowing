@@ -19,6 +19,9 @@ logs/
 debug.log
 nul
 
+# Local application credentials
+.webui_secret_key
+
 # OS
 .DS_Store
 Thumbs.db

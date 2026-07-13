@@ -23,6 +23,7 @@ from src.evaluation.metrics import (
 )
 from src.preprocessing.data_loader import DataLoader
 from src.preprocessing.feature_engineer import FeatureEngineer
+from src.pipeline.forecast_service import ForecastService
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class BacktestRunner:
             cache_dir: Optional path for caching feature-engineered DataFrames.
         """
         self._manager = manager
+        self.forecast_service = ForecastService(manager=manager)
         self.data_dir = Path(data_dir)
         self.models_dir = Path(models_dir)
         self.cache_dir = Path(cache_dir) if cache_dir else self.data_dir / "cache"
@@ -67,6 +69,8 @@ class BacktestRunner:
         self.feature_engineer = FeatureEngineer()
         self._feature_df: Optional[pd.DataFrame] = None
         self._feature_df_hash: str = ""
+        self.last_errors: Dict[str, np.ndarray] = {}
+        self.last_coverage: Dict[str, float] = {}
 
     @property
     def targets(self) -> List[str]:
@@ -167,6 +171,8 @@ class BacktestRunner:
             BacktestResult with per-stat metrics and aggregate scores.
         """
         t0 = time.monotonic()
+        self.last_errors = {}
+        self.last_coverage = {}
 
         # --- 1. Load and filter data ---
         if feature_df is not None:
@@ -204,6 +210,15 @@ class BacktestRunner:
             logger.info("Loading models...")
             self._manager._load_models()
 
+        training_cutoff = getattr(self._manager, "training_cutoff", None)
+        if training_cutoff:
+            cutoff = pd.Timestamp(training_cutoff)
+            if start <= cutoff:
+                raise ValueError(
+                    "Backtest window overlaps the model training cutoff: "
+                    f"window starts {start.date()}, cutoff {cutoff.date()}"
+                )
+
         feature_cols = getattr(self._manager, "feature_cols", None)
         if feature_cols is None:
             self._manager._load_feature_cols()
@@ -233,7 +248,7 @@ class BacktestRunner:
             row_df = row.to_frame().T
 
             try:
-                preds = self._manager.predict_player_stats(row_df, history_df=None)
+                preds = self.forecast_service.predict_player_stats(row_df, history_df=None)
             except Exception as exc:
                 logger.debug("Prediction failed for row %d: %s", i, exc)
                 continue
@@ -257,6 +272,7 @@ class BacktestRunner:
         for target in targets:
             actuals_arr = np.array(target_actuals[target], dtype=float)
             preds_arr = np.array(target_preds[target], dtype=float)
+            self.last_errors[target] = actuals_arr - preds_arr
             stds_arr = (
                 np.array(target_stds[target], dtype=float)
                 if target_stds[target]
@@ -265,6 +281,8 @@ class BacktestRunner:
 
             metrics = compute_target_metrics(target, actuals_arr, preds_arr, stds_arr)
             per_target[target] = metrics
+            if metrics.calibration_p90 is not None:
+                self.last_coverage[target] = float(metrics.calibration_p90)
 
             all_actuals.extend(target_actuals[target])
             all_preds.extend(target_preds[target])

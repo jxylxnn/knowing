@@ -118,8 +118,6 @@ Each feature group is an independently toggleable `FeatureGroup` class. The `ful
 | CatBoost (per-target, RMSE+MAE multi-loss + quantile regression) | Primary | ✅ |
 | Transformer (attention over recent games) | Secondary, sequence context | ✅ (full preset only) |
 | CatBoost MAE-companion (per-target) | Blended with primary CatBoost | ✅ |
-| Nexus (joint multi-output, CRPS loss) | Optional | ⚙️ off by default |
-| LSTM, GNN | Legacy | ❌ `enabled: false` in config |
 
 ### 3. Probability Distribution Engine
 
@@ -176,21 +174,18 @@ Result: a per-target feature list written to `models/feature_selection_manifest.
 |----------|---------|---------|
 | **Core ML** | PyTorch | 2.0+ (CUDA optional) |
 | | CatBoost | 1.2.8 |
+| | LightGBM | 4.6.0 (minutes predictor) |
 | | scikit-learn | 1.8.0 |
-| | LightGBM / XGBoost | 4.6.0 / 3.1.2 |
 | **Data** | pandas | 2.3.3 |
 | | numpy | 2.3.5 |
 | | scipy | 1.16.3 |
 | **NBA Data** | nba_api | 1.11.3 |
 | | beautifulsoup4 | 4.14.3 |
-| | lxml, requests, aiohttp | latest |
-| **Visualization** | matplotlib | 3.10.8 |
-| | plotly | 6.5.0 |
-| | seaborn | 0.13.2 |
+| | requests | 2.32.5 |
 | **Testing** | pytest | 9.0.2 |
 | | coverage | 7.13.4 |
 
-Pinned versions in `requirements.txt`. Install PyTorch separately per your platform (CUDA 12.1 / CPU / macOS) — see the file's header.
+Runtime dependencies are in `requirements.txt`; test tooling is in `requirements-dev.txt`. Install PyTorch separately per your platform (CUDA 12.1 / CPU / macOS) — see the runtime file's header.
 
 ---
 
@@ -207,8 +202,11 @@ Pinned versions in `requirements.txt`. Install PyTorch separately per your platf
 # Activate the bundled venv
 source venv/bin/activate
 
-# Install/update dependencies
+# Install/update runtime dependencies
 pip install -r requirements.txt
+
+# Include test tooling when developing the project
+pip install -r requirements-dev.txt
 ```
 
 > **Note**: The README's old "Python 3.10+" badge is stale — the project is on 3.12 (see `AGENTS.md`).
@@ -567,9 +565,9 @@ knowing/
 │   │   ├── feature_engineer_gpu.py
 │   │   ├── data_loader.py
 │   │   └── features/              # 25+ FeatureGroup classes
-│   ├── models/                    # CatBoost + Transformer + Nexus + GPU utils
+│   ├── models/                    # CatBoost + Transformer + runtime utilities
 │   ├── pipeline/                  # data/training/prediction pipelines
-│   ├── training/                  # Modular training v2.0 (catboost_trainer, nn_trainer, presets, ...)
+│   ├── training/                  # Modular training (pipeline, catboost_trainer, presets, ...)
 │   ├── simulation/                # game_simulator, phase_simulator, archetype, role_sampler, input_health
 │   ├── query/                     # probability_calculator, distribution_fitter, empirical_covariance, prob_formatter
 │   ├── evaluation/                # backtest_runner, weight_store, ensemble_optimizer, drift_detector, smart_feature_selector, shadow_feature_filter, feature_group_ablation, metrics
@@ -604,7 +602,8 @@ knowing/
 │   └── bugfixes_summary.md        # Historical bugfix log
 ├── project-brain/                 # Curated architectural brain
 │
-├── requirements.txt               # Pinned deps
+├── requirements.txt               # Runtime dependencies
+├── requirements-dev.txt           # Test dependencies
 ├── train_colab.ipynb              # Colab training notebook
 └── query_prob.ipynb               # Jupyter query interface
 ```
@@ -633,11 +632,14 @@ Custom markers: `slow`, `gpu`, `integration` (registered in `tests/conftest.py`)
 # Preview what will be deleted
 python clear_cache.py --all --dry-run
 
-# Wipe generated artifacts; raw CSVs in data/ are preserved
+# Remove generated caches, reports, logs, and experiments while preserving models
+python clear_cache.py --all --keep-models --yes
+
+# Wipe generated artifacts, including trained models; raw CSVs in data/ are preserved
 python clear_cache.py --all --yes
 ```
 
-Removes: `cache/`, `data/cache/`, `data/sim_cache/`, `data/sim_results/`, `models/`, `experiments/`, all `__pycache__/`.
+Removes: `cache/`, `data/cache/`, `data/sim_cache/`, `data/sim_results/`, `experiments/`, `reports/`, logs, `.DS_Store`, and all `__pycache__/`. `models/` is removed unless `--keep-models` is supplied.
 Preserves: `data/nba_players.csv`, `data/nba_games.csv`, `data/injury_history.csv`, source code, venv.
 
 ---
@@ -646,7 +648,7 @@ Preserves: `data/nba_players.csv`, `data/nba_games.csv`, `data/injury_history.cs
 
 See `AGENTS.md` for the agent-facing gotchas (the source of truth for AI work in this repo). Highlights:
 
-- **LSTM / GNN disabled** in `config/default.yaml`. Active stack is CatBoost + Transformer.
+- **Active model stack**: CatBoost + Transformer.
 - **CatBoost GPU**: `--max-workers 1` to avoid CUDA context contention.
 - **Gitignore is root-only** (`/data/`, `/models/`), so `src/data/` and `src/models/` are tracked.
 - **PyTorch test shim** in `src/__init__.py` activates under pytest on machines without a working PyTorch.
