@@ -28,6 +28,18 @@ from src.reconstruction.schema import (
     TeamBoxLine,
     assert_finite_numbers,
 )
+from src.reconstruction.contracts import (
+    GameValidationReport,
+    validate_game_box_score,
+)
+from src.reconstruction.canonicalize import (
+    CanonicalizationError,
+    canonicalize_game,
+    canonicalize_games,
+    group_games,
+    hash_source_rows,
+    parse_minutes_value,
+)
 
 __all__ = [
     "RECONSTRUCTION_SCHEMA_VERSION",
@@ -47,4 +59,12 @@ __all__ = [
     "FiniteNumberError",
     "LineupError",
     "assert_finite_numbers",
+    "GameValidationReport",
+    "validate_game_box_score",
+    "CanonicalizationError",
+    "canonicalize_game",
+    "canonicalize_games",
+    "group_games",
+    "hash_source_rows",
+    "parse_minutes_value",
 ]
