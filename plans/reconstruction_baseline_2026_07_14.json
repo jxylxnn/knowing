@@ -1,0 +1,101 @@
+{
+  "_doc": "PR 00 baseline record for the latent game reconstruction initiative (plans/game_reconstruction_mega_plan.md). Captures the reproducible starting point before any reconstruction code is added. No production file changed in this PR.",
+  "recorded_at_utc": "2026-07-14T00:00:00Z",
+  "initiative": "latent_game_and_possession_reconstruction",
+  "source_plan": "plans/game_reconstruction_mega_plan.md",
+  "git": {
+    "branch": "codex/baseline-audit",
+    "commit": "1014aaaa9666a24d9c30ebc3e5eaee7a8a5bf325",
+    "commit_subject": "feat: enforce point-in-time feature safety",
+    "owner_preserved_dirty_files": [
+      "src/evaluation/smart_feature_selector.py",
+      "src/training/pipeline.py",
+      "train.py"
+    ],
+    "owner_preserved_untracked_files": [
+      "plans/game_reconstruction_mega_plan.md"
+    ],
+    "note": "Owner working-tree changes are intentionally preserved and not touched by this PR."
+  },
+  "environment": {
+    "python_version": "3.12.0",
+    "platform": "darwin 25.5.0 arm64",
+    "dependencies": {
+      "numpy": "2.3.5",
+      "pandas": "2.3.3",
+      "scipy": "1.16.3",
+      "torch": "2.6.0",
+      "catboost": "1.2.8",
+      "lightgbm": "4.6.0",
+      "scikit-learn": "1.8.0"
+    }
+  },
+  "source_files": {
+    "data/nba_players.csv": {
+      "sha256": "7b22e4a14be48d933089336e950e95df068b4d515e2ea40bd3d92da23532bed1"
+    },
+    "data/nba_games.csv": {
+      "sha256": "dd9dc2cd286fe0ad6cb6d1e6bb8b2bc41fbed642bc0eec2137d02cb191a548cc"
+    }
+  },
+  "data_grain": {
+    "nba_players.csv": {
+      "rows": 52583,
+      "distinct_player_id": 686,
+      "distinct_game_id": 2442,
+      "stat_columns": [
+        "MIN", "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "OREB", "DREB",
+        "REB", "AST", "TOV", "STL", "BLK", "BLKA", "PF", "PFD", "PTS",
+        "PLUS_MINUS"
+      ]
+    },
+    "nba_games.csv": {
+      "rows": 4882,
+      "distinct_game_id": 2441,
+      "team_game_pairs": 4882
+    },
+    "date_range": {
+      "min_game_date": "2024-10-22",
+      "max_game_date": "2026-04-10"
+    }
+  },
+  "unmatched_game_ids": {
+    "only_in_players": ["22501183"],
+    "only_in_games": [],
+    "note": "Game 22501183 appears in nba_players.csv without a matching team-game pair. Canonicalization must quarantine it, not crash or fabricate a team row."
+  },
+  "turnover_residual_distribution": {
+    "description": "For matched (GAME_ID, TEAM_ID) groups, team TOV minus summed player TOV. Negative residual is forbidden; positive residual is represented as TEAM_TURNOVER pseudo-actor events.",
+    "total_matched_team_game_rows": 4882,
+    "min_residual": 0,
+    "max_residual": 7,
+    "distribution": {
+      "0": 2295,
+      "1": 1735,
+      "2": 653,
+      "3": 158,
+      "4": 34,
+      "5": 6,
+      "7": 1
+    }
+  },
+  "baseline_checks": {
+    "compileall": "PASS (src tests *.py)",
+    "pytest_not_slow": {
+      "result": "PASS",
+      "passed": 489,
+      "deselected": 7,
+      "duration_seconds": 166.45
+    },
+    "check_contracts_models": {
+      "result": "EXIT 1 (intended)",
+      "reason": "Legacy flat bundle models/feature_cols.pkl is quarantined by feature_schema_v4 because it declares forbidden current-game *_TEAM outcomes (AST_TEAM, DREB_TEAM, FGA_TEAM, FTA_TEAM, OREB_TEAM, PTS_TEAM, REB_TEAM, TOV_TEAM). This is documented intended behavior per AGENTS.md and src/contracts/features.py until the bundle is retrained; it is not a regression caused by this PR.",
+      "allowed_migration_mode": "--allow-legacy-artifacts (explicitly unsafe; never eligible for replay or promotion)"
+    }
+  },
+  "exit_gate": {
+    "status": "PASS",
+    "criteria": "Baseline artifact exists and no production file changed.",
+    "production_files_changed_in_this_pr": []
+  }
+}
