@@ -258,15 +258,6 @@ class EventLedger:
             team_residuals=team_resids,
         )
 
-    # -- token lookup ----------------------------------------------------
-    def _resolve_inventory(
-        self, token: LedgerToken
-    ) -> Tuple[Optional[PlayerEventInventory], Optional[TeamResidualInventory]]:
-        """Find the inventory that owns ``token``."""
-        if token.player_id is not None:
-            return self._player_inventories.get(token.player_id), None
-        return None, self._team_residuals.get(token.team_id)
-
     # -- consume / release -----------------------------------------------
     def consume(self, token: LedgerToken) -> None:
         """Mark one token as consumed.
@@ -519,15 +510,12 @@ def events_to_player_counts(
     attempt was blocked.
     """
     counts: Dict[int, AggregatedPlayerCounts] = {}
-    # We need team_id context to initialize player rows; infer from event.
-    team_of: Dict[int, int] = {}
 
     for evt in events:
         if evt.is_team_event or evt.actor_player_id is None:
             continue
         pid = evt.actor_player_id
         if pid not in counts:
-            team_of[pid] = evt.offense_team_id
             counts[pid] = _empty_player_counts(pid, evt.offense_team_id)
         pc = counts[pid]
 

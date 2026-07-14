@@ -234,8 +234,13 @@ def validate_team_line(team: TeamBoxLine, report: GameValidationReport) -> None:
 # ---------------------------------------------------------------------------
 # Player-vs-team sums (Section 9.3) and cross-team (Section 9.4)
 # ---------------------------------------------------------------------------
-def _player_sums(players: Tuple[PlayerBoxLine, ...]) -> Dict[str, int]:
-    sums: Dict[str, int] = {}
+def _player_sums(players: Tuple[PlayerBoxLine, ...]) -> Dict[str, float]:
+    """Sum every conserved stat, plus minutes and plus/minus across players.
+
+    Returns float-typed values because minutes and plus/minus are floats; the
+    integer count stats are exact integers stored as floats harmlessly.
+    """
+    sums: Dict[str, float] = {}
     for stat in _EXACT_SUM_STATS + ("tov",):
         sums[stat] = sum(getattr(p, stat) for p in players)
     sums["minutes"] = sum(p.minutes for p in players)

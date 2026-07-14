@@ -145,8 +145,6 @@ def hash_source_rows(rows: pd.DataFrame, columns: Tuple[str, ...]) -> str:
     Rows are serialized in their current order and hashed as one JSON list so
     the digest reflects both values and row membership. Output is a hex string.
     """
-    if columns is None:
-        raise ValueError("columns must be provided")
     if len(rows) == 0:
         return hashlib.sha256(b"[]").hexdigest()
     payload = json.dumps(
@@ -297,7 +295,6 @@ def _dedupe_players(
     are collapsed to one (Section 9.2 rule 6).
     """
     key = ["GAME_ID", "TEAM_ID", "PLAYER_ID"]
-    canonical_view = df[key + [c for c in df.columns if c not in key]]
 
     exact_dupes = df.duplicated(keep="first")
     if exact_dupes.any():
