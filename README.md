@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![GPU Support](https://img.shields.io/badge/GPU-CUDA%20Optional-76b900.svg)](https://developer.nvidia.com/cuda-zone)
 
-A production-grade CLI ML system for predicting NBA player statistics (PTS, REB, AST, STL, BLK, TOV). Combines a CatBoost + Transformer ensemble, 25+ group modular feature engineering, GPU-accelerated Monte Carlo simulation with archetype-conditioned correlations, a self-optimizing blend-weight tuner, and an interactive probability query CLI. No web server, no Docker, no database — pure-Python with CSV/JSON artifacts.
+A production-grade CLI ML system for predicting NBA player statistics (PTS, REB, AST, STL, BLK, TOV). Supports a CatBoost + Transformer full training preset, modular feature engineering (26 built-in registered feature groups plus extensions), GPU-accelerated Monte Carlo simulation with archetype-conditioned correlations, a manual blend-weight tuner (disabled by default), and an interactive probability query CLI. No web server, no Docker, no database — pure-Python with CSV/JSON artifacts. The loaded model stack is artifact-dependent, not set by the CLI default — run `python inspect_artifacts.py --models-dir models` to see what the deployed artifacts actually contain.
 
 ---
 
@@ -23,7 +23,7 @@ A production-grade CLI ML system for predicting NBA player statistics (PTS, REB,
   - [3. Model Training](#3-model-training)
   - [4. Simulation Engine](#4-simulation-engine)
   - [5. Query System](#5-query-system)
-  - [6. Self-Optimization Loop](#6-self-optimization-loop)
+  - [6. Ensemble Weight Optimization (Manual)](#6-ensemble-weight-optimization-manual)
 - [Configuration Reference](#configuration-reference)
 - [CLI Reference](#cli-reference)
 - [Project Structure](#project-structure)
@@ -43,7 +43,7 @@ A production-grade CLI ML system for predicting NBA player statistics (PTS, REB,
 1. Per-player point projections with a distribution (mean, std, skew, zero-prob), not just a point estimate.
 2. Calibrated over/under probabilities using the best-fit distribution per stat (empirical bootstrap, gamma, Poisson, NB, ZIP, Normal).
 3. Per-game Monte Carlo simulations with archetype-conditioned stat correlations.
-4. Self-tuning ensemble weights that retune against backtest evidence and roll back automatically if they regress.
+4. Manual ensemble-weight tuning (disabled by default) that evaluates candidates against backtest evidence; an optimization attempt may validly reject a candidate, leaving the current weights untouched.
 
 Intended use cases: sports analytics, fantasy projections, betting-market evaluation.
 
@@ -97,9 +97,9 @@ Intended use cases: sports analytics, fantasy projections, betting-market evalua
 
 ## Key Subsystems
 
-### 1. Modular Feature Engineering (25+ groups, not a fixed pipeline)
+### 1. Modular Feature Engineering (registered groups, not a fixed pipeline)
 
-Each feature group is an independently toggleable `FeatureGroup` class. The `full` preset enables all 25+ groups; the `small` preset trims the set and skips Transformer.
+Each feature group is an independently toggleable `FeatureGroup` class. The `full` preset enables every registered group; `small` enables six core groups and skips Transformer; `laptop_quality` enables 13 groups plus smart feature selection.
 
 - **Performance core** — rolling windows (3/5/10/20/50), efficiency (TS%, eFG%), EWMA momentum, hot/cold streaks
 - **Context** — home/away, rest, back-to-back, fatigue, recency form
@@ -113,11 +113,19 @@ Each feature group is an independently toggleable `FeatureGroup` class. The `ful
 
 ### 2. Model Stack
 
-| Model | Role | Active? |
-|-------|------|---------|
-| CatBoost (per-target, RMSE+MAE multi-loss + quantile regression) | Primary | ✅ |
-| Transformer (attention over recent games) | Secondary, sequence context | ✅ (full preset only) |
-| CatBoost MAE-companion (per-target) | Blended with primary CatBoost | ✅ |
+| Model | Role | Preset availability |
+|-------|------|---------------------|
+| CatBoost (per-target, RMSE + MAE multi-loss + quantile regression) | Primary | all presets |
+| Transformer (attention over recent games) | Secondary, sequence context | `full` only |
+| CatBoost MAE-companion (per-target) | Blended with primary CatBoost | optional — only when multi-loss companions are trained |
+
+| Preset | Stack | Feature groups |
+|--------|-------|----------------|
+| `full` | CatBoost + Transformer | all registered groups |
+| `small` | CatBoost only | six groups |
+| `laptop_quality` | CatBoost only | 13 groups plus smart feature selection |
+
+The default active CatBoost path has no MAE companion model: the active training config forces `use_multi_loss=false`, so the deployed bundle contains no `*_catboost_mae.cbm` files and the global MAE-blend field in `current.json` is currently inert.
 
 ### 3. Probability Distribution Engine
 
@@ -130,18 +138,25 @@ Not just `Normal(μ, σ)`. The query layer fits the best of:
 
 Distribution is derived from P10/P50/P90 quantile model output via `DistributionFitter`, which yields (mean, std, skew, zero_prob, λ).
 
-### 4. Self-Optimizing Ensemble
+### 4. Ensemble Weight Optimization
 
-The blend weights are **not** hardcoded. They live in a versioned JSON store at `models/blend_weights/` (atomic writes, rollback, parent-version tracking). `optimize_weights.py` runs a closed loop:
+The blend weights are **not** hardcoded. They live in a versioned JSON store at `models/blend_weights/` (atomic writes, rollback, parent-version tracking). `optimize_weights.py` is a manual, disabled-by-default capability — run it explicitly with a date range (see Section 6):
 
 ```
 BacktestRunner → baseline MAE on holdout
-EnsembleOptimizer → scipy.optimize over 13-dim weight space
+EnsembleOptimizer → scipy.optimize over a component-derived parameter layout
   ├─ evaluate candidate on holdout → candidate MAE
-  ├─ if candidate beats baseline by > threshold AND verify run passes → promote
-  └─ else reject (atomic write never executed)
+  ├─ compare candidate vs current weights on the same verification window
+  ├─ if candidate improves by > threshold AND verification passes → promote
+  └─ else reject (current weights untouched; rejection is a valid outcome)
 DriftDetector → flags when rolling MAE exceeds 2σ above baseline
 ```
+
+The search layout is derived from the loaded model components, not a fixed
+dimension: per-target CatBoost/Transformer ratios and intercepts (12
+parameters for six targets when a Transformer is loaded), and 13 parameters
+only when a global CatBoost/MAE companion blend is also active. A
+CatBoost-only bundle never receives non-zero Transformer weights.
 
 ### 5. Contracts Layer
 
@@ -290,7 +305,7 @@ Training modes (per preset):
 | standard | 3000 | 100 | All models |
 | full | 5000 | 200 | All models |
 
-**Ensemble blend weights** (the old hardcoded `0.50 / 0.15 / 0.15 / 0.15 / 0.05`) are **no longer in source**. They live in `models/blend_weights/current.json` and are tuned by the self-optimization loop (Section 6).
+**Ensemble blend weights** (the old hardcoded `0.50 / 0.15 / 0.15 / 0.15 / 0.05`) are **no longer in source**. They live in `models/blend_weights/current.json` and **can be tuned** via the manual optimizer (Section 6). The currently deployed version 1 is a training-time initialization, not an optimizer promotion — its `backtest_score` is `null` until an optimization run is accepted.
 
 **CatBoost parallelism**:
 - CPU: `--parallel --max-workers N` (size to cores)
@@ -311,7 +326,7 @@ models/
 ├── blend_weights/              (versioned JSON store — see Section 6)
 │   ├── v0001.json
 │   ├── v0002.json
-│   └── current.json            # pointer to active version
+│   └── current.json            # copy of the active version (not a pointer/symlink)
 └── feature_selection_manifest.json   (if --feature-selection smart)
 ```
 
@@ -413,14 +428,17 @@ LeBron James (LAL) vs BOS
 
 A query will print a visible warning if the underlying projection was flagged `DEGRADED_FALLBACK` or `DEGRADED_MISSING`.
 
-### 6. Self-Optimization Loop
+### 6. Ensemble Weight Optimization (Manual)
 
 ```bash
 # Backtest a date range
-python backtest.py --start 2026-04-15 --end 2026-05-01
+python backtest.py --from 2026-04-15 --to 2026-05-01
 
-# Tune ensemble weights on a holdout
-python optimize_weights.py --holdout-start 2026-04-15 --holdout-end 2026-05-01
+# Tune ensemble weights on a holdout (manual, disabled by default)
+python optimize_weights.py --from 2026-04-15 --to 2026-05-01 --verify-from 2026-05-02 --verify-to 2026-05-15
+
+# Dry-run: evaluate a candidate without saving anything
+python optimize_weights.py --from 2026-04-15 --to 2026-05-01 --dry-run
 
 # Variance reduction (CRPS-driven)
 python optimize_variance.py
@@ -432,10 +450,10 @@ python -c "from src.evaluation.drift_detector import DriftDetector; print(DriftD
 The optimizer:
 
 1. Evaluates baseline weights on a holdout
-2. Searches the 13-dim weight space (6 per-target CB/Transformer ratios + 6 per-target intercepts + 1 global CB-MAE blend) via `scipy.optimize`
-3. Re-evaluates the candidate on the same holdout
-4. If improvement exceeds threshold AND a verification run passes → atomic promotion of a new `blend_weights/v####.json` and pointer update
-5. Otherwise rejects without touching the store
+2. Searches a component-derived parameter layout via `scipy.optimize` — per-target CatBoost/Transformer ratios and intercepts (12 parameters for six targets) plus a global CatBoost/MAE blend parameter only when an MAE companion model is loaded (13 parameters)
+3. Re-evaluates the candidate and the current weights on the same verification window
+4. If improvement exceeds threshold AND a verification run passes → atomic promotion of a new `blend_weights/v####.json`, and `current.json` is updated to a copy of the active version
+5. Otherwise rejects — the store is untouched and the current weights stay; rejection is a valid outcome, not a failure
 
 ---
 
@@ -465,11 +483,26 @@ training_presets:
     default_model_size: "M"
     transformer_enabled: true
     feature_engineer:
-      enable_groups: [<all 25+ groups>]
+      enable_groups: ["all"]   # every registered group (built-ins + extensions)
   small:
+    default_mode: "quick"
+    default_model_size: "S"
     transformer_enabled: false
     feature_engineer:
-      enable_groups: [<core groups only>]
+      enable_groups: ["rolling", "efficiency", "momentum", "pace",
+                      "opponent_strength", "archetype"]   # six core groups
+  laptop_quality:
+    default_mode: "standard"
+    default_model_size: "S"
+    transformer_enabled: false
+    feature_selection:
+      enabled: true            # smart selection on by default for this preset
+      profile: balanced
+    feature_engineer:
+      enable_groups: ["rolling", "efficiency", "momentum", "context", "fatigue",
+                      "minutes_confidence", "rest_density", "matchup",
+                      "opponent_strength", "pace", "team_role", "recency_form",
+                      "archetype"]   # 13 groups
 
 catboost:
   iterations: 2000
@@ -501,7 +534,7 @@ simulation:
 | `python simulate_season.py` | Run simulations |
 | `python query_prob.py` | Interactive / one-shot probability queries |
 | `python backtest.py` | Standalone backtest |
-| `python optimize_weights.py` | Self-optimize ensemble weights |
+| `python optimize_weights.py` | Manually tune ensemble weights (opt-in, disabled by default) |
 | `python optimize_variance.py` | Variance reduction via CRPS |
 | `python check_contracts.py` | Validate artifact contract between steps |
 | `python clear_cache.py --all --yes` | Wipe generated artifacts (keeps raw CSVs) |
@@ -555,7 +588,7 @@ knowing/
 │   ├── blend_weights.pkl          # Backward-compat shim → blend_weights/current.json
 │   ├── blend_weights/             # Versioned JSON store
 │   │   ├── v0001.json … vNNNN.json
-│   │   └── current.json           # pointer
+│   │   └── current.json           # copy of the active version
 │   ├── feature_selection_manifest.json  # From --feature-selection smart
 │   └── model_stack_metadata.pkl
 │
@@ -587,7 +620,7 @@ knowing/
 ├── simulate_season.py             # Simulation orchestrator
 ├── query_prob.py                  # Query CLI
 ├── backtest.py                    # Backtest CLI
-├── optimize_weights.py            # Self-optimizer CLI
+├── optimize_weights.py            # Manual weight tuner CLI (opt-in)
 ├── optimize_variance.py           # CRPS variance reduction
 ├── check_contracts.py             # Artifact contract validator
 ├── clear_cache.py                 # Cleanup utility
@@ -650,7 +683,7 @@ Preserves: `data/nba_players.csv`, `data/nba_games.csv`, `data/injury_history.cs
 
 See `AGENTS.md` for the agent-facing gotchas (the source of truth for AI work in this repo). Highlights:
 
-- **Active model stack**: CatBoost + Transformer.
+- **Supported model stack**: the `full` preset supports CatBoost + Transformer; `small` and `laptop_quality` are CatBoost-only. The deployed stack is artifact-dependent — run `python inspect_artifacts.py --models-dir models` instead of inferring it from the CLI default or this file.
 - **CatBoost GPU**: `--max-workers 1` to avoid CUDA context contention.
 - **Gitignore is root-only** (`/data/`, `/models/`), so `src/data/` and `src/models/` are tracked.
 - **PyTorch test shim** in `src/__init__.py` activates under pytest on machines without a working PyTorch.

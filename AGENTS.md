@@ -12,13 +12,14 @@ source venv/bin/activate
 
 No linter or formatter is installed (no ruff/flake8/pylint). Follow PEP 8.
 
-## Tests (260+ total)
+## Tests (600+ total)
 
 ```bash
 pytest tests/ -v                  # full suite (slow — several minutes)
 pytest tests/test_config/ -v      # single package (fast)
 pytest tests/test_query/ -v       # single package (fast)
 pytest -m "not slow"              # skip slow-marked tests
+pytest --collect-only -q          # exact current count (600+ and growing)
 ```
 
 Custom markers: `slow`, `gpu`, `integration` (registered in `tests/conftest.py`).
@@ -68,14 +69,20 @@ src/
   config/          — config loading (main config: config/default.yaml)
   data/            — scrapers (NBA API, ESPN injuries, Rotowire lineups, Action Network betting, Basketball Reference, player bios)
                      base_scraper.py + extensions/ — pluggable data-source registry (BaseScraper ABC + ScraperRegistry)
-  preprocessing/   — modular FeatureGroup architecture → 150+ features (25+ toggleable groups)
-    features/      — 21 feature modules: rolling, efficiency, momentum, context, fatigue, matchup,
-                     opponent_strength, pace, team_role, target_encoding, league_rank, minutes_confidence,
-                     recency_form, lineup_stability, rest_density, injury_opportunity, teammate_usage,
-                     defense_position, injury_risk, aging_curve, kan_aging, skill_development,
-                     archetype, season_phase, team_motivation, postseason_context
+  preprocessing/   — modular FeatureGroup architecture → 150+ features
+    features/      — 26 built-in registered feature groups across 20 built-in
+                     implementation files, plus extension groups (auto-discovered).
+                     Do not assume one file per group name: five built-in files
+                     intentionally contain multiple groups (see mapping below).
                      registry.py — FeatureGroupRegistry (single source of truth for group names + leak-safe prefixes)
                      extensions/ — pluggable feature groups (auto-discovered, no edits to __init__/_build_groups/presets)
+
+Many-groups-to-one-file mapping (intentional, not missing functionality):
+  rolling.py         → rolling, efficiency, momentum
+  context.py         → context, fatigue
+  matchup.py         → matchup, opponent_strength
+  pace_role.py       → pace, team_role
+  target_encoding.py → target_encoding, league_rank
   models/          — model_manager.py (live bridge), transformer_model.py,
                      error_calibration.py, minutes_predictor.py, gpu_utils.py
   pipeline/        — training_pipeline.py, data_pipeline.py, prediction_service.py
@@ -121,7 +128,7 @@ See `tests/test_preprocessing/test_extension_mechanism.py` for the full worked e
 
 ## Gotchas
 
-- **Active model stack**: CatBoost + Transformer.
+- **Supported model stack**: the `full` preset supports CatBoost + Transformer; `small` and `laptop_quality` are CatBoost-only. The deployed stack is artifact-dependent and must be read from artifacts, never inferred from the CLI default or docs — run `python inspect_artifacts.py --models-dir models`. In the current checkout the deployed bundle is `small`/CatBoost-only with no MAE companions, so its blend weights are a training-time initialization (no optimizer provenance).
 - **Feature engineering is cached**: `FeatureEngineer.create_features()` caches results to `cache/training/*.parquet`, keyed on the input DataFrame hash + FE config (rolling windows, enabled/disabled groups) + mtime/size of external files some groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). The cache is active by default in `DataPipeline` and `ModelManager` (training + live/simulation paths). Feature groups declare their external deps via `FeatureGroup.external_files()` so cached features are never stale when those files grow/update. To force recompute: `python clear_cache.py --all --yes` (or delete `cache/training/`).
 - **FeatureSelector leak filter (no more silent drops)**: `FeatureSelector` only keeps columns matching a safe prefix/keyword/exact rule. New feature groups MUST declare `feature_prefixes`/`feature_keywords` (the registry folds these into the selector automatically); otherwise the selector now *warns* about dropped numeric columns instead of silently discarding them. Never add features whose names collide with `RAW_BOX_SCORE`/`EXCLUDE_ALWAYS`/target names.
 - **Feature-group registry is the source of truth**: `FeatureGroupRegistry` (`src/preprocessing/features/registry.py`) drives `FeatureEngineer._build_groups`, `FeatureSelector` safe prefixes, and `presets.ALL_FEATURE_GROUPS`. Use the `"all"` sentinel in a preset's `enable_groups` to enable every registered group — do not hand-maintain the full list (the old hardcoded tuple had drifted and was missing 4 lifecycle groups).
