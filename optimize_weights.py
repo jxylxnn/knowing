@@ -253,6 +253,11 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     print(f"  Candidate score: {result.candidate_score:.4f}")
     print(f"  Improvement:     {result.improvement_pct:+.2f}%")
     print(f"  Iterations:      {result.num_iterations}")
+    if result.current_verification_score is not None:
+        print(
+            f"  Verify (cur→cand): {result.current_verification_score:.4f} → "
+            f"{result.candidate_verification_score:.4f}"
+        )
     print(f"  Accepted:        {'YES ✅' if result.accepted else 'NO ❌'}")
     if result.dry_run:
         print(f"  Mode:            DRY RUN — nothing saved or deployed")

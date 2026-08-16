@@ -1,20 +1,22 @@
-"""Fake-object tests for truthful optimizer promotion and verification gates.
+"""Fake-object tests for truthful optimizer promotion, verification gates,
+and component-derived parameter layouts.
 
 Covers dry-run safety, same-window verification, non-finite verification
 rejection, weight restoration on every failure path, append-only audit
-records, and promoted-JSON provenance. Only fake runner/manager/store
-objects and tmp directories are used — the real ``models/`` tree is never
-touched.
+records, promoted-JSON provenance, and the 12/13-parameter component-derived
+layout. Only fake runner/manager/store objects and tmp directories are used
+— the real ``models/`` tree is never touched.
 """
 
 import json
 import math
 
+import numpy as np
 import pytest
 
 from src.evaluation.ensemble_optimizer import EnsembleOptimizer
 from src.evaluation.metrics import BacktestResult, TargetMetrics
-from src.evaluation.weight_store import EnsembleWeights, WeightStore
+from src.evaluation.weight_store import EnsembleWeights, TargetBlend, WeightStore
 
 TARGETS = ["PTS", "REB", "AST", "STL", "BLK", "TOV"]
 HOLDOUT_START = "2026-04-15"
@@ -28,11 +30,17 @@ VERIFY_END = "2026-04-14"
 # ---------------------------------------------------------------------------
 
 class FakeManager:
-    """Minimal ModelManager stand-in: records applied weight tags."""
+    """Minimal ModelManager stand-in: records applied weight tags.
 
-    def __init__(self):
-        # Truthy so the optimizer skips _load_models().
-        self.models = {"PTS": object()}
+    Component attributes mirror the real ModelManager surface the optimizer
+    reads: ``models`` (CatBoost), ``transformer_model``, and
+    ``catboost_mae_models`` (MAE companions).
+    """
+
+    def __init__(self, transformer=True, mae_targets=None):
+        self.models = {t: object() for t in TARGETS}
+        self.transformer_model = object() if transformer else None
+        self.catboost_mae_models = {t: object() for t in (mae_targets or [])}
         self.ensemble_weights = None
         self.applied = []  # tags of weights applied, in order
 
@@ -88,17 +96,25 @@ class FakeRunner:
         )
 
 
-class FakeStore:
-    """In-memory WeightStore stand-in: counts saves, records audit runs."""
+_MISSING = object()
 
-    def __init__(self, current=None):
-        self.current = current if current is not None else _default_weights()
+
+class FakeStore:
+    """In-memory WeightStore stand-in: counts saves, records audit runs.
+
+    ``current`` may be an EnsembleWeights instance (load_current returns it),
+    or the module-level ``_MISSING`` sentinel meaning "no current weights" so
+    the optimizer must build component-derived defaults.
+    """
+
+    def __init__(self, current=_MISSING):
+        self.current = current
         self.save_count = 0
         self.saved = []
         self.run_records = []
 
     def load_current(self):
-        return self.current
+        return None if self.current is _MISSING else self.current
 
     def save(self, weights, set_current=True):
         self.save_count += 1
@@ -175,7 +191,7 @@ def _invalid_verify_score(start, end, idx):
 
 def test_accepted_dry_run_performs_zero_saves():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, _ = _make_optimizer(manager, store, _accepting_score)
 
     result = _run(optimizer, dry_run=True)
@@ -197,7 +213,7 @@ def test_accepted_dry_run_performs_zero_saves():
 
 def test_accepted_real_run_saves_exactly_once():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, _ = _make_optimizer(manager, store, _accepting_score)
 
     result = _run(optimizer)
@@ -222,7 +238,7 @@ def test_accepted_real_run_saves_exactly_once():
 
 def test_failed_holdout_gate_restores_original_weights():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, _ = _make_optimizer(manager, store, _rejecting_holdout_score)
 
     result = _run(optimizer)
@@ -240,7 +256,7 @@ def test_failed_holdout_gate_restores_original_weights():
 
 def test_failed_verification_gate_restores_original_weights():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, _ = _make_optimizer(manager, store, _rejecting_verify_score)
 
     result = _run(optimizer)
@@ -259,7 +275,7 @@ def test_failed_verification_gate_restores_original_weights():
 
 def test_verification_uses_current_and_candidate_scores_from_same_range():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, runner = _make_optimizer(manager, store, _accepting_score)
 
     result = _run(optimizer, dry_run=True)
@@ -289,7 +305,7 @@ def test_verification_uses_current_and_candidate_scores_from_same_range():
 
 def test_invalid_verification_rejects():
     manager = FakeManager()
-    store = FakeStore()
+    store = FakeStore(current=_default_weights())
     optimizer, _ = _make_optimizer(manager, store, _invalid_verify_score)
 
     result = _run(optimizer)
@@ -379,3 +395,151 @@ def test_old_weight_json_without_new_fields_reads_backward_compatible(tmp_path):
     assert weights.optimizer_method == ""
     assert weights.per_target["PTS"].catboost == 0.7
     assert weights.per_target["PTS"].transformer == 0.3
+
+
+# ---------------------------------------------------------------------------
+# Component-derived parameter layout
+# ---------------------------------------------------------------------------
+
+def test_catboost_only_manager_rejects_no_tunable_components_and_never_saves():
+    manager = FakeManager(transformer=False, mae_targets=[])
+    store = FakeStore()  # no current weights either
+    optimizer, _ = _make_optimizer(manager, store, _accepting_score)
+
+    result = _run(optimizer)
+
+    assert not result.accepted
+    assert result.rejection_reason == "no_tunable_components"
+    assert result.num_iterations == 0
+    assert store.save_count == 0
+    assert store.saved == []
+    assert len(store.run_records) == 1
+    record = store.run_records[0]
+    assert record["status"] == "rejected"
+    assert record["reason"] == "no_tunable_components"
+    assert record["parameter_count"] == 0
+    assert record["parameter_names"] == []
+    assert record["promoted_version"] is None
+    # The manager is left with the (component-derived) default weights.
+    assert manager.ensemble_weights is not None
+
+
+def test_manager_without_transformer_never_produces_nonzero_transformer_weights():
+    # CatBoost-only manager with MAE companions: the only tunable parameter
+    # is the global CatBoost/MAE blend. No current file exists, so defaults
+    # are constructed from the loaded components.
+    manager = FakeManager(transformer=False, mae_targets=list(TARGETS))
+    store = FakeStore()
+    optimizer, _ = _make_optimizer(manager, store, _accepting_score)
+
+    result = _run(optimizer)
+
+    assert result.accepted
+    assert result.deployed
+    assert store.save_count == 1
+    for target in TARGETS:
+        tb = result.weights.per_target[target]
+        assert tb.transformer == 0.0
+        assert tb.catboost == 1.0
+        assert tb.intercept == 0.0
+    record = store.run_records[0]
+    assert record["parameter_count"] == 1
+    assert record["parameter_names"] == ["catboost_mae_blend"]
+
+
+def test_six_target_transformer_only_manager_produces_twelve_parameter_layout():
+    manager = FakeManager(transformer=True, mae_targets=[])
+    store = FakeStore(current=_default_weights())
+    optimizer, _ = _make_optimizer(manager, store, _accepting_score)
+
+    layout = optimizer._build_parameter_layout()
+
+    assert len(layout) == 12
+    assert len(layout.names) == 12
+    assert layout.mae_blend_index is None
+    assert layout.mae_targets == ()
+    assert "catboost_mae_blend" not in layout.names
+    assert layout.names[0] == "catboost_ratio_PTS"
+    assert layout.names[1] == "intercept_PTS"
+    assert layout.names[11] == "intercept_TOV"
+
+    result = _run(optimizer, dry_run=True)
+    assert result.accepted
+    record = store.run_records[0]
+    assert record["parameter_count"] == 12
+    assert record["parameter_names"] == layout.names
+
+
+def test_six_target_transformer_plus_mae_manager_produces_thirteen_parameter_layout():
+    manager = FakeManager(transformer=True, mae_targets=list(TARGETS))
+    store = FakeStore(current=_default_weights())
+    optimizer, _ = _make_optimizer(manager, store, _accepting_score)
+
+    layout = optimizer._build_parameter_layout()
+
+    assert len(layout) == 13
+    assert layout.mae_blend_index == 12
+    assert layout.names[-1] == "catboost_mae_blend"
+    assert layout.mae_targets == tuple(TARGETS)
+
+    result = _run(optimizer, dry_run=True)
+    assert result.accepted
+    record = store.run_records[0]
+    assert record["parameter_count"] == 13
+    assert record["parameter_names"] == layout.names
+
+
+def test_partial_mae_companion_set_only_changes_targets_with_companions():
+    manager = FakeManager(transformer=True, mae_targets=["PTS"])
+    store = FakeStore(current=_default_weights())
+    optimizer, _ = _make_optimizer(manager, store, _accepting_score)
+
+    layout = optimizer._build_parameter_layout()
+
+    assert len(layout) == 13  # 6 ratios + 6 intercepts + 1 MAE blend
+    assert layout.mae_targets == ("PTS",)
+    assert layout.mae_blend_index == 12
+
+    # Tune the global MAE blend to 0.9: only PTS (which has a companion)
+    # changes; every other target keeps its base 0.7.
+    vec = np.zeros(len(layout))
+    vec[layout.mae_blend_index] = 0.9
+    decoded = optimizer._vector_to_weights(vec, layout, base_weights=store.current)
+
+    assert decoded.per_target["PTS"].catboost_mae_blend == 0.9
+    for target in ("REB", "AST", "STL", "BLK", "TOV"):
+        assert decoded.per_target[target].catboost_mae_blend == 0.7
+
+
+def test_candidate_validation_rejects_impossible_weights_before_backtest():
+    manager = FakeManager(transformer=False, mae_targets=list(TARGETS))
+    store = FakeStore()
+    optimizer, runner = _make_optimizer(manager, store, _accepting_score)
+
+    # A Transformer weight without a loaded Transformer is impossible.
+    bad = EnsembleWeights(
+        per_target={
+            t: TargetBlend(catboost=0.5, transformer=0.5, intercept=0.0)
+            for t in TARGETS
+        },
+    )
+    with pytest.raises(ValueError, match="Transformer"):
+        optimizer.validate_candidate_weights(bad)
+
+    # Layout decoding refuses vectors of the wrong dimension.
+    layout = optimizer._build_parameter_layout()
+    assert len(layout) == 1  # only the global MAE blend
+    with pytest.raises(ValueError, match="dimension"):
+        optimizer._vector_to_weights(np.zeros(13), layout)
+
+    # Valid component-consistent weights pass validation.
+    good = EnsembleWeights(
+        per_target={
+            t: TargetBlend(catboost=1.0, transformer=0.0, intercept=0.0)
+            for t in TARGETS
+        },
+    )
+    optimizer.validate_candidate_weights(good)
+
+    # Rejection happens before any backtest runs.
+    assert runner.calls == []
