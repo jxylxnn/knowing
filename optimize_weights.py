@@ -244,6 +244,7 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         verification_start=args.verify_from,
         verification_end=args.verify_to,
         progress=not args.no_progress,
+        dry_run=args.dry_run,
     )
 
     # --- Report ---
@@ -253,6 +254,8 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     print(f"  Improvement:     {result.improvement_pct:+.2f}%")
     print(f"  Iterations:      {result.num_iterations}")
     print(f"  Accepted:        {'YES ✅' if result.accepted else 'NO ❌'}")
+    if result.dry_run:
+        print(f"  Mode:            DRY RUN — nothing saved or deployed")
 
     if not result.accepted:
         print(f"  Reason:          {result.rejection_reason}")
@@ -260,22 +263,19 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         print("  Current weights retained. No changes saved.")
         return
 
-    if args.dry_run:
-        print()
-        print("  DRY RUN — weights NOT saved. Candidate would be:")
+    if result.deployed:
+        print(f"  New version:     v{result.weights.version:04d}")
         print()
         print(result.weights.summary())
-        # Restore original weights
-        current = store.load_current()
-        if current:
-            manager.use_ensemble_weights(current)
-        return
-
-    print(f"  New version:     v{result.weights.version:04d}")
-    print()
-    print(result.weights.summary())
-    print()
-    print("  Weights saved and deployed.")
+        print()
+        print("  Weights saved and deployed.")
+    else:
+        print()
+        print("  DRY RUN — candidate accepted but weights NOT saved. Candidate would be:")
+        print()
+        print(result.weights.summary())
+        print()
+        print("  Current weights retained. No changes saved.")
 
 
 def main() -> None:

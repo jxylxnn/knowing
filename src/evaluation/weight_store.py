@@ -138,12 +138,14 @@ class WeightStore:
         ├── v0001.json
         ├── v0002.json
         ├── ...
-        ├── current.json   (copy of active version)
-        └── history.json   (log of all versions with scores)
+        ├── current.json          (copy of active version)
+        ├── history.json          (promoted version history)
+        └── optimization_runs.json (append-only optimizer-run audit log)
     """
 
     CURRENT_FILE = "current.json"
     HISTORY_FILE = "history.json"
+    RUN_RECORDS_FILE = "optimization_runs.json"
     VERSION_PREFIX = "v"
 
     def __init__(self, store_dir: str = "models/blend_weights"):
@@ -162,6 +164,9 @@ class WeightStore:
 
     def _history_path(self) -> Path:
         return self.store_dir / self.HISTORY_FILE
+
+    def _run_records_path(self) -> Path:
+        return self.store_dir / self.RUN_RECORDS_FILE
 
     def _next_version(self) -> int:
         """Find the next available version number."""
@@ -218,6 +223,58 @@ class WeightStore:
                 return json.load(f)
         except (json.JSONDecodeError, TypeError):
             return []
+
+    # ------------------------------------------------------------------
+    # Optimization-run audit log (separate from promoted version history)
+    # ------------------------------------------------------------------
+
+    def load_run_records(self) -> List[Dict[str, Any]]:
+        """Load the append-only optimization-run audit log.
+
+        Unlike ``history.json`` (which only tracks promoted weight versions),
+        this log records every completed optimization attempt: accepted,
+        rejected, and dry-run.
+        """
+        path = self._run_records_path()
+        if not path.exists():
+            return []
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to load optimization run records from %s", path)
+            return []
+        if not isinstance(data, list):
+            logger.warning("Optimization run record file %s is not a list", path)
+            return []
+        return data
+
+    def record_run(self, entry: Dict[str, Any]) -> None:
+        """Append one optimization-run audit record (atomic write).
+
+        Append-only: prior records are never rewritten or removed. This log
+        is deliberately separate from ``history.json`` so rejected and
+        dry-run attempts never appear as promoted versions.
+        """
+        records = self.load_run_records()
+        records.append(dict(entry))
+
+        json_text = json.dumps(records, indent=2, sort_keys=True)
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".json",
+            prefix=".tmp_runs_",
+            dir=str(self.store_dir),
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json_text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(tmp_path, str(self._run_records_path()))
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
     # ------------------------------------------------------------------
     # Write operations
