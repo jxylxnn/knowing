@@ -3,6 +3,7 @@ import argparse
 
 from src.contracts.artifacts import ArtifactContract, validate_runtime_artifacts
 from src.contracts.projections import validate_projection_csv
+from src.contracts.runtime_status import resolve_active_models_dir
 
 
 def parse_args():
@@ -24,9 +25,14 @@ def main():
     if args.allow_legacy_artifacts:
         print("UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled")
 
+    supplied_models_dir = Path(args.models_dir)
+    models_dir = resolve_active_models_dir(supplied_models_dir)
+    if models_dir != supplied_models_dir:
+        print(f"Resolved active champion directory: {models_dir}")
+
     validate_runtime_artifacts(
         ArtifactContract(
-            models_dir=Path(args.models_dir),
+            models_dir=models_dir,
             transformer_required=args.transformer_required,
             allow_legacy_artifacts=args.allow_legacy_artifacts,
         )
