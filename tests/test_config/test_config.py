@@ -35,6 +35,17 @@ class TestConfig:
         assert str(config.data.data_dir) == str(temp_data_dir['data_dir'])
         assert str(config.data.models_dir) == str(temp_data_dir['models_dir'])
 
+    def test_model_v2_config_loads_through_canonical_loader(self):
+        from src.config import Config
+
+        config = Config.from_yaml(Path("config/model_v2.yaml"))
+
+        assert config.architecture == "v2"
+        assert config.data.strict_core is True
+        assert "rosters" in config.data.required_sources
+        assert config.features.enabled_families
+        assert config.simulation.regulation_team_minutes == 240
+
 
 class TestTrainingConfig:
     """Tests for TrainingConfig."""

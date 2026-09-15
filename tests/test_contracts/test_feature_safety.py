@@ -12,6 +12,7 @@ from src.contracts.features import (
     FEATURE_SCHEMA_VERSION,
     TARGET_COLUMNS,
     is_forbidden_feature,
+    load_feature_schema,
     validate_feature_frame,
     validate_feature_names,
 )
@@ -88,3 +89,29 @@ def test_legacy_mode_is_explicit_and_does_not_make_it_strict(tmp_path):
 def test_feature_frame_contract_rejects_forbidden_expected_schema():
     with pytest.raises(FeatureSchemaContractError, match="PTS_TEAM"):
         validate_feature_frame(pd.DataFrame({"PTS_TEAM": [1.0]}), ["PTS_TEAM"])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"feature_cols": {"unexpected": "mapping"}},
+    ],
+)
+def test_feature_schema_loader_rejects_malformed_payloads_without_recursing(tmp_path, payload):
+    path = tmp_path / "feature_schema.pkl"
+    path.write_bytes(pickle.dumps(payload))
+
+    with pytest.raises(FeatureSchemaContractError, match="feature_cols list or schema object"):
+        load_feature_schema(path)
+
+
+def test_feature_schema_loader_rejects_self_referential_payload_without_recursing(tmp_path):
+    payload = {}
+    payload["feature_cols"] = payload
+    path = tmp_path / "feature_schema.pkl"
+    path.write_bytes(pickle.dumps(payload))
+
+    with pytest.raises(FeatureSchemaContractError, match="feature_cols list or schema object"):
+        load_feature_schema(path)

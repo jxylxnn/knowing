@@ -248,8 +248,15 @@ class TestArtifactCheckViaSubprocess:
         for target in ["pts", "reb", "ast", "stl", "blk", "tov"]:
             (models_dir / f"{target}_catboost.cbm").write_text("{}")
             joblib.dump({}, models_dir / f"{target}_metadata.joblib")
-        for fname in ["feature_schema.pkl", "feature_cols.pkl", "blend_weights.pkl"]:
-            joblib.dump({}, models_dir / fname)
+        # feature_schema_v4 requires a real ordered feature-name list in both
+        # schema files; an empty dict was only valid under the legacy policy.
+        feature_cols = ["GP", "MIN_ROLL_5", "PTS_ROLL_5", "REB_ROLL_5", "AST_ROLL_5"]
+        joblib.dump(
+            {"feature_cols": feature_cols, "version": "feature_schema_v4"},
+            models_dir / "feature_schema.pkl",
+        )
+        joblib.dump(feature_cols, models_dir / "feature_cols.pkl")
+        joblib.dump({}, models_dir / "blend_weights.pkl")
         joblib.dump(
             {"targets": ["PTS", "REB", "AST", "STL", "BLK", "TOV"]},
             models_dir / "model_stack_metadata.pkl",
