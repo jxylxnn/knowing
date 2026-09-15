@@ -1,150 +1,97 @@
 # AGENTS.md
 
-Pure-Python CLI ML project (no web server, Docker, or database). Predicts NBA player stats via ensemble deep learning + GPU-accelerated Monte Carlo simulation. venv at project root (Python 3.12).
+Pure-Python CLI project for NBA player-stat forecasts. The supported runtime
+architecture is Model v2 only. Do not add compatibility fallbacks to legacy
+flat model artifacts, the old `ModelManager`, or the retired simulator.
 
 ## Environment
 
-Always activate venv before running anything:
+Always activate the Python 3.12 virtual environment before running commands:
 
 ```bash
 source venv/bin/activate
 ```
 
-No linter or formatter is installed (no ruff/flake8/pylint). Follow PEP 8.
+No linter or formatter is installed. Follow PEP 8.
 
-## Tests (600+ total)
+## Model v2 workflow
 
-```bash
-pytest tests/ -v                  # full suite (slow — several minutes)
-pytest tests/test_config/ -v      # single package (fast)
-pytest tests/test_query/ -v       # single package (fast)
-pytest -m "not slow"              # skip slow-marked tests
-pytest --collect-only -q          # exact current count (600+ and growing)
-```
+1. `python update_data.py` fetches source data and creates immutable snapshots.
+2. `python canonicalize_data.py --snapshot-id ID` writes canonical tables.
+3. `python train.py --snapshot-id ID` creates an immutable candidate bundle.
+4. `python replay.py --predictions FILE --actuals FILE` produces replay evidence.
+5. `python promote_model.py --candidate ID` promotes only a sealed, eligible v2 bundle.
+6. `python simulate_season.py --today --snapshot-id ID` forecasts scheduled games.
+7. `python reconcile_predictions.py --actuals FILE` reconciles the official ledger.
+8. `python query_prob.py --forecast-file FILE` answers probability queries from v2 forecasts.
 
-Custom markers: `slow`, `gpu`, `integration` (registered in `tests/conftest.py`).
-No `--timeout` flag (pytest-timeout not installed); some suites are slow and may exceed default 2-min tool timeout — increase timeout if needed.
+The candidate produced by the lightweight rolling baseline is intentionally
+not promotion-eligible until official point-in-time roster/status data and
+multi-fold replay evidence exist. Never weaken that gate to make a run pass.
 
-## Pipeline (order matters: each step depends on prior output)
+## Architecture rules
 
-1. `python update_data.py` — fetch NBA data (requires internet; NBA.com API rate-limited at ~0.6s/request)
-   - `--interactive` / `-i` for first-time setup (recommended)
-   - `--all-seasons` for last 10 seasons
-   - `--update` for incremental (only new games since last run)
-   - `--force` to re-fetch even if data exists
-2. `python train.py` — train models (requires `data/` from step 1)
-   - Training preset: `--preset {small,full}` (default: `full`; `small` skips Transformer, fewer features)
-   - Training mode: `--mode {quick,standard,full}`; defaults come from preset
-   - Config: `config/default.yaml` → `training_presets`
-   - Will fail if `data/nba_players.csv` is missing. Run `update_data.py` first.
-3. `python simulate_season.py --today` — simulate games (requires `models/` from step 2)
-   - Other modes: `--date YYYY-MM-DD`, `--week`, `--season`
-   - `--sims N` for simulation count (default: 100)
-   - `--workers 1` recommended when using GPU (avoid CUDA context contention)
-4. `python query_prob.py` — interactive probability query CLI (requires models + data)
+- `plans/model_v2_full_architecture_plan.md` is the design source of truth.
+- Source snapshots, canonical tables, bundles, forecasts, and reconciliation
+  records are immutable and content-addressed.
+- Every forecast is for an explicit scheduled game and cutoff horizon.
+- Runtime prediction must load the configured v2 champion; no heuristic or
+  legacy artifact fallback is allowed.
+- Strict official forecasts require point-in-time roster membership. Historical
+  appearances are allowed only in explicitly degraded, non-official runs.
+- Participation is sampled before minutes, and each team receives exactly 240
+  regulation minutes before stat rates are sampled.
+- Training, replay, simulation, and live forecasting must share the same
+  contracts and component implementations.
 
-### Optional / Supporting Entry Points
+## Lightweight verification
 
-- `python backtest.py` — standalone backtest on a date range (uses `evaluation/backtest_runner.py`)
-- `python optimize_weights.py` — self-optimize ensemble blend weights (uses `evaluation/ensemble_optimizer.py`)
-- `python optimize_variance.py` — CRPS-driven variance reduction
-- `python check_contracts.py` — validate artifact contract between pipeline steps
-
-### Cleanup
+Do not run the full test suite on this machine unless the owner explicitly asks.
+Use focused V2 tests and CLI import checks:
 
 ```bash
-python clear_cache.py --all --dry-run               # preview
-python clear_cache.py --all --keep-models --yes     # preserve trained models
-python clear_cache.py --all --yes                   # remove all generated artifacts
+pytest tests/test_data/test_snapshots.py \
+  tests/test_data/test_canonicalize.py \
+  tests/test_models/test_v2_bundle.py \
+  tests/test_evaluation/test_v2_evaluation.py \
+  tests/test_evaluation/test_v2_replay.py \
+  tests/test_operations/test_shadow.py \
+  tests/test_operations/test_v2_ledger.py \
+  tests/test_query/test_v2_probability.py \
+  tests/test_simulation/test_joint_sampler.py \
+  tests/test_simulation/test_v2_runner.py \
+  tests/test_training/test_v2_baseline.py -q
 ```
 
-Raw CSV files in `data/` are preserved by `clear_cache`.
+Custom markers are registered in `tests/conftest.py`: `slow`, `gpu`, and
+`integration`. No `pytest-timeout` plugin is installed.
 
-## Architecture
+## Cleanup
 
-```
-Root entry points:  update_data.py, train.py, simulate_season.py, query_prob.py
-                    backtest.py, optimize_weights.py, optimize_variance.py, check_contracts.py
-src/
-  config/          — config loading (main config: config/default.yaml)
-  data/            — scrapers (NBA API, ESPN injuries, Rotowire lineups, Action Network betting, Basketball Reference, player bios)
-                     base_scraper.py + extensions/ — pluggable data-source registry (BaseScraper ABC + ScraperRegistry)
-  preprocessing/   — modular FeatureGroup architecture → 150+ features
-    features/      — 26 built-in registered feature groups across 20 built-in
-                     implementation files, plus extension groups (auto-discovered).
-                     Do not assume one file per group name: five built-in files
-                     intentionally contain multiple groups (see mapping below).
-                     registry.py — FeatureGroupRegistry (single source of truth for group names + leak-safe prefixes)
-                     extensions/ — pluggable feature groups (auto-discovered, no edits to __init__/_build_groups/presets)
-
-Many-groups-to-one-file mapping (intentional, not missing functionality):
-  rolling.py         → rolling, efficiency, momentum
-  context.py         → context, fatigue
-  matchup.py         → matchup, opponent_strength
-  pace_role.py       → pace, team_role
-  target_encoding.py → target_encoding, league_rank
-  models/          — model_manager.py (live bridge), transformer_model.py,
-                     error_calibration.py, minutes_predictor.py, gpu_utils.py
-  pipeline/        — training_pipeline.py, data_pipeline.py, prediction_service.py
-  training/        — pipeline.py (orchestrator, 50KB), catboost_trainer.py,
-                     presets.py, experiment.py, training_logger.py
-  simulation/      — game_simulator.py, season_simulator.py, phase_simulator.py,
-                     four_factors_engine.py, game_context_engine.py,
-                     player_correlation_engine.py, archetype.py, role_sampler.py,
-                     input_health.py, report_generator.py, sim_types.py, sim_cache.py, stat_utils.py
-  query/           — interactive_cli.py, probability_calculator.py, distribution_fitter.py,
-                     empirical_covariance.py, prob_formatter.py, projection_loader.py, query_parser.py
-  evaluation/      — backtest_runner.py, weight_store.py, ensemble_optimizer.py,
-                     drift_detector.py, smart_feature_selector.py, shadow_feature_filter.py,
-                     feature_group_ablation.py, metrics.py
-  contracts/       — artifacts.py, features.py, projections.py, schedule.py, errors.py
-  lifecycle/       — aging_model.py (B-Ianus Bayesian), kan_age_model.py (KAN network, CPU-only)
-  utils/           — logging, reproducibility, team_mappings, prediction_utils
-tests/             — mirrors src/ structure; conftest.py injects project root into sys.path
+```bash
+python clear_cache.py --all --dry-run
+python clear_cache.py --all --yes
 ```
 
-## Adding new data sources (extension mechanism)
+Raw CSV inputs are preserved. Never delete a snapshot or sealed bundle as part
+of routine cache cleanup. The approved tracked-file retirement list lives in
+`plans/model_v2_cleanup_manifest.md`.
 
-The system supports adding a new data source + feature group **without editing the four historical sync points** (the group module, `features/__init__.py`, `FeatureEngineer._build_groups`, and config/preset enable-lists). Drop a self-contained module into an extensions directory instead.
+## Extension points retained by v2
 
-**Data side** — add a scraper to `src/data/extensions/` subclassing `BaseScraper` (`src/data/base_scraper.py`): implement `name`, `output_files()`, and `fetch(config) -> {relative_csv_name: DataFrame}`. Then enable it in `config/default.yaml`:
-```yaml
-data_sources:
-  my_source:
-    enabled: true
-```
-`update_data.py` runs enabled scrapers after the core fetch (failures isolated per-scraper; core outputs `nba_players.csv`/`nba_games.csv` are protected from overwrite). The built-in example `advanced_tracking_scraper.py` derives tracking data from the game logs and writes `data/advanced_tracking.csv`.
+- Data scrapers in `src/data/extensions/` subclass `BaseScraper` and are enabled
+  under `data_sources` in configuration.
+- Feature groups in `src/preprocessing/features/extensions/` subclass
+  `FeatureGroup` and declare leak-safe prefixes/keywords plus external files.
+- `FeatureGroupRegistry` remains the source of truth for registered groups.
+- CatBoost and Transformer components remain available as future v2 challengers,
+  but they may enter production only through the v2 bundle and promotion gates.
 
-**Feature side** — add a feature group to `src/preprocessing/features/extensions/` subclassing `FeatureGroup`. Declare `feature_prefixes`/`feature_keywords` (so `FeatureSelector` keeps the columns — otherwise they're dropped as not leakage-safe) and `external_files()` (so the feature cache invalidates when the source CSV changes). `FeatureGroupRegistry` auto-discovers it; `FeatureEngineer._build_groups` appends extension groups after the built-ins (preserving built-in column order for contract stability). Enable via a preset's `enable_groups` or the `"all"` sentinel. The example `advanced_tracking_features.py` reads the tracking CSV and emits `ADVTRACK_*` rolling features.
+## Safety notes
 
-**Key safety properties**:
-- Additive feature changes are contract-safe (`contracts/features.py` uses `allow_extra=True`; extra columns are ignored at inference, picked up on retrain).
-- `FeatureSelector` auto-folds registry-declared safe prefixes/keywords, fixing the historical silent-drop trap; it now also *warns* when numeric columns are dropped for not matching any safe rule.
-- Extensions default to `gpu_compatible = False` and run on the CPU pandas path in `FeatureEngineerGPU` (safe default for arbitrary new logic).
-- `presets.ALL_FEATURE_GROUPS` and the `"all"` sentinel resolve to the registry truth, so the enable-list can never drift out of sync with registered groups (this fixed a live bug where the presets tuple was missing `injury_risk`, `aging_curve`, `kan_aging`, `skill_development` that config enabled).
-- A broken extension module is isolated — import/instantiation failures are logged and skipped, never aborting the core pipeline.
-
-See `tests/test_preprocessing/test_extension_mechanism.py` for the full worked example and tests.
-
-## Gotchas
-
-- **Supported model stack**: the `full` preset supports CatBoost + Transformer; `small` and `laptop_quality` are CatBoost-only. The deployed stack is artifact-dependent and must be read from artifacts, never inferred from the CLI default or docs — run `python inspect_artifacts.py --models-dir models`. In the current checkout the deployed bundle is `small`/CatBoost-only with no MAE companions, so its blend weights are a training-time initialization (no optimizer provenance).
-- **Feature engineering is cached**: `FeatureEngineer.create_features()` caches results to `cache/training/*.parquet`, keyed on the input DataFrame hash + FE config (rolling windows, enabled/disabled groups) + mtime/size of external files some groups read (`data/injury_history.csv`, `data/cache/aging_curves.csv`, `data/player_bios.csv`, `data/cache/kan_aging_outputs.csv`). The cache is active by default in `DataPipeline` and `ModelManager` (training + live/simulation paths). Feature groups declare their external deps via `FeatureGroup.external_files()` so cached features are never stale when those files grow/update. To force recompute: `python clear_cache.py --all --yes` (or delete `cache/training/`).
-- **FeatureSelector leak filter (no more silent drops)**: `FeatureSelector` only keeps columns matching a safe prefix/keyword/exact rule. New feature groups MUST declare `feature_prefixes`/`feature_keywords` (the registry folds these into the selector automatically); otherwise the selector now *warns* about dropped numeric columns instead of silently discarding them. Never add features whose names collide with `RAW_BOX_SCORE`/`EXCLUDE_ALWAYS`/target names.
-- **Feature-group registry is the source of truth**: `FeatureGroupRegistry` (`src/preprocessing/features/registry.py`) drives `FeatureEngineer._build_groups`, `FeatureSelector` safe prefixes, and `presets.ALL_FEATURE_GROUPS`. Use the `"all"` sentinel in a preset's `enable_groups` to enable every registered group — do not hand-maintain the full list (the old hardcoded tuple had drifted and was missing 4 lifecycle groups).
-- **Extension scrapers are opt-in**: `update_data.py` only runs scrapers listed under `config/default.yaml` `data_sources:` with `enabled: true`. With no `data_sources` block, zero extensions run and behaviour is unchanged. Extension scrapers can never overwrite the core `nba_players.csv`/`nba_games.csv`.
-- **CatBoost parallelism**: On GPU use `max_workers=1` (CUDA context contention); on CPU size workers to machine cores.
-- **Gitignored at root only**: `.gitignore` uses `/data/` and `/models/` (with leading slash), so only root-level `data/` and `models/` are ignored — `src/data/` and `src/models/` are tracked.
-- **PyTorch test shim**: `src/__init__.py` installs a NumPy-backed torch shim when running under pytest on machines without a working PyTorch. Tests import `src` and get the shim automatically; real runtime still requires real torch.
-- **PyTorch CUDA**: installed with CUDA support but auto-detects CPU on machines without GPU. No setup needed.
-- **NBA API rate limits**: `update_data.py` is slow for many seasons; use `--interactive` to select specific seasons.
-- **Data must exist before train**: `train.py` will fail if `data/nba_players.csv` is missing. Run `update_data.py` first.
-- **Player bio data required**: Lifecycle features need AGE and POSITION columns in `nba_players.csv`. Run `update_data.py` at least once after adding the PlayerBioScraper to populate them. Missing AGE defaults all aging features to neutral (1.0 factor).
-- **Injury history is incremental**: The `injury_history.csv` file grows over time. First runs will have sparse data — injury risk features will be near-zero for most players until several update cycles accumulate.
-- **KAN model precomputation**: KAN aging factors are pre-computed on CPU and cached to `data/cache/kan_aging_outputs.csv`. If you retrain with `--force`, delete this file to force recomputation. KAN always runs on CPU to avoid GPU contention with CatBoost/Transformer.
-- **B-Ianus aging precomputation**: Aging curves are cached to `data/cache/aging_curves.csv`. Same rule — delete to force recomputation.
-- **Ensemble weights are versioned**: Blend weights live in `models/blend_weights/` as versioned JSON (not hardcoded in source). Use `optimize_weights.py` or the `WeightStore` API — never edit `blend_weights.pkl` directly.
-- **Contracts validation**: Both `train.py` and `simulate_season.py` validate artifact contracts at startup. Run `python check_contracts.py` to debug inter-step contract issues.
-- **Feature safety is strict**: runtime schemas use `feature_schema_v4`; current-game player/team outcomes are rejected, and `check_contracts.py --models-dir models` intentionally quarantines the legacy flat bundle until it is retrained. `--allow-legacy-artifacts` is an explicit unsafe migration mode, prints a warning, and is never eligible for replay or promotion.
-- **Smart feature selection**: `train.py --feature-selection smart --selection-profile {fast,balanced,max_accuracy}` runs shadow filtering + group ablation + permutation importance. Disabled by default (`config/default.yaml` → `feature_selection.enabled: false`).
-- **Minutes predictor**: LightGBM is used by `src/models/minutes_predictor.py` when an optional minutes model is trained; its deterministic fallback remains available when no such artifact exists.
+- NBA API requests are rate-limited; avoid unnecessary refreshes.
+- Current-game outcomes are forbidden as forecast features.
+- GPU CatBoost runs should use one worker to avoid CUDA contention.
+- KAN and B-Ianus aging caches are derived inputs; invalidate them when their
+  underlying data changes.
+- Preserve unrelated changes in a dirty worktree.
