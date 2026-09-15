@@ -11,6 +11,7 @@ import time
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from curl_cffi import requests as curl_requests
 import pandas as pd
 import requests
 
@@ -94,9 +95,10 @@ def _download_schedule(*, timeout, max_attempts, retry_delay):
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
-            response = requests.get(
+            response = curl_requests.get(
                 NBA_SCHEDULE_URL,
                 headers=NBA_REQUEST_HEADERS,
+                impersonate="chrome",
                 timeout=request_timeout,
             )
             response.raise_for_status()
@@ -106,7 +108,7 @@ def _download_schedule(*, timeout, max_attempts, retry_delay):
             if not isinstance(payload, dict):
                 raise ValueError("Official NBA schedule response is not an object")
             return payload, raw, response.url
-        except (requests.RequestException, json.JSONDecodeError) as exc:
+        except (curl_requests.RequestsError, json.JSONDecodeError) as exc:
             last_error = exc
             if not _retryable(exc) or attempt == attempts:
                 break
@@ -295,9 +297,10 @@ def _sleep_before_retry(attempt, delay):
 
 
 def _retryable(exc):
-    if isinstance(exc, requests.HTTPError):
-        status = getattr(exc.response, "status_code", None)
-        return status is None or status == 429 or status >= 500
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is not None:
+        return status == 429 or status >= 500
     return True
 
 

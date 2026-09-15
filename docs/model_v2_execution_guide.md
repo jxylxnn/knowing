@@ -9,9 +9,10 @@ source venv/bin/activate
 ## Capture and rebuild
 
 Native official capture archives the response and receipt time. Schedule capture
-uses the NBA's current public schedule JSON and retries bounded transient download
-failures; roster capture uses bounded retries per team with throttling. Do not
-repeat a capture just to inspect an existing archive.
+uses a browser-compatible transport for the NBA's current public schedule JSON
+and retries bounded transient download failures; roster capture uses bounded
+retries per team with throttling. Do not repeat a capture just to inspect an
+existing archive.
 
 ```bash
 python capture_official.py --native schedule --season 2026-27

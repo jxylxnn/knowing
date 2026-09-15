@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 
+from curl_cffi import requests as curl_requests
 import pandas as pd
 import pytest
 import requests
@@ -57,7 +58,8 @@ def test_native_schedule_capture_uses_cdn_and_preserves_raw_response(
 ):
     response = _ScheduleResponse(_schedule_payload())
     monkeypatch.setattr(
-        "src.data.nba_capture.requests.get", lambda *args, **kwargs: response
+        "src.data.nba_capture.curl_requests.get",
+        lambda *args, **kwargs: response,
     )
 
     captured = capture_nba_schedule(tmp_path, season="2026-27")
@@ -76,18 +78,18 @@ def test_native_schedule_capture_uses_cdn_and_preserves_raw_response(
 
 def test_native_schedule_capture_retries_a_timeout(tmp_path, monkeypatch):
     response = _ScheduleResponse(_schedule_payload())
-    outcomes = iter([requests.Timeout("slow NBA response"), response])
+    outcomes = iter([curl_requests.RequestsError("slow NBA response"), response])
     sleeps = []
-    timeouts = []
+    request_options = []
 
     def fake_get(*args, **kwargs):
-        timeouts.append(kwargs["timeout"])
+        request_options.append(kwargs)
         outcome = next(outcomes)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
-    monkeypatch.setattr("src.data.nba_capture.requests.get", fake_get)
+    monkeypatch.setattr("src.data.nba_capture.curl_requests.get", fake_get)
     monkeypatch.setattr("src.data.nba_capture.time.sleep", sleeps.append)
 
     captured = capture_nba_schedule(
@@ -99,19 +101,23 @@ def test_native_schedule_capture_retries_a_timeout(tmp_path, monkeypatch):
 
     assert captured.is_dir()
     assert sleeps == [0.25]
-    assert timeouts == [(10.0, 30.0), (10.0, 30.0)]
+    assert [options["timeout"] for options in request_options] == [
+        (10.0, 30.0),
+        (10.0, 30.0),
+    ]
+    assert {options["impersonate"] for options in request_options} == {"chrome"}
 
 
 def test_native_schedule_capture_exhaustion_publishes_nothing(
     tmp_path, monkeypatch
 ):
     def always_timeout(*args, **kwargs):
-        raise requests.Timeout("slow NBA response")
+        raise curl_requests.RequestsError("slow NBA response")
 
-    monkeypatch.setattr("src.data.nba_capture.requests.get", always_timeout)
+    monkeypatch.setattr("src.data.nba_capture.curl_requests.get", always_timeout)
 
     with pytest.raises(
-        RuntimeError, match=r"failed after 2 attempt\(s\).*Timeout.*slow NBA"
+        RuntimeError, match=r"failed after 2 attempt\(s\).*RequestException.*slow NBA"
     ):
         capture_nba_schedule(
             tmp_path,
@@ -126,7 +132,8 @@ def test_native_schedule_capture_exhaustion_publishes_nothing(
 def test_native_schedule_capture_rejects_another_season(tmp_path, monkeypatch):
     response = _ScheduleResponse(_schedule_payload(season="2025-26"))
     monkeypatch.setattr(
-        "src.data.nba_capture.requests.get", lambda *args, **kwargs: response
+        "src.data.nba_capture.curl_requests.get",
+        lambda *args, **kwargs: response,
     )
 
     with pytest.raises(ValueError, match="2025-26.*not 2026-27"):
@@ -140,7 +147,8 @@ def test_native_schedule_capture_reports_schema_drift(tmp_path, monkeypatch):
     ]
     response = _ScheduleResponse(payload)
     monkeypatch.setattr(
-        "src.data.nba_capture.requests.get", lambda *args, **kwargs: response
+        "src.data.nba_capture.curl_requests.get",
+        lambda *args, **kwargs: response,
     )
 
     with pytest.raises(ValueError, match="schema is missing: gameDateTimeUTC"):
