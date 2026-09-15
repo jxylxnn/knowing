@@ -99,6 +99,10 @@ def test_colab_quick_mode_is_bounded_and_colab_compatible():
     assert "module in sys.modules" in source
     assert "import numpy, numpy.strings, pandas" in source
     assert "kernel.do_shutdown(restart=True)" in source
+    assert "allowed_returncodes=(0, 2)" in source
+    assert 'canonical_report.get("invalid_games", 0)' in source
+    assert 'canonical_report.get("missing_player_team_game", 0)' in source
+    assert "checking whether core coverage remains sufficient" in source
     assert source.index("packages = [") < source.index(
         "from google.colab import drive"
     )
