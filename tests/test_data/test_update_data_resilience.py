@@ -89,14 +89,23 @@ def test_colab_quick_mode_is_bounded_and_colab_compatible():
     assert "create_source_snapshot(DATA_DIR)" in source
     assert 'DATA_REFRESH == "reuse_latest"' in source
     for distribution in (
-        "numpy", "pandas", "scipy", "scikit-learn", "PyYAML", "joblib",
-        "nba_api", "requests", "curl-cffi",
+        "scipy", "scikit-learn", "PyYAML", "joblib", "nba_api",
+        "curl-cffi",
     ):
         assert (
             f'"{distribution}=={requirements_pins[distribution]}"' in source
         )
+    assert '"numpy>=2.0,<2.3"' in source
+    assert '"pandas==2.2.3"' in source
+    assert '"requests==2.32.4"' in source
+    assert '"psutil>=5.9.0"' in source
+    assert '"numpy==2.3.5"' not in source
+    assert '"pandas==2.3.3"' not in source
+    assert '"requests==2.32.5"' not in source
     assert "from importlib import metadata" in source
     assert "module in sys.modules" in source
+    assert "loaded_versions.items()" in source
+    assert "Version('2.3')" in source
     assert "import numpy, numpy.strings, pandas" in source
     assert "kernel.do_shutdown(restart=True)" in source
     assert "allowed_returncodes=(0, 2)" in source
