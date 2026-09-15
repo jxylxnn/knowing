@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from src.contracts.features import load_expected_feature_cols
 from src.evaluation.metrics import (
     BacktestResult,
     TargetMetrics,
@@ -233,6 +234,13 @@ class BacktestRunner:
         target_preds: Dict[str, List[float]] = {t: [] for t in targets}
         target_stds: Dict[str, List[float]] = {t: [] for t in targets}
 
+        try:
+            expected_feature_cols = load_expected_feature_cols(self.models_dir)
+        except Exception:
+            # Fall back to the manager's own feature columns if the artifact
+            # cannot be inspected here; per-row coercion below is best-effort.
+            expected_feature_cols = feature_cols or []
+
         n_rows = len(backtest_df)
         game_ids = backtest_df["GAME_ID"].nunique() if "GAME_ID" in backtest_df.columns else 0
 
@@ -246,6 +254,14 @@ class BacktestRunner:
                 )
 
             row_df = row.to_frame().T
+            # A single-row frame built via to_frame().T inherits object dtype
+            # for every numeric feature (the source Series is mixed-type).
+            # Coerce the expected features to numeric so the strict feature
+            # contract accepts the row; runtime prediction coerce-fills NaN.
+            if expected_feature_cols:
+                present = [col for col in expected_feature_cols if col in row_df.columns]
+                if present:
+                    row_df[present] = row_df[present].apply(pd.to_numeric, errors="coerce")
 
             try:
                 preds = self.forecast_service.predict_player_stats(row_df, history_df=None)

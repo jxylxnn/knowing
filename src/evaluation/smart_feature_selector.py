@@ -157,6 +157,8 @@ class TargetSelection:
 class SelectionManifest:
     """Top-level manifest saved to disk."""
 
+    SCHEMA_VERSION = "selection_manifest_v2"
+
     enabled: bool
     profile: str
     target_specific: bool
@@ -172,6 +174,7 @@ class SelectionManifest:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": self.SCHEMA_VERSION,
             "enabled": bool(self.enabled),
             "profile": self.profile,
             "target_specific": bool(self.target_specific),

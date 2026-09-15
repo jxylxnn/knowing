@@ -60,6 +60,25 @@ def validate_runtime_artifacts(contract: ArtifactContract) -> None:
     if not models_dir.exists():
         raise ArtifactContractError(f"Models directory does not exist: {models_dir}")
 
+    # V2 bundles carry a self-describing evidence contract and need not use
+    # the legacy flat CatBoost filenames.  Detect them before applying the
+    # compatibility contract below.
+    bundle_manifest = models_dir / "bundle_manifest.json"
+    if bundle_manifest.exists():
+        try:
+            from src.models.versioning import ModelBundleManifest
+
+            manifest = ModelBundleManifest.load(bundle_manifest)
+            if manifest.architecture == "v2":
+                from src.models.bundle import validate_v2_bundle
+
+                validate_v2_bundle(models_dir, promotion=False)
+                return
+        except Exception as exc:
+            raise ArtifactContractError(
+                f"Model v2 bundle validation failed: {bundle_manifest}"
+            ) from exc
+
     missing = [
         name
         for name in _required_files(contract.transformer_required, contract.residual_required)

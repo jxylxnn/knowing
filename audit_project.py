@@ -160,16 +160,40 @@ def _data_report(data_dir: Path) -> dict[str, Any]:
     }
 
 
-def _extract_feature_columns(value: Any) -> list[str] | None:
+def _extract_feature_columns(
+    value: Any,
+    *,
+    _seen: set[int] | None = None,
+) -> list[str] | None:
+    """Extract a feature list without recursing through malformed payloads."""
+
+    if _seen is None:
+        _seen = set()
+
     if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
         return list(value)
+
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return None
+
+    value_id = id(value)
+    if value_id in _seen:
+        return None
+    _seen.add(value_id)
+
     if isinstance(value, dict):
         for key in ("feature_cols", "features", "columns"):
-            columns = _extract_feature_columns(value.get(key))
+            columns = _extract_feature_columns(value.get(key), _seen=_seen)
             if columns is not None:
                 return columns
+        return None
+
     for attribute in ("feature_cols", "features", "columns"):
-        columns = _extract_feature_columns(getattr(value, attribute, None))
+        try:
+            nested = getattr(value, attribute, None)
+        except Exception:
+            continue
+        columns = _extract_feature_columns(nested, _seen=_seen)
         if columns is not None:
             return columns
     return None

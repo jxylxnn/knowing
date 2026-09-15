@@ -1,55 +1,41 @@
-"""Evaluation module for backtesting, optimization, drift detection,
-and smart feature selection."""
+"""Leak-safe Model v2 evaluation and promotion APIs."""
 
-from src.evaluation.metrics import BacktestResult, TargetMetrics
-from src.evaluation.backtest_runner import BacktestRunner
-from src.evaluation.feature_group_ablation import (
-    AblationReport,
-    FeatureGroupAblator,
-    GroupScore,
+from src.evaluation.baselines import TARGETS, add_lagged_baselines
+from src.evaluation.folds import (
+    FoldPartitions,
+    RollingOriginFold,
+    partition_frame,
+    rolling_origin_folds,
 )
-from src.evaluation.shadow_feature_filter import (
-    SHADOW_COLUMNS,
-    ShadowFeatureFilter,
-    ShadowFilterResult,
-)
-from src.evaluation.smart_feature_selector import (
-    ProfileConfig,
-    SelectionManifest,
-    SelectorConfig,
-    SmartFeatureSelector,
-    TargetSelection,
-    load_manifest,
-)
-from src.evaluation.continual_learning import (
+from src.evaluation.promotion import (
+    PROMOTION_EVIDENCE_SCHEMA_VERSION,
     PromotionDecision,
-    PromotionPolicy,
-    evaluate_promotion,
-    paired_bootstrap_improvement,
+    PromotionThresholds,
+    REQUIRED_CONTRACT_FLAGS,
+    REQUIRED_TARGETS,
+    evaluate_v2_promotion,
 )
-from src.evaluation.prediction_ledger import PredictionLedger
+from src.evaluation.replay import ReplayScore, score_replay
+from src.evaluation.significance import (
+    paired_game_bootstrap,
+    paired_game_bootstrap_many,
+)
 
 __all__ = [
-    # Backtest
-    "BacktestResult",
-    "TargetMetrics",
-    "BacktestRunner",
-    # Smart feature selection
-    "AblationReport",
-    "FeatureGroupAblator",
-    "GroupScore",
-    "SHADOW_COLUMNS",
-    "ShadowFeatureFilter",
-    "ShadowFilterResult",
-    "ProfileConfig",
-    "SelectionManifest",
-    "SelectorConfig",
-    "SmartFeatureSelector",
-    "TargetSelection",
-    "load_manifest",
+    "TARGETS",
+    "FoldPartitions",
     "PromotionDecision",
-    "PromotionPolicy",
-    "evaluate_promotion",
-    "paired_bootstrap_improvement",
-    "PredictionLedger",
+    "PromotionThresholds",
+    "PROMOTION_EVIDENCE_SCHEMA_VERSION",
+    "REQUIRED_CONTRACT_FLAGS",
+    "REQUIRED_TARGETS",
+    "ReplayScore",
+    "RollingOriginFold",
+    "add_lagged_baselines",
+    "evaluate_v2_promotion",
+    "paired_game_bootstrap",
+    "paired_game_bootstrap_many",
+    "partition_frame",
+    "rolling_origin_folds",
+    "score_replay",
 ]

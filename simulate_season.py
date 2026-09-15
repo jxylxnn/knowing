@@ -1,238 +1,189 @@
-import argparse
-import logging
-import sys
-import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Any
+#!/usr/bin/env python3
+"""Run opportunity-first Model v2 forecasts and joint simulations."""
 
-from src.models.model_manager import ModelManager
-from src.simulation.game_simulator import GameSimulator
-from src.data.schedule_scraper import ScheduleScraper
-from src.simulation.season_simulator import SeasonSimulator
-from src.simulation.report_generator import ReportGenerator
-from src.simulation.input_health import summarize_input_health
+from __future__ import annotations
+
+import argparse
+from datetime import date, timedelta
+import json
+from pathlib import Path
+
 import pandas as pd
 
-if sys.platform == "win32":
-    # Newer Python versions (like 3.14) prefer reconfigure() over wrapping
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    else:
-        import io
-        if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding.lower() != 'utf-8':
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from src.features.snapshot_inputs import load_snapshot_schedule
+from src.simulation.v2_runner import run_scheduled_game
+from src.operations.forecast_export import export_forecast_run
 
 
-def format_input_health_summary(run_summary: Dict[str, Any]) -> str:
-    """Format run-level input health into a readable CLI summary."""
-    overall_status = run_summary.get('overall_status', 'healthy').upper()
-    lines = [
-        "",
-        "=" * 90,
-        f"INPUT HEALTH SUMMARY [{overall_status}]",
-        "=" * 90,
-    ]
+_BUNDLE_ID_SENTINELS = frozenset({"nan", "none", "<na>"})
 
-    schedule_health = run_summary.get('schedule_health') or {}
-    if schedule_health:
-        lines.append(
-            f"Schedule: {schedule_health.get('status', 'unknown')} - {schedule_health.get('message', '')}"
-        )
 
-    input_health = run_summary.get('input_health', {})
-    counts = input_health.get('counts', {})
-    if counts:
-        lines.append(
-            "Sources: "
-            f"success={counts.get('success', 0)} "
-            f"fallback={counts.get('fallback', 0)} "
-            f"failed={counts.get('failed', 0)} "
-            f"disabled={counts.get('disabled', 0)}"
-        )
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--today", action="store_true")
+    modes.add_argument("--date")
+    modes.add_argument("--week", action="store_true")
+    modes.add_argument("--season", action="store_true", help="Next 30 days")
+    parser.add_argument("--snapshot-id", required=True)
+    parser.add_argument("--horizon", default="morning", choices=(
+        "previous_night", "morning", "pregame_90m", "pregame_30m"
+    ))
+    parser.add_argument("--schedule-file", default=None,
+                        help="Optional exact copy of the captured snapshot schedule")
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--models-dir", default="models")
+    parser.add_argument(
+        "--candidate",
+        default=None,
+        help=(
+            "Exact sealed v2 bundle directory for non-published candidate "
+            "execution; the run is a shadow attempt and never publishes to "
+            "the official ledger."
+        ),
+    )
+    parser.add_argument("--output-dir", default="data/sim_results/v2")
+    parser.add_argument("--sims", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="Allow appearance-derived rosters; output is never written to the official ledger.",
+    )
+    parser.add_argument("--json", action="store_true")
+    return parser
 
-    degraded = input_health.get('degraded_sources', [])
-    if degraded:
-        lines.append("Degraded sources: " + ", ".join(degraded))
 
-    hard_failures = run_summary.get('hard_failures', [])
-    if hard_failures:
-        lines.append("Hard failures: " + ", ".join(hard_failures))
-
-    for source in input_health.get('sources', []):
-        if source.get('status') == 'success':
-            continue
-        lines.append(
-            f"- {source.get('source_key')}: {source.get('status')} - {source.get('message')}"
-        )
-
-    lines.append("=" * 90)
-    return "\n".join(lines)
-
-def main() -> None:
-    """
-    Main entry point for NBA season simulation.
-    
-    Parses command-line arguments and executes the appropriate simulation mode.
-    """
-    parser = argparse.ArgumentParser(description='NBA Season & Schedule Simulator')
-    
-    # Mode selection
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--today', action='store_true', help='Simulate all games for today')
-    group.add_argument('--date', type=str, help='Simulate games for a specific date (YYYY-MM-DD)')
-    group.add_argument('--week', action='store_true', help='Simulate games for the upcoming 7 days')
-    group.add_argument('--season', action='store_true', help='Simulate all remaining games in the season')
-    
-    # Configuration
-    parser.add_argument('--sims', type=int, default=100, help='Number of simulations per matchup (default: 100)')
-    parser.add_argument('--workers', type=int, default=1, help='Number of parallel workers (default: 1). Use 1 for stability with GPU.')
-    parser.add_argument('--stat', type=str, default='mode', choices=['mode', 'mean', 'both'],
-                       help='Statistic type to display: mode (most likely), mean (average), or both')
-    parser.add_argument('--no-csv', action='store_true', help='Disable CSV export')
-    parser.add_argument('--data-dir', type=str, default='data', help='Data directory (default: data)')
-    parser.add_argument('--models-dir', type=str, default='models', help='Models directory (default: models)')
-    parser.add_argument('--output-dir', type=str, default=None, help='Output directory for projections (default: <data-dir>/sim_results)')
-    parser.add_argument('--strict', action='store_true',
-                       help='Fail fast if optional context (injuries, lineups, betting) is missing or degraded')
-    parser.add_argument('--allow-legacy-artifacts', action='store_true',
-                       help='Use quarantined legacy artifacts with an explicit unsafe-mode warning')
-    
-    args = parser.parse_args()
-
-    # Safety check for Windows + GPU + Parallelism
-    if args.workers > 1 and sys.platform == "win32":
-        try:
-            import torch
-            if torch.cuda.is_available():
-                print("\n[WARNING] GPU detected on Windows with multiple workers.", flush=True)
-                print("Parallel execution with CUDA often causes deadlocks/crashes.", flush=True)
-                print("Forcing --workers 1 for stability.", flush=True)
-                args.workers = 1
-        except ImportError:
-            pass
-
-    # 1. Initialize Components
+def main() -> int:
+    args = build_parser().parse_args()
+    dates = _dates(args)
+    mode = _execution_mode(args)
+    official = mode == "official"
     try:
-        output_dir = args.output_dir if args.output_dir else os.path.join(args.data_dir, 'sim_results')
-        
-        if args.allow_legacy_artifacts:
-            print('UNSAFE LEGACY ARTIFACT MODE: replay and promotion are disabled', flush=True)
-        manager = ModelManager(
-            data_dir=args.data_dir,
-            models_dir=args.models_dir,
-            allow_legacy_artifacts=args.allow_legacy_artifacts,
+        schedule = _schedule(args, dates)
+        forecasts = []
+        samples = []
+        for offset, (_, game) in enumerate(schedule.iterrows()):
+            forecast, simulated = run_scheduled_game(
+                game,
+                source_snapshot_id=args.snapshot_id,
+                data_dir=args.data_dir,
+                models_dir=args.models_dir,
+                horizon=args.horizon,
+                simulations=args.sims,
+                seed=args.seed + offset,
+                strict=not args.allow_degraded,
+                persist=not args.allow_degraded,
+                candidate_dir=args.candidate,
+            )
+            forecasts.append(forecast)
+            simulated = simulated.copy()
+            simulated["GAME_ID"] = str(game["GAME_ID"])
+            samples.append(simulated)
+        forecast_frame = pd.concat(forecasts, ignore_index=True)
+        samples_frame = pd.concat(samples, ignore_index=True)
+        model_bundle_id = _single_model_bundle_id(forecast_frame)
+        forecast_path, samples_path = export_forecast_run(
+            args.output_dir, forecast_frame, samples_frame,
         )
-        manager.load_models()
-            
-        game_sim = GameSimulator(manager, strict_mode=args.strict)
-        schedule_scraper = ScheduleScraper()
-        season_sim = SeasonSimulator(game_sim, schedule_scraper, strict_mode=args.strict)
-        report_gen = ReportGenerator(output_dir=output_dir)
-        
-    except Exception as e:
-        if isinstance(e, FileNotFoundError):
-            print(f"\nError: {e}")
-            print("Please run training first: python train.py --models-dir <path>")
-        logger.error(f"Failed to initialize components: {e}")
-        sys.exit(1)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(json.dumps({
+            "status": "failed",
+            "architecture": "v2",
+            "mode": mode,
+            "candidate": str(args.candidate) if args.candidate else None,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }, indent=2 if args.json else None, sort_keys=True))
+        return 3
 
-    # 2. Execute Mode
-    results = []
-    hard_failure = False
-    
-    if args.today:
-        print("\nFetching today's games...")
-        results = season_sim.simulate_today(num_sims=args.sims, max_workers=args.workers)
-        
-    elif args.date:
-        print(f"\nFetching games for {args.date}...")
-        results = season_sim.simulate_date(args.date, num_sims=args.sims, max_workers=args.workers)
-        
-    elif args.week:
-        print("\nFetching games for the upcoming week...")
-        # Simulate next 7 days
-        all_games = []
-        schedule_statuses = []
-        today = datetime.now().date()
-        for i in range(7):
-            target_date = (today + timedelta(days=i)).strftime('%Y-%m-%d')
-            day_games = schedule_scraper.get_games_by_date(target_date)
-            schedule_statuses.append(schedule_scraper.get_last_fetch_status())
-            if day_games is not None and not day_games.empty:
-                all_games.append(day_games)
+    payload = {
+        "status": "complete",
+        "architecture": "v2",
+        "mode": mode,
+        "official": official,
+        "published_to_official_ledger": official,
+        "model_bundle_id": model_bundle_id,
+        "candidate": str(args.candidate) if args.candidate else None,
+        "games": len(schedule),
+        "forecast_path": str(forecast_path),
+        "samples_path": str(samples_path),
+    }
+    print(json.dumps(payload, indent=2 if args.json else None, sort_keys=True))
+    return 0
 
-        aggregated_schedule = summarize_input_health(schedule_statuses)
-        season_sim._set_schedule_health({
-            'source_key': 'schedule',
-            'status': 'failed' if aggregated_schedule.get('hard_failures') else (
-                'fallback' if aggregated_schedule.get('degraded_sources') else 'success'
-            ),
-            'required': True,
-            'message': "Aggregated weekly schedule retrieval status",
-            'details': aggregated_schedule,
-        })
-        
-        if not all_games:
-            logger.warning("No games found for the upcoming week.")
-            season_sim._finalize_run_summary([], 0)
-            results = []
-        else:
-            combined_df = pd.concat(all_games).drop_duplicates(subset=['GAME_ID'])
-            results = season_sim.simulate_games(combined_df, num_sims=args.sims, max_workers=args.workers)
-        
-    elif args.season:
-        print("\nFetching remaining season schedule (next 30 days)...")
-        results = season_sim.simulate_remaining_season(num_sims=args.sims, max_workers=args.workers)
 
-    # 3. Report Results
-    if results:
-        print(f"\n{'='*90}", flush=True)
-        print(f"Simulation phase complete. {len(results)} games simulated.", flush=True)
-        print(f"{'='*90}", flush=True)
-        
-        print(f"\nGenerating detailed reports...\n", flush=True)
-        
+def _execution_mode(args: argparse.Namespace) -> str:
+    """Classify one CLI run as official publication, shadow, or degraded."""
+
+    if args.allow_degraded:
+        return "degraded"
+    if args.candidate:
+        return "shadow"
+    return "official"
+
+
+def _single_model_bundle_id(forecast: pd.DataFrame) -> str:
+    """Return the one nonempty bundle identity shared by every forecast row.
+
+    Every row must carry a real bundle identity: a null, blank, or
+    missing-value sentinel anywhere in the column is a contract failure even
+    when the remaining rows agree on one value.
+    """
+
+    if "MODEL_BUNDLE_ID" not in forecast.columns:
+        raise ValueError("Forecast output is missing MODEL_BUNDLE_ID")
+    column = forecast["MODEL_BUNDLE_ID"]
+    if column.isna().any():
+        raise ValueError(
+            "Forecast output must carry exactly one nonempty MODEL_BUNDLE_ID; "
+            "found a missing value"
+        )
+    normalized = [value.strip() for value in column.astype(str)]
+    invalid = sorted({
+        value
+        for value in normalized
+        if not value or value.lower() in _BUNDLE_ID_SENTINELS
+    })
+    if invalid:
+        raise ValueError(
+            "Forecast output must carry exactly one nonempty MODEL_BUNDLE_ID; "
+            f"found invalid value(s) {invalid}"
+        )
+    unique = set(normalized)
+    if len(unique) != 1:
+        raise ValueError(
+            "Forecast output must carry exactly one nonempty MODEL_BUNDLE_ID; "
+            f"found {', '.join(sorted(unique))}"
+        )
+    return unique.pop()
+
+
+def _dates(args: argparse.Namespace) -> list[str]:
+    start = date.today() if args.today or args.week or args.season else pd.Timestamp(args.date).date()
+    days = 7 if args.week else 30 if args.season else 1
+    return [(start + timedelta(days=offset)).isoformat() for offset in range(days)]
+
+
+def _schedule(args: argparse.Namespace, dates: list[str]) -> pd.DataFrame:
+    frame = load_snapshot_schedule(args.data_dir, args.snapshot_id)
+    if args.schedule_file:
+        supplied = pd.read_csv(args.schedule_file, dtype=str)
         try:
-            report_gen.print_quick_summary(results, stat_type=args.stat)
-            
-            report_gen.format_console_report(results, detailed=True, stat_type=args.stat)
-            print(format_input_health_summary(season_sim.last_run_summary), flush=True)
-            
-            if not args.no_csv:
-                # Export both game results and player projections
-                game_csv = report_gen.export_to_csv(results)
-                player_csv = report_gen.export_player_projections(results)
-                
-                print(f"\nGame predictions exported to: {game_csv}", flush=True)
-                print(f"Player projections exported to: {player_csv}", flush=True)
-                
-        except Exception as e:
-            print(f"\n!!! ERROR generating reports: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            logger.error(f"Reporting error: {e}", exc_info=True)
-    else:
-        print("\nNo games found or all simulations failed for the selected period.", flush=True)
-        print(format_input_health_summary(season_sim.last_run_summary), flush=True)
+            pd.testing.assert_frame_equal(supplied, frame, check_dtype=False)
+        except AssertionError as exc:
+            raise ValueError("--schedule-file must match the named snapshot schedule") from exc
+    game_dates = pd.to_datetime(frame["GAME_DATE"], errors="raise").dt.date.astype(str)
+    frame = frame.loc[game_dates.isin(dates)].copy()
+    if frame.empty:
+        raise ValueError("No scheduled games found")
+    required = {"GAME_ID", "GAME_DATE", "SCHEDULED_TIP", "HOME_TEAM_ID", "AWAY_TEAM_ID"}
+    if missing := required - set(frame.columns):
+        raise ValueError(f"Schedule missing Model v2 columns: {sorted(missing)}")
+    if frame["SCHEDULED_TIP"].isna().any():
+        raise ValueError("Schedule contains games without a timezone-aware tipoff")
+    return frame.reset_index(drop=True)
 
-    hard_failure = bool(season_sim.last_run_summary.get('hard_failures'))
-    if hard_failure:
-        sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\nFATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    raise SystemExit(main())

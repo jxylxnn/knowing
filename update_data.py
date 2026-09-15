@@ -110,19 +110,12 @@ def get_seasons_between_dates(start_date: str, end_date: Optional[str] = None) -
     else:
         end = datetime.now()
     
-    seasons = set()
-    current = start
-    
-    while current <= end:
-        season = get_season_for_date(current.strftime('%Y-%m-%d'))
-        if season in SEASONS:
-            seasons.add(season)
-        current = current.replace(year=current.year + 1) if current.month < 10 else current.replace(year=current.year + 1, month=1)
-    
-    if not seasons:
-        return [get_current_season()]
-    
-    return sorted(list(seasons), key=lambda s: SEASONS.index(s) if s in SEASONS else 999)
+    if start > end:
+        raise ValueError("start_date must not be after end_date")
+    first_year = start.year - (start.month < 10)
+    last_year = end.year - (end.month < 10)
+    return [f"{year}-{str(year + 1)[-2:]}"
+            for year in range(first_year, last_year + 1)]
 
 
 def fetch_player_logs(season: str) -> Optional[pd.DataFrame]:
@@ -673,6 +666,7 @@ Examples:
   python update_data.py --interactive      # Interactive selection (RECOMMENDED)
   python update_data.py --full-scrape      # All NBA seasons since 1946-47
   python update_data.py --force            # Force re-fetch (ignore existing data)
+  python update_data.py --update --snapshot  # Also write immutable local snapshot
 
 Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have limited data.
         """
@@ -693,6 +687,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
                         help='Directory to save data files (default: data)')
     parser.add_argument('--current-season', action='store_true',
                         help='Fetch current season only')
+    parser.add_argument('--snapshot', action='store_true',
+                        help='Write an immutable source snapshot after a successful update')
     
     args = parser.parse_args()
     
@@ -721,6 +717,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
                 logger.info("Dataset is already up to date!")
                 logger.info(f"Latest game: {latest_date}")
                 logger.info("=" * 50)
+                if args.snapshot:
+                    _create_source_snapshot(data_dir)
                 return
             
             print(f"\n{'='*50}")
@@ -779,6 +777,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             log_injury_snapshot(data_dir)
             # Run any pluggable data-source extensions enabled in config.
             _run_configured_extensions(data_dir)
+            if args.snapshot:
+                _create_source_snapshot(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Incremental update complete!")
             logger.info(f"New player records added: {new_players}")
@@ -806,6 +806,8 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             log_injury_snapshot(data_dir)
             # Run any pluggable data-source extensions enabled in config.
             _run_configured_extensions(data_dir)
+            if args.snapshot:
+                _create_source_snapshot(data_dir)
             logger.info("\n" + "=" * 50)
             logger.info("Data update complete!")
             logger.info(f"Total player records: {len(existing_players)}")
@@ -824,6 +826,18 @@ def _run_configured_extensions(data_dir: str) -> None:
         run_extension_scrapers(data_dir, getattr(config, "data_sources", None))
     except Exception as e:
         logger.warning(f"Extension scrapers skipped (non-fatal): {e}")
+
+
+def _create_source_snapshot(data_dir: str) -> None:
+    """Create and log a checksummed immutable snapshot of current sources."""
+    from src.data.snapshots import create_source_snapshot
+
+    manifest = create_source_snapshot(data_dir)
+    logger.info(
+        "Created source snapshot %s containing %d file(s)",
+        manifest.snapshot_id,
+        len(manifest.files),
+    )
 
 
 if __name__ == "__main__":

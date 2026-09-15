@@ -116,6 +116,36 @@ class TrainingPreset:
 
 
 BUILTIN_TRAINING_PRESETS: Dict[str, TrainingPreset] = {
+    "baseline": TrainingPreset(
+        name="baseline",
+        description=(
+            "Model-v2 CatBoost champion candidate with only the priority, "
+            "point-in-time feature families and no neural default blend."
+        ),
+        default_mode="standard",
+        default_model_size="S",
+        transformer_enabled=False,
+        recent_seasons=4,
+        rolling_windows=(3, 5, 10, 20),
+        enable_groups=(
+            "rolling",
+            "efficiency",
+            "momentum",
+            "context",
+            "fatigue",
+            "minutes_confidence",
+            "rest_density",
+            "matchup",
+            "opponent_strength",
+            "pace",
+            "team_role",
+            "lineup_stability",
+            "injury_opportunity",
+            "teammate_usage",
+            "recency_form",
+            "defense_position",
+        ),
+    ),
     "full": TrainingPreset(
         name="full",
         description="Full CatBoost + Transformer stack with the complete feature set.",

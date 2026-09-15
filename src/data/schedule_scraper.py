@@ -2,7 +2,9 @@ import pandas as pd
 import logging
 import os
 import time
+import re
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from nba_api.stats.endpoints import leaguegamefinder, scoreboardv2
 from nba_api.stats.static import teams as nba_teams
@@ -10,6 +12,21 @@ from nba_api.stats.static import teams as nba_teams
 from src.contracts.schedule import normalize_schedule_frame
 
 logger = logging.getLogger(__name__)
+
+
+def _scheduled_tip(game_date: str, status_text: str) -> str | None:
+    """Parse NBA scoreboard tip text into an offset-aware timestamp."""
+
+    match = re.search(r"(\d{1,2}:\d{2}\s*[ap]m)", str(status_text), re.IGNORECASE)
+    if match is None:
+        return None
+    try:
+        local = datetime.strptime(
+            f"{game_date} {match.group(1)}", "%Y-%m-%d %I:%M %p"
+        ).replace(tzinfo=ZoneInfo("America/New_York"))
+    except ValueError:
+        return None
+    return local.isoformat()
 
 
 class ScheduleScraper:
@@ -153,6 +170,9 @@ class ScheduleScraper:
                         matchups.append({
                             'GAME_ID': game_id,
                             'GAME_DATE': game_date,
+                            'SCHEDULED_TIP': _scheduled_tip(game_date, status),
+                            'HOME_TEAM_ID': home_id,
+                            'AWAY_TEAM_ID': away_id,
                             'HOME_TEAM': self.team_map.get(home_id, str(home_id)),
                             'AWAY_TEAM': self.team_map.get(away_id, str(away_id)),
                             'STATUS': status

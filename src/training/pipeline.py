@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -54,6 +55,31 @@ from src.models.versioning import ModelBundleManifest
 from src.utils.prediction_utils import FeatureSelector, FeatureSchema
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TemporalSplit:
+    """Named chronological partitions used by training and selection.
+
+    ``__iter__`` preserves the historical three-value unpacking API while
+    making every boundary available to audit and replay code.
+    """
+
+    fit_df: pd.DataFrame
+    validation_df: pd.DataFrame
+    outer_test_df: pd.DataFrame
+    fit_end: pd.Timestamp
+    validation_start: pd.Timestamp
+    validation_end: pd.Timestamp
+    outer_test_start: pd.Timestamp
+    outer_test_end: pd.Timestamp
+    split_policy: str
+    fallback_reason: Optional[str] = None
+
+    def __iter__(self):
+        yield self.fit_df
+        yield self.validation_df
+        yield self.outer_test_df
 
 
 def _load_transformer_wrapper():
@@ -191,6 +217,7 @@ class TrainingPipeline:
         self.feature_selection_manifest: Optional[Dict[str, Any]] = None
         self.feature_selection_config: Optional[Dict[str, Any]] = None
         self.feature_selection_profile: Optional[str] = None
+        self.temporal_split: Optional[TemporalSplit] = None
         self.models: Dict[str, Any] = {}
         self.catboost_mae_models: Dict[str, Any] = {}
         self.catboost_quantile_models: Dict[str, Dict[str, Any]] = {}
@@ -228,7 +255,7 @@ class TrainingPipeline:
         train_df: pd.DataFrame,
         test_date: Optional[str] = None,
         val_ratio: float = 0.15,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    ) -> TemporalSplit:
         """Split the engineered dataset into chronological fit/val/test sets."""
         if "GAME_DATE" not in train_df.columns:
             raise ValueError("Training data must include a GAME_DATE column")
@@ -252,10 +279,17 @@ class TrainingPipeline:
         test_df = df[df["GAME_DATE"] >= split_date].copy()
         train_before = df[df["GAME_DATE"] < split_date].copy()
 
+        split_policy = "configured_date"
+        fallback_reason: Optional[str] = None
         if train_before.empty or test_df.empty:
             fallback_test_size = min(max(1, int(len(df) * 0.15)), len(df) - 2)
             train_before = df.iloc[:-fallback_test_size].copy()
             test_df = df.iloc[-fallback_test_size:].copy()
+            split_policy = "chronological_fallback"
+            fallback_reason = (
+                f"configured split date {split_date.strftime('%Y-%m-%d')} "
+                "produced an empty fit or outer-test partition"
+            )
             logger.warning(
                 "Configured split date %s produced an empty partition; using chronological fallback.",
                 split_date.strftime("%Y-%m-%d"),
@@ -289,6 +323,20 @@ class TrainingPipeline:
                 "(ROLL_, EWMA_, VS_OPP_, etc.)"
             )
 
+        split = TemporalSplit(
+            fit_df=fit_df,
+            validation_df=val_df,
+            outer_test_df=test_df,
+            fit_end=pd.Timestamp(fit_df["GAME_DATE"].max()),
+            validation_start=pd.Timestamp(val_df["GAME_DATE"].min()),
+            validation_end=pd.Timestamp(val_df["GAME_DATE"].max()),
+            outer_test_start=pd.Timestamp(test_df["GAME_DATE"].min()),
+            outer_test_end=pd.Timestamp(test_df["GAME_DATE"].max()),
+            split_policy=split_policy,
+            fallback_reason=fallback_reason,
+        )
+        self.temporal_split = split
+
         logger.info(
             "Data prepared: fit=%s, val=%s, test=%s, features=%s",
             len(fit_df),
@@ -296,7 +344,7 @@ class TrainingPipeline:
             len(test_df),
             len(self.feature_cols or []),
         )
-        return fit_df, val_df, test_df
+        return split
 
     def _select_features(self, df: pd.DataFrame) -> List[str]:
         """Select canonical leakage-safe features via the shared selector."""
@@ -331,23 +379,63 @@ class TrainingPipeline:
         """
         if not manifest_payload:
             return
+        if not self.feature_cols:
+            raise RuntimeError(
+                "Cannot apply a feature-selection manifest before prepare_data() "
+                "has established the canonical feature schema"
+            )
+
+        manifest_version = manifest_payload.get("schema_version")
+        if manifest_version is not None and manifest_version != "selection_manifest_v2":
+            raise ValueError(
+                f"Unsupported feature-selection manifest version: {manifest_version!r}"
+            )
+        metadata = manifest_payload.get("metadata") or {}
+        input_schema_hash = metadata.get("input_schema_hash")
+        if input_schema_hash and self.feature_schema is not None:
+            if input_schema_hash != self.feature_schema.schema_hash:
+                raise ValueError(
+                    "Feature-selection manifest input_schema_hash does not match "
+                    "the canonical master feature schema"
+                )
+
         by_target = manifest_payload.get("selected_features_by_target") or {}
         target_specific = bool(manifest_payload.get("target_specific", True))
+        unknown_targets = sorted(set(by_target) - set(self.TARGETS))
+        if unknown_targets:
+            raise ValueError(f"Feature-selection manifest has unknown targets: {unknown_targets}")
+
+        def normalize_columns(columns: Any, *, target: str) -> List[str]:
+            from src.contracts.features import validate_feature_names
+
+            values = list(columns or [])
+            validate_feature_names(values, context=f"feature-selection manifest target {target}")
+            selected = set(values).intersection(self.feature_cols or [])
+            return [column for column in self.feature_cols or [] if column in selected]
+
         if target_specific and by_target:
             target_feature_cols: Dict[str, List[str]] = {}
             for target, cols in by_target.items():
-                cols = [c for c in cols if c in (self.feature_cols or [])]
+                cols = normalize_columns(cols, target=str(target))
                 if cols:
                     target_feature_cols[str(target)] = cols
+            required_targets = list(manifest_payload.get("targets") or by_target.keys())
+            missing_targets = sorted(set(required_targets) - set(target_feature_cols))
+            if missing_targets:
+                raise ValueError(
+                    "Feature-selection manifest has empty or missing selections for "
+                    f"targets: {missing_targets}"
+                )
             self.target_feature_cols = target_feature_cols
         else:
-            global_features = list(
+            global_features = normalize_columns(
                 manifest_payload.get("selected_features_global")
-                or (self.feature_cols or [])
+                or (self.feature_cols or []),
+                target="global",
             )
-            global_features = [c for c in global_features if c in (self.feature_cols or [])]
-            if global_features:
-                self.target_feature_cols = {t: global_features for t in self.TARGETS}
+            if not global_features:
+                raise ValueError("Feature-selection manifest selected no global features")
+            self.target_feature_cols = {t: list(global_features) for t in self.TARGETS}
         self.feature_selection_manifest = manifest_payload
         logger.info(
             "Loaded feature selection manifest: %d targets, target_specific=%s",

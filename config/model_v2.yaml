@@ -1,0 +1,46 @@
+architecture: v2
+
+forecast:
+  horizons: [previous_night, morning, pregame_90m, pregame_30m]
+  timezone: America/New_York
+  schedule_version: schedule_v1
+data:
+  required_sources: [schedule, player_games, team_games, rosters]
+  optional_sources: [injuries, lineups, bios, tracking, odds]
+  strict_core: true
+  snapshot_format: parquet
+  replay_evidence_tiers: [native, reconstructed_point_in_time]
+features:
+  enabled_families: [player_form, opportunity, team_context, schedule, opponent, lineup_availability]
+  coverage_gates:
+    core_reconciled_fraction: 0.999
+models:
+  participation: {backend: status_and_recent_appearance_baseline}
+  minutes: {backend: rolling_20, quantiles: [0.10, 0.50, 0.90]}
+  stats: {backend: rolling_20_per_minute, targets: [PTS, REB, AST, STL, BLK, TOV]}
+evaluation:
+  fold_policy: rolling_origin
+  chronological_roles: [fit, tune, calibrate, outer_test]
+  validation_days: 14
+  test_days: 28
+  min_train_days: 90
+  baselines: [rolling_5, rolling_10, rolling_20, ema_10, minutes_x_rate_10]
+  bootstrap_unit: game
+  promotion_thresholds:
+    normalized_mae_improvement: 0.01
+    core_target_max_regression: 0.01
+    secondary_target_max_regression: 0.02
+    coverage_tolerance_overall: 0.03
+    coverage_tolerance_major_slice: 0.05
+    max_fallback_rate: 0.05
+    max_degraded_rate: 0.10
+    min_major_slice_reconciliation: 0.95
+    min_core_reconciliation: 0.999
+simulation:
+  enabled: true
+  regulation_team_minutes: 240
+  heuristic_policy: registered_only
+artifacts:
+  require_clean_git: true
+  require_code_version: true
+  require_checksums: true

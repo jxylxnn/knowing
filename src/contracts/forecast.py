@@ -13,22 +13,28 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
+import numpy as np
 import pandas as pd
 
 from src.contracts.errors import ContractError
 
-FORECAST_HORIZONS = ("previous_night", "morning", "pregame_30m")
+FORECAST_HORIZONS = ("previous_night", "morning", "pregame_90m", "pregame_30m")
 
 CANONICAL_FORECAST_COLUMNS = (
+    "REQUEST_ID",
     "MODEL_BUNDLE_ID",
-    "SNAPSHOT_ID",
+    "SOURCE_SNAPSHOT_ID",
     "GENERATED_AT",
     "FORECAST_CUTOFF",
     "GAME_ID",
+    "GAME_DATE",
+    "SCHEDULE_VERSION",
     "PLAYER_ID",
     "TEAM_ID",
     "OPPONENT_ID",
     "HORIZON",
+    "P_ACTIVE",
+    "P_PLAY_GIVEN_ACTIVE",
     "PLAY_PROB",
     "EXPECTED_MINUTES",
     "MIN_P10",
@@ -60,12 +66,14 @@ class ForecastRequest:
 
     game_id: str
     game_date: date
+    scheduled_tip: datetime
     home_team_id: int
     away_team_id: int
     forecast_cutoff: datetime
     horizon: str
     source_snapshot_id: str
     model_bundle_id: str
+    schedule_version: str = "schedule_v1"
     scenario: str = "official"
 
     def __post_init__(self) -> None:
@@ -75,6 +83,8 @@ class ForecastRequest:
             raise ContractError("ForecastRequest.source_snapshot_id is required")
         if not str(self.model_bundle_id).strip():
             raise ContractError("ForecastRequest.model_bundle_id is required")
+        if not str(self.schedule_version).strip():
+            raise ContractError("ForecastRequest.schedule_version is required")
         if self.horizon not in FORECAST_HORIZONS:
             raise ContractError(
                 f"Unknown forecast horizon {self.horizon!r}; "
@@ -93,6 +103,16 @@ class ForecastRequest:
                 raise ContractError("game_date must be date-like") from exc
         object.__setattr__(self, "game_date", game_date)
 
+        scheduled_tip = self.scheduled_tip
+        if not isinstance(scheduled_tip, datetime):
+            try:
+                scheduled_tip = pd.Timestamp(scheduled_tip).to_pydatetime()
+            except Exception as exc:
+                raise ContractError("scheduled_tip must be datetime-like") from exc
+        if scheduled_tip.tzinfo is None:
+            raise ContractError("scheduled_tip must be timezone-aware")
+        object.__setattr__(self, "scheduled_tip", scheduled_tip)
+
         cutoff = self.forecast_cutoff
         if not isinstance(cutoff, datetime):
             try:
@@ -100,8 +120,11 @@ class ForecastRequest:
             except Exception as exc:
                 raise ContractError("forecast_cutoff must be datetime-like") from exc
         if cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=timezone.utc)
+            raise ContractError("forecast_cutoff must be timezone-aware")
         object.__setattr__(self, "forecast_cutoff", cutoff)
+
+        if cutoff >= scheduled_tip:
+            raise ContractError("forecast_cutoff must be before scheduled_tip")
 
         if int(self.home_team_id) == int(self.away_team_id):
             raise ContractError("home_team_id and away_team_id must differ")
@@ -115,6 +138,7 @@ class ForecastRequest:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["game_date"] = _iso(self.game_date)
+        payload["scheduled_tip"] = _iso(self.scheduled_tip)
         payload["forecast_cutoff"] = _iso(self.forecast_cutoff)
         payload["home_team_id"] = int(self.home_team_id)
         payload["away_team_id"] = int(self.away_team_id)
@@ -134,18 +158,41 @@ def validate_forecast_frame(frame: pd.DataFrame) -> None:
     if frame.empty:
         return
 
-    for column in ("PLAY_PROB", "ZERO_PROB"):
+    try:
+        game_dates = pd.to_datetime(frame["GAME_DATE"], errors="coerce", utc=True)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ContractError(
+            "GAME_DATE must contain date-like, non-null values"
+        ) from exc
+    if game_dates.isna().any():
+        raise ContractError("GAME_DATE must contain date-like, non-null values")
+
+    for column in ("P_ACTIVE", "P_PLAY_GIVEN_ACTIVE", "PLAY_PROB", "ZERO_PROB"):
         values = pd.to_numeric(frame[column], errors="coerce")
         if values.isna().any() or ((values < 0) | (values > 1)).any():
             raise ContractError(f"{column} must contain probabilities in [0, 1]")
+        if not np.isfinite(values.to_numpy(dtype=float)).all():
+            raise ContractError(f"{column} must contain finite values")
 
     numeric = (
         "EXPECTED_MINUTES", "MIN_P10", "MIN_P50", "MIN_P90",
         "MEAN", "P10", "P25", "P50", "P75", "P90",
     )
     for column in numeric:
-        if pd.to_numeric(frame[column], errors="coerce").isna().any():
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.isna().any():
             raise ContractError(f"{column} must be numeric and non-null")
+        if not np.isfinite(values.to_numpy(dtype=float)).all():
+            raise ContractError(f"{column} must contain finite values")
+        if (values < 0).any():
+            raise ContractError(f"{column} must be nonnegative")
+
+    expected_play = (
+        pd.to_numeric(frame["P_ACTIVE"])
+        * pd.to_numeric(frame["P_PLAY_GIVEN_ACTIVE"])
+    )
+    if not expected_play.sub(pd.to_numeric(frame["PLAY_PROB"])).abs().le(1e-9).all():
+        raise ContractError("PLAY_PROB must equal P_ACTIVE * P_PLAY_GIVEN_ACTIVE")
 
     for lower, upper in (("MIN_P10", "MIN_P50"), ("MIN_P50", "MIN_P90"),
                          ("P10", "P25"), ("P25", "P50"),
@@ -160,4 +207,3 @@ def validate_forecast_frame(frame: pd.DataFrame) -> None:
 def forecast_request_from_mapping(payload: Mapping[str, Any]) -> ForecastRequest:
     """Build a request from JSON/YAML-friendly field names."""
     return ForecastRequest(**dict(payload))
-

@@ -109,7 +109,7 @@ class FeatureMaterializer:
     """Materialize exact registered features as of a forecast cutoff."""
 
     REQUEST_COLUMNS = {
-        "REQUEST_ID", "GAME_ID", "GAME_DATE", "HOME_TEAM_ID", "AWAY_TEAM_ID",
+        "REQUEST_ID", "GAME_ID", "SCHEDULE_VERSION", "GAME_DATE", "HOME_TEAM_ID", "AWAY_TEAM_ID",
         "FORECAST_CUTOFF", "HORIZON", "SOURCE_SNAPSHOT_ID", "MODEL_BUNDLE_ID",
         "SCENARIO",
     }
@@ -167,6 +167,7 @@ class FeatureMaterializer:
         request_values = {
             "REQUEST_ID": request.request_id,
             "GAME_ID": request.game_id,
+            "SCHEDULE_VERSION": request.schedule_version,
             "GAME_DATE": request.game_date.isoformat(),
             "HOME_TEAM_ID": request.home_team_id,
             "AWAY_TEAM_ID": request.away_team_id,
@@ -337,4 +338,3 @@ def materialize_training_examples(requests, snapshot_store) -> pd.DataFrame:
 def materialize_forecast(request: ForecastRequest, snapshot_store) -> pd.DataFrame:
     """Module-level forecast entry point required by the architecture plan."""
     return _DEFAULT_MATERIALIZER.materialize_forecast(request, snapshot_store)
-

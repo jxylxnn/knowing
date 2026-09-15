@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.utils.file_lock import exclusive_file_lock
+
 
 @dataclass
 class ChampionManifest:
@@ -27,6 +29,8 @@ class ChampionManifest:
     config_hash: Optional[str] = None
     code_version: Optional[str] = None
     components: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    manifest_checksum: Optional[str] = None
+    previous_version: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -43,8 +47,22 @@ class ModelBundleManifest:
     config_hash: str
     code_version: str
     components: Dict[str, Dict[str, Any]]
+    dirty_worktree: bool = True
+    source_snapshot_id: Optional[str] = None
     metrics: Dict[str, Any] = field(default_factory=dict)
     weighting_policy: Dict[str, Any] = field(default_factory=dict)
+    schema_version: str = "model_bundle_v1"
+    architecture: str = "legacy"
+    cutoffs: Dict[str, Optional[str]] = field(default_factory=dict)
+    source_snapshots: tuple[Dict[str, Any], ...] = ()
+    component_versions: Dict[str, str] = field(default_factory=dict)
+    fold_metrics: Dict[str, Any] = field(default_factory=dict)
+    aggregate_metrics: Dict[str, Any] = field(default_factory=dict)
+    slice_metrics: Dict[str, Any] = field(default_factory=dict)
+    calibration_metrics: Dict[str, Any] = field(default_factory=dict)
+    baseline_comparison: Dict[str, Any] = field(default_factory=dict)
+    promotion_decision: Dict[str, Any] = field(default_factory=dict)
+    runtime_metadata: Dict[str, Any] = field(default_factory=dict)
 
     FILE_NAME = "bundle_manifest.json"
 
@@ -59,6 +77,20 @@ class ModelBundleManifest:
         metrics: Optional[Dict[str, Any]] = None,
         weighting_policy: Optional[Dict[str, Any]] = None,
         code_version: Optional[str] = None,
+        dirty_worktree: bool = True,
+        source_snapshot_id: Optional[str] = None,
+        schema_version: str = "model_bundle_v1",
+        architecture: str = "legacy",
+        cutoffs: Optional[Dict[str, Optional[str]]] = None,
+        source_snapshots: Optional[tuple[Dict[str, Any], ...]] = None,
+        component_versions: Optional[Dict[str, str]] = None,
+        fold_metrics: Optional[Dict[str, Any]] = None,
+        aggregate_metrics: Optional[Dict[str, Any]] = None,
+        slice_metrics: Optional[Dict[str, Any]] = None,
+        calibration_metrics: Optional[Dict[str, Any]] = None,
+        baseline_comparison: Optional[Dict[str, Any]] = None,
+        promotion_decision: Optional[Dict[str, Any]] = None,
+        runtime_metadata: Optional[Dict[str, Any]] = None,
     ) -> "ModelBundleManifest":
         root = Path(directory)
         if not root.exists() or not root.is_dir():
@@ -89,8 +121,22 @@ class ModelBundleManifest:
             config_hash=config_hash,
             code_version=resolved_code_version,
             components=components,
+            dirty_worktree=dirty_worktree,
+            source_snapshot_id=source_snapshot_id,
             metrics=metrics or {},
             weighting_policy=weighting_policy or {},
+            schema_version=schema_version,
+            architecture=architecture,
+            cutoffs=cutoffs or {},
+            source_snapshots=source_snapshots or (),
+            component_versions=component_versions or {},
+            fold_metrics=fold_metrics or {},
+            aggregate_metrics=aggregate_metrics or {},
+            slice_metrics=slice_metrics or {},
+            calibration_metrics=calibration_metrics or {},
+            baseline_comparison=baseline_comparison or {},
+            promotion_decision=promotion_decision or {},
+            runtime_metadata=runtime_metadata or {},
         )
 
     @classmethod
@@ -107,23 +153,25 @@ class ModelBundleManifest:
         root.mkdir(parents=True, exist_ok=True)
         path = root / self.FILE_NAME
         payload = json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
-        if path.exists():
-            existing = path.read_text(encoding="utf-8")
-            if existing != payload:
-                raise FileExistsError(f"Immutable bundle manifest already exists: {path}")
-            return path
-        fd, temp_name = tempfile.mkstemp(
-            prefix=".bundle_manifest_", suffix=".json", dir=str(root)
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+        lock_path = path.with_name(f".{path.name}.lock")
+        with exclusive_file_lock(lock_path):
+            if path.exists():
+                existing = path.read_text(encoding="utf-8")
+                if existing != payload:
+                    raise FileExistsError(f"Immutable bundle manifest already exists: {path}")
+                return path
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".bundle_manifest_", suffix=".json", dir=str(root)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_name, path)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
         return path
 
     def validate(self, directory: str | Path) -> None:
@@ -169,14 +217,22 @@ class ModelVersionRegistry:
             return None
 
     def active_dir(self) -> Path:
-        """Resolve the active artifact directory, preserving legacy flat models."""
+        """Resolve the configured v2 champion artifact directory."""
         manifest = self.read_manifest()
         if manifest is None:
-            return self.root
+            raise FileNotFoundError(
+                f"No valid model champion is configured at {self.manifest_path}"
+            )
+        if not str(manifest.path).strip():
+            raise ValueError("Configured model champion has no artifact path")
         candidate = Path(manifest.path)
         if not candidate.is_absolute():
             candidate = self.root / candidate
-        return candidate if candidate.exists() else self.root
+        if not candidate.exists() or not candidate.is_dir():
+            raise FileNotFoundError(
+                f"Configured model champion directory does not exist: {candidate}"
+            )
+        return candidate
 
     def create_candidate(self, run_id: Optional[str] = None) -> Path:
         stamp = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -201,16 +257,33 @@ class ModelVersionRegistry:
         candidate = Path(candidate_dir).resolve()
         if not candidate.exists() or not candidate.is_dir():
             raise FileNotFoundError(f"Candidate model directory does not exist: {candidate}")
+
+        # Promotion is a strict boundary.  In particular, do not let callers
+        # promote a pre-feature_schema_v4 bundle by passing an unsafe legacy
+        # flag to a lower-level loader.  Legacy artifacts may still be opened
+        # explicitly for migration diagnostics, but they can never become the
+        # runtime champion.
         bundle_path = candidate / ModelBundleManifest.FILE_NAME
-        bundle_manifest = None
-        if bundle_path.exists():
-            bundle_manifest = ModelBundleManifest.load(bundle_path)
-            bundle_manifest.validate(candidate)
+        if not bundle_path.exists():
+            raise ValueError("Promotion requires an immutable bundle_manifest.json")
+        bundle_manifest = ModelBundleManifest.load(bundle_path)
+        bundle_manifest.validate(candidate)
+        if bundle_manifest.architecture == "v2":
+            from src.models.bundle import validate_v2_bundle
+
+            validate_v2_bundle(candidate, promotion=True)
+        else:
+            raise ValueError("Only Model v2 bundles may become the runtime champion")
+        if not bundle_manifest.code_version or bundle_manifest.code_version == "unknown":
+            raise ValueError("Promotion requires a known bundle code_version")
+        if bundle_manifest.dirty_worktree:
+            raise ValueError("Promotion requires a bundle built from a clean worktree")
         version = version or candidate.name
         try:
             relative_path = os.path.relpath(candidate, self.root.resolve())
         except ValueError:
             relative_path = str(candidate)
+        previous = self.read_manifest()
         manifest = ChampionManifest(
             version=version,
             path=relative_path,
@@ -226,6 +299,8 @@ class ModelVersionRegistry:
             config_hash=bundle_manifest.config_hash if bundle_manifest else None,
             code_version=bundle_manifest.code_version if bundle_manifest else None,
             components=bundle_manifest.components if bundle_manifest else {},
+            manifest_checksum=_sha256_file(bundle_path),
+            previous_version=previous.version if previous else None,
         )
         self.root.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(

@@ -16,6 +16,20 @@ class DataConfig:
     raw_data_file: str = "nba_games.csv"
     use_parquet: bool = False
     parquet_compression: str = "zstd"
+    # Model-v2 source policy.  These fields intentionally live alongside the
+    # legacy paths so ``config/model_v2.yaml`` can be loaded by the same
+    # configuration entry point as the rest of the application.
+    required_sources: List[str] = field(
+        default_factory=lambda: ["schedule", "player_games", "team_games", "rosters"]
+    )
+    optional_sources: List[str] = field(
+        default_factory=lambda: ["injuries", "lineups", "bios", "tracking", "odds"]
+    )
+    strict_core: bool = True
+    snapshot_format: str = "parquet"
+    replay_evidence_tiers: List[str] = field(
+        default_factory=lambda: ["native", "reconstructed_point_in_time"]
+    )
     
     def __post_init__(self):
         """Ensure paths are Path objects."""
@@ -152,11 +166,14 @@ class FeatureConfig:
     use_momentum_features: bool = True
     use_contextual_features: bool = True
     max_lag_days: int = 7
+    enabled_families: List[str] = field(default_factory=list)
+    coverage_gates: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class SimulationConfig:
     """Game simulation configuration."""
+    enabled: bool = True
     default_num_sims: int = 1000
     max_workers: int = 4
     use_gpu: bool = True
@@ -175,6 +192,8 @@ class SimulationConfig:
     use_four_factors: bool = True
     detailed_path_threshold: int = 250
     fast_path_threshold: int = 1000
+    regulation_team_minutes: int = 240
+    heuristic_policy: str = "registered_only"
 
 
 @dataclass
@@ -418,6 +437,14 @@ class Config:
     # Explicit training sample-weight policy. Kept as a mapping so policy
     # evolution does not require a breaking root-config dataclass change.
     weighting: Dict[str, Any] = field(default_factory=dict)
+    # Model-v2 sections are mappings on purpose: their schemas evolve with the
+    # forecast bundle contract, while the stable legacy configuration remains
+    # represented by typed dataclasses above.
+    architecture: str = "v2"
+    forecast: Dict[str, Any] = field(default_factory=dict)
+    models: Dict[str, Any] = field(default_factory=dict)
+    evaluation: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
     # Pluggable data-source extensions. Maps {scraper_name: {"enabled": bool, ...}}.
     # See src/data/base_scraper.py and the run_extension_scrapers hook in
     # update_data.py. Empty by default so existing behaviour is unchanged.
@@ -491,6 +518,16 @@ class Config:
             config.continual_learning = data['continual_learning']
         if 'weighting' in data:
             config.weighting = data['weighting']
+        if 'architecture' in data:
+            config.architecture = str(data['architecture'])
+        if 'forecast' in data:
+            config.forecast = data['forecast'] or {}
+        if 'models' in data:
+            config.models = data['models'] or {}
+        if 'evaluation' in data:
+            config.evaluation = data['evaluation'] or {}
+        if 'artifacts' in data:
+            config.artifacts = data['artifacts'] or {}
         if 'data_sources' in data:
             config.data_sources = data['data_sources']
 

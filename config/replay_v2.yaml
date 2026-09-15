@@ -1,0 +1,7 @@
+architecture: v2
+forecast_horizon: morning
+fold_policy: rolling_origin
+validation_days: 14
+test_days: 28
+min_train_days: 90
+bootstrap_samples: 2000

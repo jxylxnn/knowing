@@ -1,12 +1,5 @@
-from src.query.probability_calculator import ProbabilityCalculator
-from src.query.projection_loader import ProjectionLoader
-from src.query.query_parser import QueryParser, ParsedQuery
-from src.query.interactive_cli import InteractiveCLI
+"""Model v2 probability-query surface."""
 
-__all__ = [
-    'ProbabilityCalculator',
-    'ProjectionLoader',
-    'QueryParser',
-    'ParsedQuery',
-    'InteractiveCLI'
-]
+from src.query.v2_probability import probability_at_line, select_forecast
+
+__all__ = ["probability_at_line", "select_forecast"]

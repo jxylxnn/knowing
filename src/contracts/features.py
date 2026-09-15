@@ -113,16 +113,50 @@ def _load_pickle(path: Path) -> Any:
         raise FeatureSchemaContractError(f"Could not load feature schema: {path}") from exc
 
 
-def _extract_feature_columns(value: Any) -> list[str] | None:
+def _extract_feature_columns(
+    value: Any,
+    *,
+    _seen: set[int] | None = None,
+) -> list[str] | None:
+    """Extract a feature-name list from a schema payload without recursion.
+
+    Legacy pickles may contain arbitrary Python objects, including objects
+    whose ``features`` attribute refers back to themselves.  Schema
+    inspection is a validation boundary, so malformed payloads must produce a
+    normal contract error rather than exhausting the interpreter stack.
+    """
+
+    if _seen is None:
+        _seen = set()
+
     if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
         return list(value)
+
+    # Primitive values cannot contain schema metadata.  More importantly,
+    # skipping them avoids treating repeated interned values as cycles.
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return None
+
+    value_id = id(value)
+    if value_id in _seen:
+        return None
+    _seen.add(value_id)
+
     if isinstance(value, dict):
         for key in ("feature_cols", "features", "columns"):
-            columns = _extract_feature_columns(value.get(key))
+            columns = _extract_feature_columns(value.get(key), _seen=_seen)
             if columns is not None:
                 return columns
+        return None
+
     for attribute in ("feature_cols", "features", "columns"):
-        columns = _extract_feature_columns(getattr(value, attribute, None))
+        try:
+            nested = getattr(value, attribute, None)
+        except Exception:
+            # Schema validation must not invoke an untrusted descriptor twice
+            # or let an arbitrary payload property abort contract checks.
+            continue
+        columns = _extract_feature_columns(nested, _seen=_seen)
         if columns is not None:
             return columns
     return None

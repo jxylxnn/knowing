@@ -1,5 +1,7 @@
 # NBA Prediction System - Default Configuration
 
+architecture: v2
+
 # Data paths and storage settings
 data:
   data_dir: "data"
@@ -48,6 +50,31 @@ weighting:
   reference_date: "max_training_date"
 
 training_presets:
+  baseline:
+    description: "Model-v2 CatBoost-first baseline with priority point-in-time features."
+    default_mode: "standard"
+    default_model_size: "S"
+    transformer_enabled: false
+    recent_seasons: 4
+    rolling_windows: [3, 5, 10, 20]
+    feature_engineer:
+      enable_groups:
+        - "rolling"
+        - "efficiency"
+        - "momentum"
+        - "context"
+        - "fatigue"
+        - "minutes_confidence"
+        - "rest_density"
+        - "matchup"
+        - "opponent_strength"
+        - "pace"
+        - "team_role"
+        - "lineup_stability"
+        - "injury_opportunity"
+        - "teammate_usage"
+        - "recency_form"
+        - "defense_position"
   full:
     description: "Full CatBoost + Transformer stack with the complete feature set."
     default_mode: "standard"

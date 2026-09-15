@@ -1,277 +1,78 @@
+#!/usr/bin/env python3
+"""Query an immutable Model v2 player-stat forecast."""
+
+from __future__ import annotations
+
 import argparse
-import sys
-import logging
+import json
+from pathlib import Path
 
-if sys.platform == "win32":
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    else:
-        import io
-        if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding.lower() != 'utf-8':
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from src.operations.ledger import OfficialForecastLedger
+from src.query.v2_probability import probability_at_line, select_forecast
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='NBA Player Stat Over/Under Probability Query Tool',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  Interactive mode:
-    python query_prob.py
-    
-  One-shot query:
-    python query_prob.py --player "LeBron James" --stat pts --line 25.5
-    python query_prob.py -p "Jokic" -s reb -l 12.5 --opponent DEN
-    
-  With custom simulations:
-    python query_prob.py -p "Curry" -s pts -l 30.5 --sims 500
-    
-  List available data:
-    python query_prob.py --list-players
-    python query_prob.py --list-teams
-        """
-    )
-    
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--player", "-p", required=True, help="Player ID or exact name")
     parser.add_argument(
-        '-p', '--player',
-        type=str,
-        help='Player name to query'
+        "--stat", "-s", required=True,
+        choices=("pts", "reb", "ast", "stl", "blk", "tov"),
     )
-    
-    parser.add_argument(
-        '-s', '--stat',
-        type=str,
-        choices=['pts', 'reb', 'ast', 'stl', 'blk', 'tov'],
-        help='Stat type (pts, reb, ast, stl, blk, tov)'
-    )
-    
-    parser.add_argument(
-        '-l', '--line',
-        type=float,
-        help='Over/under line'
-    )
-    
-    parser.add_argument(
-        '-o', '--opponent',
-        type=str,
-        help='Opponent team abbreviation'
-    )
-    
-    parser.add_argument(
-        '-t', '--team',
-        type=str,
-        help='Player team abbreviation'
-    )
-    
-    parser.add_argument(
-        '-d', '--date',
-        type=str,
-        help='Game date (YYYY-MM-DD)'
-    )
-    
-    parser.add_argument(
-        '--over',
-        action='store_true',
-        help='Show probability of going OVER the line'
-    )
-    
-    parser.add_argument(
-        '--under',
-        action='store_true',
-        help='Show probability of going UNDER the line'
-    )
-    
-    parser.add_argument(
-        '--compare',
-        type=str,
-        nargs='+',
-        help='Compare multiple players (provide 2+ player names)'
-    )
-    
-    parser.add_argument(
-        '--list-players',
-        action='store_true',
-        help='List all available players'
-    )
-    
-    parser.add_argument(
-        '--list-teams',
-        action='store_true',
-        help='List all available teams'
-    )
-    
-    parser.add_argument(
-        '--reload',
-        action='store_true',
-        help='Force reload projection data'
-    )
-    
-    parser.add_argument(
-        '--data-dir',
-        type=str,
-        default='data/sim_results',
-        help='Directory containing projection data'
-    )
-    
-    parser.add_argument(
-        '--json',
-        action='store_true',
-        help='Output results as JSON'
-    )
-
-    parser.add_argument(
-        '--explain',
-        action='store_true',
-        help='Include evidence-based reasoning for the requested stat'
-    )
-    parser.add_argument(
-        '--allow-legacy-artifacts', action='store_true',
-        help='Use quarantined legacy artifacts for migration-only live diagnostics',
-    )
-    
-    parser.add_argument(
-        '--sims',
-        type=int,
-        default=100,
-        help='Number of simulations for live projections (default: 100)'
-    )
-    
+    parser.add_argument("--line", "-l", type=float, default=None)
+    parser.add_argument("--date", "-d", default=None)
+    parser.add_argument("--forecast-file", default=None)
+    parser.add_argument("--ledger-dir", default="data/ledger")
+    parser.add_argument("--players-file", default="data/nba_players.csv")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    
-    from src.query.interactive_cli import InteractiveCLI
-    from src.query.probability_calculator import ProbabilityCalculator
-    from src.query.projection_loader import ProjectionLoader
-    
-    cli = InteractiveCLI(
-        data_dir=args.data_dir,
-        num_sims=args.sims,
-        allow_legacy_artifacts=args.allow_legacy_artifacts,
-    )
-    
-    if args.list_players:
-        cli._list_players()
-        return
-    
-    if args.list_teams:
-        cli._list_teams()
-        return
-    
-    if args.reload:
-        cli._reload()
-        return
-    
-    if args.compare and len(args.compare) >= 2:
-        from src.query.query_parser import ParsedQuery, QueryType
-        parsed = ParsedQuery(
-            query_type=QueryType.COMPARE,
-            compare_players=args.compare,
-            stat=args.stat or 'pts'
-        )
-        cli._handle_compare(parsed)
-        return
-    
-    if args.player:
-        if not args.stat:
-            args.stat = 'pts'
-        
-        loader = ProjectionLoader(data_dir=args.data_dir)
-        projection = loader.find_player(
-            player_name=args.player,
-            team=args.team,
-            opponent=args.opponent,
-            date=args.date
-        )
-        
-        if projection is None:
-            print(f"Player '{args.player}' not found in projections.")
-            if not args.json:
-                print("\nRun in interactive mode to perform live simulations:")
-                print("  python query_prob.py")
-            else:
-                print('{"error": "Player not found"}')
-            return
-        
-        if args.line is None:
-            mean_val = projection.get_stat_mean(args.stat)
-            args.line = round(mean_val - 0.5) + 0.5
-        
-        context = loader.get_player_context(
-            player_name=projection.player_name,
-            opponent=projection.opponent,
-            stat=args.stat
-        )
-        
-        calculator = ProbabilityCalculator()
-        result = calculator.calculate_from_projection(
-            player_name=projection.player_name,
-            stat=args.stat,
-            line=args.line,
-            mean=projection.get_stat_mean(args.stat),
-            std=projection.get_stat_std(args.stat),
-            ci_low=projection.get_stat_ci(args.stat)[0],
-            ci_high=projection.get_stat_ci(args.stat)[1],
-            opponent=projection.opponent,
-            date=projection.date,
-            play_probability=projection.play_probability,
-            num_sims=args.sims
-        )
-        
-        result.team = projection.team
-        result.is_home = projection.is_home
-        result.recent_games = context.get('recent_games')
-        result.recent_avg = context.get('recent_avg')
-        result.matchup_history = context.get('matchup_history')
-        result.matchup_avg = context.get('matchup_avg')
-        result.opponent_defense = context.get('opponent_defense')
-        result.trend = context.get('trend')
 
-        reasoning = None
-        if args.explain:
-            reasoning = cli.get_projection_reasoning(
-                projection.player_name,
-                stat=args.stat,
-                opponent=projection.opponent,
-            )
-        
-        if args.json:
-            import json
-            payload = result.to_dict()
-            if reasoning is not None:
-                payload['reasoning'] = (
-                    reasoning.to_dict() if hasattr(reasoning, 'to_dict') else reasoning
-                )
-            print(json.dumps(payload, indent=2))
-        else:
-            print(calculator.format_detailed_result(result))
-            if reasoning is not None:
-                if isinstance(reasoning, dict):
-                    print(cli._format_cached_reasoning(reasoning, args.stat))
-                else:
-                    from src.reasoning import ReasoningEngine
-                    print(ReasoningEngine.format_concise(reasoning, args.stat))
-        
-        return
-    
-    cli.run()
+    forecasts = (
+        pd.read_parquet(args.forecast_file)
+        if args.forecast_file
+        else OfficialForecastLedger(args.ledger_dir).load_forecasts()
+    )
+    names_path = Path(args.players_file)
+    names = pd.read_csv(names_path) if names_path.is_file() else None
+    try:
+        row = select_forecast(
+            forecasts,
+            player=args.player,
+            stat=args.stat,
+            game_date=args.date,
+            player_names=names,
+        )
+    except ValueError as exc:
+        print(json.dumps({"status": "not_found", "error": str(exc)}))
+        return 3
+
+    payload = {
+        "status": "ok",
+        "request_id": str(row["REQUEST_ID"]),
+        "bundle_id": str(row["MODEL_BUNDLE_ID"]),
+        "snapshot_id": str(row["SOURCE_SNAPSHOT_ID"]),
+        "player_id": str(row["PLAYER_ID"]),
+        "stat": str(row["STAT"]),
+        "mean": float(row["MEAN"]),
+        "p10": float(row["P10"]),
+        "p50": float(row["P50"]),
+        "p90": float(row["P90"]),
+        "calibration_version": str(row["CALIBRATION_VERSION"]),
+        "data_quality": str(row["DATA_QUALITY"]),
+    }
+    if args.line is not None:
+        try:
+            probabilities = probability_at_line(row, args.line)
+        except ValueError as exc:
+            payload.update({"status": "invalid_query", "error": str(exc)})
+            print(json.dumps(payload, indent=2 if args.json else None, sort_keys=True))
+            return 2
+        payload["line"] = args.line
+        payload.update(probabilities)
+    print(json.dumps(payload, indent=2 if args.json else None, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\nGoodbye!")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\nFATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    raise SystemExit(main())
