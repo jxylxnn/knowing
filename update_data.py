@@ -118,13 +118,17 @@ def get_seasons_between_dates(start_date: str, end_date: Optional[str] = None) -
             for year in range(first_year, last_year + 1)]
 
 
-def fetch_player_logs(season: str) -> Optional[pd.DataFrame]:
+def fetch_player_logs(
+    season: str,
+    request_timeout: int = 30,
+) -> Optional[pd.DataFrame]:
     logger.info(f"Fetching player game logs for {season}...")
     
     try:
         result = playergamelogs.PlayerGameLogs(
             season_nullable=season,
-            season_type_nullable='Regular Season'
+            season_type_nullable='Regular Season',
+            timeout=request_timeout,
         )
         df = result.get_data_frames()[0]
         
@@ -153,13 +157,17 @@ def fetch_player_logs(season: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def fetch_team_logs(season: str) -> Optional[pd.DataFrame]:
+def fetch_team_logs(
+    season: str,
+    request_timeout: int = 30,
+) -> Optional[pd.DataFrame]:
     logger.info(f"Fetching team game logs for {season}...")
     
     try:
         result = teamgamelogs.TeamGameLogs(
             season_nullable=season,
-            season_type_nullable='Regular Season'
+            season_type_nullable='Regular Season',
+            timeout=request_timeout,
         )
         df = result.get_data_frames()[0]
         
@@ -178,7 +186,11 @@ def fetch_team_logs(season: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def fetch_player_logs_since(season: str, date_from: str) -> Optional[pd.DataFrame]:
+def fetch_player_logs_since(
+    season: str,
+    date_from: str,
+    request_timeout: int = 30,
+) -> Optional[pd.DataFrame]:
     """Fetch player game logs from a specific date onwards."""
     logger.info(f"Fetching player game logs for {season} from {date_from}...")
     
@@ -186,7 +198,8 @@ def fetch_player_logs_since(season: str, date_from: str) -> Optional[pd.DataFram
         result = playergamelogs.PlayerGameLogs(
             season_nullable=season,
             season_type_nullable='Regular Season',
-            date_from_nullable=date_from
+            date_from_nullable=date_from,
+            timeout=request_timeout,
         )
         df = result.get_data_frames()[0]
         
@@ -215,7 +228,11 @@ def fetch_player_logs_since(season: str, date_from: str) -> Optional[pd.DataFram
         return None
 
 
-def fetch_team_logs_since(season: str, date_from: str) -> Optional[pd.DataFrame]:
+def fetch_team_logs_since(
+    season: str,
+    date_from: str,
+    request_timeout: int = 30,
+) -> Optional[pd.DataFrame]:
     """Fetch team game logs from a specific date onwards."""
     logger.info(f"Fetching team game logs for {season} from {date_from}...")
     
@@ -223,7 +240,8 @@ def fetch_team_logs_since(season: str, date_from: str) -> Optional[pd.DataFrame]
         result = teamgamelogs.TeamGameLogs(
             season_nullable=season,
             season_type_nullable='Regular Season',
-            date_from_nullable=date_from
+            date_from_nullable=date_from,
+            timeout=request_timeout,
         )
         df = result.get_data_frames()[0]
         
@@ -395,10 +413,14 @@ def check_empty_data(players_file: str, games_file: str) -> Tuple[bool, Optional
     return False, None
 
 
-def update_season(season: str, existing_players: Optional[pd.DataFrame], 
-                  existing_teams: Optional[pd.DataFrame]) -> tuple:
-    player_df = fetch_player_logs(season)
-    team_df = fetch_team_logs(season)
+def update_season(
+    season: str,
+    existing_players: Optional[pd.DataFrame],
+    existing_teams: Optional[pd.DataFrame],
+    request_timeout: int = 30,
+) -> tuple:
+    player_df = fetch_player_logs(season, request_timeout=request_timeout)
+    team_df = fetch_team_logs(season, request_timeout=request_timeout)
     
     if player_df is not None:
         existing_players = merge_data(
@@ -415,8 +437,12 @@ def update_season(season: str, existing_players: Optional[pd.DataFrame],
     return existing_players, existing_teams
 
 
-def update_since_date(date_from: str, existing_players: Optional[pd.DataFrame], 
-                      existing_teams: Optional[pd.DataFrame]) -> tuple:
+def update_since_date(
+    date_from: str,
+    existing_players: Optional[pd.DataFrame],
+    existing_teams: Optional[pd.DataFrame],
+    request_timeout: int = 30,
+) -> tuple:
     """Fetch only new games since the specified date."""
     seasons = get_seasons_between_dates(date_from)
     
@@ -428,8 +454,16 @@ def update_since_date(date_from: str, existing_players: Optional[pd.DataFrame],
         logger.info(f"Fetching new games for {season} since {date_from}")
         logger.info(f"{'='*50}")
         
-        player_df = fetch_player_logs_since(season, date_from)
-        team_df = fetch_team_logs_since(season, date_from)
+        player_df = fetch_player_logs_since(
+            season,
+            date_from,
+            request_timeout=request_timeout,
+        )
+        team_df = fetch_team_logs_since(
+            season,
+            date_from,
+            request_timeout=request_timeout,
+        )
         
         if player_df is not None:
             if existing_players is not None:
@@ -494,34 +528,77 @@ def save_data(players_df: pd.DataFrame, teams_df: pd.DataFrame,
 def enrich_with_player_bios(
     players_df: pd.DataFrame,
     data_dir: str,
+    refresh_missing: bool = True,
 ) -> pd.DataFrame:
     """Merge AGE, POSITION, and other bio columns into player game logs.
 
-    Fetches bio data for all unique PLAYER_IDs via PlayerBioScraper,
-    then left-joins onto the player DataFrame.  Non-fatal on failure.
+    Reuses saved bio data and, when ``refresh_missing`` is true, fetches
+    uncached players via PlayerBioScraper. Non-fatal on failure.
     """
     try:
         from src.data.player_bio_scraper import PlayerBioScraper
-        cache_dir = os.path.join(data_dir, 'cache')
-        bio_scraper = PlayerBioScraper(cache_dir=cache_dir)
-
         unique_ids = players_df['PLAYER_ID'].unique().tolist()
         if not unique_ids:
             return players_df
 
-        logger.info(f"Enriching {len(unique_ids)} players with bio data...")
-        bio_df = bio_scraper.fetch_all_bios(unique_ids)
+        cache_dir = os.path.join(data_dir, 'cache')
+        bio_scraper = PlayerBioScraper(cache_dir=cache_dir)
+        if refresh_missing:
+            logger.info(f"Enriching {len(unique_ids)} players with bio data...")
+            bio_df = bio_scraper.fetch_all_bios(unique_ids)
+        else:
+            bio_sources = [
+                os.path.join(data_dir, 'player_bios.csv'),
+                os.path.join(cache_dir, 'player_bios.csv'),
+            ]
+            cached_frames = []
+            for bio_source in bio_sources:
+                if not os.path.isfile(bio_source):
+                    continue
+                cached = pd.read_csv(bio_source)
+                if 'PLAYER_ID' in cached.columns:
+                    cached_frames.append(cached)
+
+            if cached_frames:
+                bio_df = pd.concat(cached_frames, ignore_index=True)
+                bio_df = bio_df.drop_duplicates('PLAYER_ID', keep='last')
+                bio_df = bio_df[bio_df['PLAYER_ID'].isin(unique_ids)]
+                logger.info(
+                    "Reusing %d cached player bios; live bio refresh disabled.",
+                    len(bio_df),
+                )
+            else:
+                logger.warning(
+                    "No cached player bios found; keeping existing player "
+                    "columns without making per-player API requests."
+                )
+                return players_df
 
         if bio_df.empty:
             logger.warning("PlayerBioScraper returned empty; skipping bio enrichment")
             return players_df
 
-        bio_subset = bio_df[[
+        bio_subset = bio_df.reindex(columns=[
             'PLAYER_ID', 'BIRTHDATE', 'POSITION', 'HEIGHT',
             'WEIGHT', 'DRAFT_YEAR', 'CAREER_START', 'YEARS_EXPERIENCE',
-        ]].drop_duplicates('PLAYER_ID')
+        ]).drop_duplicates('PLAYER_ID')
 
-        enriched = players_df.merge(bio_subset, on='PLAYER_ID', how='left')
+        enriched = players_df.merge(
+            bio_subset,
+            on='PLAYER_ID',
+            how='left',
+            suffixes=('', '_BIO'),
+        )
+        for column in bio_subset.columns:
+            if column == 'PLAYER_ID':
+                continue
+            bio_column = f'{column}_BIO'
+            if bio_column not in enriched.columns:
+                continue
+            enriched[column] = enriched[bio_column].combine_first(
+                enriched[column]
+            )
+            enriched = enriched.drop(columns=bio_column)
 
         # Compute age relative to each game date to avoid future-age leakage
         # into historical training rows.
@@ -665,8 +742,10 @@ Examples:
   python update_data.py --all-seasons      # Last 10 seasons
   python update_data.py --interactive      # Interactive selection (RECOMMENDED)
   python update_data.py --full-scrape      # All NBA seasons since 1946-47
+  python update_data.py --update --bio-mode cached  # Avoid per-player API calls
   python update_data.py --force            # Force re-fetch (ignore existing data)
   python update_data.py --update --snapshot  # Also write immutable local snapshot
+  python update_data.py --update --bio-mode cached  # Reuse saved bios; no bio API calls
 
 Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have limited data.
         """
@@ -689,8 +768,25 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
                         help='Fetch current season only')
     parser.add_argument('--snapshot', action='store_true',
                         help='Write an immutable source snapshot after a successful update')
+    parser.add_argument(
+        '--bio-mode',
+        choices=('refresh', 'cached', 'skip'),
+        default='refresh',
+        help=(
+            'Player bio behavior: refresh missing bios from NBA.com, reuse only '
+            'saved bios, or skip bio enrichment (default: refresh)'
+        ),
+    )
+    parser.add_argument(
+        '--request-timeout',
+        type=int,
+        default=30,
+        help='Timeout in seconds for each NBA game-log request (default: 30)',
+    )
     
     args = parser.parse_args()
+    if args.request_timeout < 1:
+        parser.error('--request-timeout must be at least 1 second')
     
     data_dir = args.data_dir
     players_file = os.path.join(data_dir, 'nba_players.csv')
@@ -766,12 +862,21 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
     
     if incremental_update and date_from:
         existing_players, existing_teams, new_players, new_teams = update_since_date(
-            date_from, existing_players, existing_teams
+            date_from,
+            existing_players,
+            existing_teams,
+            request_timeout=args.request_timeout,
         )
         
         if existing_players is not None and existing_teams is not None:
-            # Enrich player data with bio (age, position, etc.)
-            existing_players = enrich_with_player_bios(existing_players, data_dir)
+            if args.bio_mode != 'skip':
+                existing_players = enrich_with_player_bios(
+                    existing_players,
+                    data_dir,
+                    refresh_missing=args.bio_mode == 'refresh',
+                )
+            else:
+                logger.info("Skipping player bio enrichment by request.")
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             # Log current injuries to persistent history
             log_injury_snapshot(data_dir)
@@ -795,12 +900,21 @@ Note: nba_api has reliable data from 1996-97 onward. Earlier seasons may have li
             logger.info(f"{'='*50}")
             
             existing_players, existing_teams = update_season(
-                season, existing_players, existing_teams
+                season,
+                existing_players,
+                existing_teams,
+                request_timeout=args.request_timeout,
             )
         
         if existing_players is not None and existing_teams is not None:
-            # Enrich player data with bio (age, position, etc.)
-            existing_players = enrich_with_player_bios(existing_players, data_dir)
+            if args.bio_mode != 'skip':
+                existing_players = enrich_with_player_bios(
+                    existing_players,
+                    data_dir,
+                    refresh_missing=args.bio_mode == 'refresh',
+                )
+            else:
+                logger.info("Skipping player bio enrichment by request.")
             save_data(existing_players, existing_teams, data_dir, players_file, games_file)
             # Log current injuries to persistent history
             log_injury_snapshot(data_dir)
