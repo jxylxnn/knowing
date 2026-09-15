@@ -74,12 +74,31 @@ def test_colab_quick_mode_is_bounded_and_colab_compatible():
     notebook_path = Path(__file__).resolve().parents[2] / "train_colab.ipynb"
     notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
     source = "".join(notebook["cells"][1]["source"])
+    requirements_source = (
+        notebook_path.parent / "requirements.txt"
+    ).read_text(encoding="utf-8")
+    requirements_pins = {}
+    for line in requirements_source.splitlines():
+        if "==" in line and not line.lstrip().startswith("#"):
+            distribution, version = line.split("==", 1)
+            requirements_pins[distribution] = version
 
     assert 'DATA_REFRESH = "quick"' in source
     assert '["--bio-mode", "cached", "--request-timeout", "10"]' in source
     assert 'DATA_REFRESH == "current_files"' in source
     assert "create_source_snapshot(DATA_DIR)" in source
     assert 'DATA_REFRESH == "reuse_latest"' in source
-    assert '"numpy==2.2.6"' in source
-    assert '"pandas==2.2.3"' in source
-    assert '"requests==2.32.4"' in source
+    for distribution in (
+        "numpy", "pandas", "scipy", "scikit-learn", "PyYAML", "joblib",
+        "nba_api", "requests", "curl-cffi",
+    ):
+        assert (
+            f'"{distribution}=={requirements_pins[distribution]}"' in source
+        )
+    assert "from importlib import metadata" in source
+    assert "module in sys.modules" in source
+    assert "import numpy, numpy.strings, pandas" in source
+    assert "kernel.do_shutdown(restart=True)" in source
+    assert source.index("packages = [") < source.index(
+        "from google.colab import drive"
+    )
