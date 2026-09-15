@@ -13,6 +13,8 @@ def main():
     mode.add_argument("--native", choices=("schedule", "rosters"))
     parser.add_argument("--season")
     parser.add_argument("--team-id", type=int, action="append")
+    parser.add_argument("--request-timeout", type=float, default=30)
+    parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--table", choices=tuple(REQUIRED))
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
@@ -22,9 +24,20 @@ def main():
         from src.data.nba_capture import capture_nba_rosters, capture_nba_schedule
 
         if args.native == "schedule":
-            result = capture_nba_schedule(args.data_dir, season=args.season)
+            result = capture_nba_schedule(
+                args.data_dir,
+                season=args.season,
+                request_timeout=args.request_timeout,
+                max_attempts=args.max_attempts,
+            )
         else:
-            result = capture_nba_rosters(args.data_dir, season=args.season, team_ids=args.team_id)
+            result = capture_nba_rosters(
+                args.data_dir,
+                season=args.season,
+                team_ids=args.team_id,
+                request_timeout=args.request_timeout,
+                max_attempts=args.max_attempts,
+            )
     else:
         if not args.table:
             parser.error("--table is required with --url")
