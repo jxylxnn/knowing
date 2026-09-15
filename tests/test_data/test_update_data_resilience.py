@@ -77,6 +77,8 @@ def test_colab_quick_mode_is_bounded_and_colab_compatible():
 
     assert 'DATA_REFRESH = "quick"' in source
     assert '["--bio-mode", "cached", "--request-timeout", "10"]' in source
+    assert 'DATA_REFRESH == "current_files"' in source
+    assert "create_source_snapshot(DATA_DIR)" in source
     assert 'DATA_REFRESH == "reuse_latest"' in source
     assert '"numpy==2.2.6"' in source
     assert '"pandas==2.2.3"' in source
